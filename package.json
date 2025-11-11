@@ -8,12 +8,16 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "test": "echo \"No tests specified\"",
     "prepare": "husky",
     "release": "node scripts/release.js",
     "release:major": "node scripts/release.js major",
     "release:minor": "node scripts/release.js minor",
-    "release:patch": "node scripts/release.js patch"
+    "release:patch": "node scripts/release.js patch",
+    "format": "prettier --write .",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
