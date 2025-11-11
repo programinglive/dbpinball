@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.3](https://github.com/programinglive/dbpinball/compare/v0.1.2...v0.1.3) (2025-11-11)
+
+
+### ✅ Tests
+
+* cover connections context menu and failure flows ([a584747](https://github.com/programinglive/dbpinball/commit/a584747b24121fed33fc83e94ecc63d546f2ebfc))
+
 ### [0.1.2](https://github.com/programinglive/dbpinball/compare/v0.1.1...v0.1.2) (2025-11-11)
 
 
