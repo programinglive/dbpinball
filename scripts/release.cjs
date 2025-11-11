@@ -4,12 +4,13 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const { updateReleaseNotes } = require('./update-release-notes');
+const commiterScriptsDir = path.dirname(require.resolve('@programinglive/commiter/scripts/release.js'));
+const { updateReleaseNotes } = require('@programinglive/commiter/scripts/update-release-notes');
 
-const fsFokPreloadPath = path.join(__dirname, 'preload', 'fs-f-ok.cjs');
+const fsFokPreloadPath = path.join(commiterScriptsDir, 'preload', 'fs-f-ok.cjs');
 const FS_FOK_PRELOAD_FLAG = buildPreloadFlag(fsFokPreloadPath);
 
-require('./preload/fs-f-ok.cjs');
+require(path.join(commiterScriptsDir, 'preload', 'fs-f-ok.cjs'));
 
 const VALID_RELEASE_TYPES = new Set([
   'major',
