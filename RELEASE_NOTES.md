@@ -1,0 +1,36 @@
+# dbpinball Release Notes
+
+## v0.1.0 (2025-11-11)
+
+### ✨ Features
+- Initial Tauri desktop application for Windows, macOS, and Linux.
+- React + TypeScript UI with shadcn components and Tailwind CSS v4 styling.
+- Connection vault with secure password storage using OS keyring.
+- MySQL backups via `mysqldump` with fallback to internal sqlx dumper.
+- PostgreSQL backups via `pg_dump` with sqlx fallback.
+- Restore workflows with drop schema and stop-on-error options.
+- Same-engine database copy (MySQL→MySQL, PostgreSQL→PostgreSQL).
+- Real-time job progress via Tauri event streaming and UI log viewer.
+- Job history view with status updates and artifact links.
+
+### 🛠️ Tooling & DX
+- @programinglive/commiter configured for conventional commits and semantic versioning.
+- Husky commit hooks with commitlint enforcement.
+- Release scripts via `npm run release`, `release:major`, `release:minor`, `release:patch`.
+- Extensive documentation: README, PRD, Quick Start, Development Guide, Commiter Setup.
+
+### 🧱 Known Limitations
+- SSH tunneling not yet implemented (planned Phase 2).
+- Cross-engine copy (MySQL ↔ PostgreSQL) scheduled for Phase 2.
+- Job history currently stored in localStorage (future enhancement: persistent store).
+- Parallel dumps, resumable jobs, and scheduled backups planned for future releases.
+
+---
+
+## Upcoming (Phase 2 Roadmap)
+- SSH tunnel support for secure remote database access.
+- Cross-engine copy with best-effort type mapping.
+- Parallel table dumps and resumable jobs.
+- Automated integration tests with dockerized MySQL/PostgreSQL.
+
+For detailed requirements and roadmap, refer to [PRD.md](./PRD.md).

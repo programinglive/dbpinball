@@ -47,12 +47,3 @@ pub struct CopyOptions {
     pub data: bool,
     pub drop_in_target: bool,
 }
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[allow(dead_code)]
-pub struct JobResult {
-    pub job_id: String,
-    pub status: String,
-    pub artifact_path: Option<String>,
-    pub error: Option<String>,
-}
