@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.2](https://github.com/programinglive/dbpinball/compare/v0.1.1...v0.1.2) (2025-11-11)
+
+
+### 📝 Documentation
+
+* relocate release notes under docs directory ([618a05d](https://github.com/programinglive/dbpinball/commit/618a05d0249a6e69ebb6659212be898f8f61c97a))
+
+
+### ♻️ Refactors
+
+* simplify app layout to connections-only with toolbar dropdown ([102d3a4](https://github.com/programinglive/dbpinball/commit/102d3a4d0a4e40d0e463321a141e007db1d355d7))
+
+
+### ✨ Features
+
+* add list_databases command for MySQL and PostgreSQL ([974afd1](https://github.com/programinglive/dbpinball/commit/974afd1fa09cad199bdee30bd49e79273318774e))
+* implement workspace overlay with TablePlus-style layout ([69259cf](https://github.com/programinglive/dbpinball/commit/69259cf2255c6b3bb3504db9e3ee855a923191a6))
+
+
+### 🧹 Chores
+
+* add context-menu UI component ([cb20dd0](https://github.com/programinglive/dbpinball/commit/cb20dd00746c738bf7c2c43e6d4c1c17825483e4))
+* update dependencies and minor component fixes ([c8de68c](https://github.com/programinglive/dbpinball/commit/c8de68c824ca00832231de528c8cf0eb06a80b59))
+
 ### 0.1.1 (2025-11-11)
 
 
