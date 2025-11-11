@@ -1,55 +1,98 @@
+import { useRef, type ReactNode } from "react";
 import { BrowserRouter as Router } from "react-router-dom";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import ConnectionsPage from "@/pages/connections";
-import BackupPage from "@/pages/backup";
-import RestorePage from "@/pages/restore";
-import CopyPage from "@/pages/copy";
-import JobsPage from "@/pages/jobs";
+import { Input } from "@/components/ui/input";
+import ConnectionsPage, { type ConnectionsPageHandle } from "@/pages/connections";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import type { LucideIcon } from "lucide-react";
+import { Database, Plus, Search } from "lucide-react";
 import "./App.css";
 
+type NavItem = {
+  value: "connections";
+  label: string;
+  description: string;
+  icon: LucideIcon;
+};
+
+const NAV_ITEMS: NavItem[] = [
+  {
+    value: "connections",
+    label: "Connections",
+    description: "Create connection…",
+    icon: Database,
+  },
+];
+
+const Panel = ({ children }: { children: ReactNode }) => <section className="panel">{children}</section>;
+
 function App() {
+  const connectionsRef = useRef<ConnectionsPageHandle | null>(null);
+
   return (
     <Router>
-      <div className="min-h-screen bg-background">
-        <div className="border-b">
-          <div className="container mx-auto px-4 py-4">
-            <h1 className="text-3xl font-bold">dbpinball</h1>
-            <p className="text-sm text-muted-foreground">Database Backup, Restore & Copy Tool</p>
-          </div>
-        </div>
-
-        <div className="container mx-auto px-4 py-8">
-          <Tabs defaultValue="connections" className="w-full">
-            <TabsList className="grid w-full grid-cols-5">
-              <TabsTrigger value="connections">Connections</TabsTrigger>
-              <TabsTrigger value="backup">Backup</TabsTrigger>
-              <TabsTrigger value="restore">Restore</TabsTrigger>
-              <TabsTrigger value="copy">Copy</TabsTrigger>
-              <TabsTrigger value="jobs">Jobs</TabsTrigger>
+      <Tabs defaultValue="connections" className="app-shell">
+        <div className="app-layout">
+          <aside className="nav-rail">
+            <TabsList className="nav-rail__tabs" aria-label="Workspace areas">
+              {NAV_ITEMS.map(({ value, label, description, icon: Icon }) => (
+                <TabsTrigger key={value} value={value} className="nav-rail__trigger">
+                  <Icon className="nav-rail__trigger-icon" size={18} />
+                  <div className="nav-rail__trigger-text">
+                    <span>{label}</span>
+                    <small>{description}</small>
+                  </div>
+                </TabsTrigger>
+              ))}
             </TabsList>
+          </aside>
 
-            <TabsContent value="connections" className="mt-6">
-              <ConnectionsPage />
-            </TabsContent>
+          <main className="main-stage">
+            <header className="main-stage__toolbar">
+              <div className="toolbar__left">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="toolbar__icon-button" type="button" aria-label="Add database connection">
+                      <Plus size={16} />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="bottom" align="start" sideOffset={8} className="toolbar__menu">
+                    <DropdownMenuItem
+                      className="toolbar__menu-item"
+                      onSelect={() => connectionsRef.current?.openNewConnection("mysql")}
+                    >
+                      Add MySQL Connection
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="toolbar__menu-item"
+                      onSelect={() => connectionsRef.current?.openNewConnection("postgres")}
+                    >
+                      Add PostgreSQL Connection
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <div className="toolbar__search">
+                  <Search className="toolbar__search-icon" size={16} />
+                  <Input placeholder="Search for connection… (Ctrl F)" className="toolbar__search-input" />
+                </div>
+              </div>
+            </header>
 
-            <TabsContent value="backup" className="mt-6">
-              <BackupPage />
-            </TabsContent>
-
-            <TabsContent value="restore" className="mt-6">
-              <RestorePage />
-            </TabsContent>
-
-            <TabsContent value="copy" className="mt-6">
-              <CopyPage />
-            </TabsContent>
-
-            <TabsContent value="jobs" className="mt-6">
-              <JobsPage />
-            </TabsContent>
-          </Tabs>
+            <section className="main-stage__content">
+              <TabsContent value="connections" className="workspace__panel" forceMount>
+                <Panel>
+                  <ConnectionsPage ref={connectionsRef} />
+                </Panel>
+              </TabsContent>
+            </section>
+          </main>
         </div>
-      </div>
+      </Tabs>
     </Router>
   );
 }
