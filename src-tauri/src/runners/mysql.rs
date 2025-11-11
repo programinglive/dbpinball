@@ -22,6 +22,31 @@ pub async fn test(conn: DbConnection) -> Result<()> {
     Ok(())
 }
 
+pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
+    let password = secrets::get_password(&conn.id)?;
+    let fallback = if conn.database.trim().is_empty() {
+        "information_schema".to_string()
+    } else {
+        conn.database.clone()
+    };
+    let url = format!(
+        "mysql://{}:{}@{}:{}/{}",
+        conn.username, password, conn.host, conn.port, fallback
+    );
+    let pool = sqlx::MySqlPool::connect(&url).await?;
+    let names: Vec<String> = sqlx::query_scalar("SHOW DATABASES").fetch_all(&pool).await?;
+    let filtered = names
+        .into_iter()
+        .filter(|name| {
+            !matches!(
+                name.as_str(),
+                "information_schema" | "performance_schema" | "mysql" | "sys"
+            )
+        })
+        .collect();
+    Ok(filtered)
+}
+
 pub async fn backup(
     window: &Window,
     conn: DbConnection,

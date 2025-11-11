@@ -4,11 +4,17 @@ pub mod postgres;
 use crate::models::*;
 use anyhow::Result;
 use tauri::Window;
-
 pub async fn test_connection(conn: DbConnection) -> Result<()> {
     match conn.engine {
         DbEngine::Mysql => mysql::test(conn).await,
         DbEngine::Postgres => postgres::test(conn).await,
+    }
+}
+
+pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
+    match conn.engine {
+        DbEngine::Mysql => mysql::list_databases(conn).await,
+        DbEngine::Postgres => postgres::list_databases(conn).await,
     }
 }
 
