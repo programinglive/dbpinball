@@ -1,5 +1,19 @@
 # dbpinball Release Notes
 
+## v0.1.2 (2025-11-11)
+
+### ✨ Features
+- Introduced a TablePlus-inspired full-screen workspace overlay triggered from the Connections page.
+- Added database enumeration in the workspace sidebar by wiring new `list_databases_cmd` backend command.
+
+### ♻️ Refactors
+- Simplified the shell navigation to focus on the Connections experience with a toolbar dropdown for new connections.
+
+### ✅ Tests
+- Added Vitest + Testing Library harness with initial regression tests covering the connections workflow and workspace overlay.
+
+---
+
 ## v0.1.0 (2025-11-11)
 
 ### ✨ Features

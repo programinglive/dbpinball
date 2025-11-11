@@ -1,17 +1,15 @@
 # dbpinball
 
-A powerful, one-click database backup, restore, and copy tool for MySQL and PostgreSQL. Built with Tauri, React, and TypeScript.
+A streamlined database workspace inspired by TablePlus, built with Tauri, React, and TypeScript. Manage connections, inspect available databases, and prepare for backup/restore workflows.
 
 ## Features
 
-- **Quick Backup**: Choose connection → pick backup type (structure+data, structure only, data only) → produce .sql (optionally zipped)
-- **Restore**: Choose target connection → select .sql/.dump → import with options (drop schema first, stop-on-error, etc.)
-- **Copy Database**: Source → target → copy all or selected objects (tables, views, functions, triggers)
-- **Job History**: List of runs with logs, status, duration, artifacts, re-run button
-- **Connection Vault**: Save named connections; credentials encrypted in OS keystore
-- **Real-time Progress**: Stream logs and progress updates live to the UI
-- **Vendor Tool Support**: Uses native tools (mysqldump, mysql, pg_dump, psql) when available; falls back to internal dumper
-- **Cross-platform**: Windows, macOS, Linux (via Tauri)
+- **TablePlus-style Workspace**: Double-click or connect from the connections list to enter a full-screen workspace overlay for the selected database server.
+- **Database Sidebar**: View available databases fetched via the new `list_databases_cmd` backend command.
+- **Connection Inspector**: Review connection metadata (host, port, user, SSL status) alongside the workspace canvas.
+- **Connection Vault**: Save named connections; credentials encrypted in the OS keystore.
+- **Future Operations (Roadmap)**: Backup, restore, copy, and job history flows remain planned and are tracked in the roadmap below.
+- **Cross-platform**: Windows, macOS, Linux (via Tauri).
 
 ## Supported Databases
 
@@ -43,8 +41,8 @@ npm run tauri build
 
 ### Frontend (React + TypeScript)
 
-- **Pages**: Connections, Backup, Restore, Copy, Jobs
-- **UI Framework**: shadcn/ui with Tailwind CSS
+- **Pages**: Connections page with TablePlus-inspired workspace overlay
+- **UI Framework**: shadcn/ui with Tailwind CSS v4
 - **State Management**: React hooks + localStorage
 - **Real-time Updates**: Tauri event system
 
@@ -61,11 +59,7 @@ npm run tauri build
 dbpinball/
 ├── src/                          # React frontend
 │   ├── pages/
-│   │   ├── connections.tsx       # Connection management
-│   │   ├── backup.tsx            # Backup interface
-│   │   ├── restore.tsx           # Restore interface
-│   │   ├── copy.tsx              # Database copy
-│   │   └── jobs.tsx              # Job history
+│   │   ├── connections.tsx       # Connection management + workspace overlay
 │   ├── components/ui/            # shadcn/ui components
 │   ├── App.tsx                   # Main app component
 │   └── index.css                 # Tailwind styles
@@ -84,59 +78,29 @@ dbpinball/
 
 ## Usage
 
-### Create a Connection
+### Manage Connections & Open Workspace
 
-1. Go to **Connections** tab
-2. Click **New Connection**
-3. Fill in database details (host, port, database, username)
-4. Enter password (stored securely in OS keystore)
-5. Click **Test** to verify connection
+1. Open the **Connections** page (default view).
+2. Use the **+** toolbar button to add a MySQL or PostgreSQL connection.
+3. Fill in database details (host, port, database, username, password).
+4. Save and optionally test the connection.
+5. Double-click a connection (or choose **Connect** from the context menu) to open the TablePlus-style workspace overlay.
+6. Browse databases from the left sidebar; connection details remain visible in the inspector on the right.
 
-### Backup a Database
+### Planned Workflows
 
-1. Go to **Backup** tab
-2. Select a connection
-3. Choose backup options:
-   - Content: Structure, Data, or both
-   - Include: Views, Routines, Triggers
-   - Compression: ZIP or plain SQL
-4. Click **Start Backup**
-5. Monitor progress in real-time
-6. Backup file saved to `~/dbpinball/backups/`
-
-### Restore a Database
-
-1. Go to **Restore** tab
-2. Select target connection
-3. Provide path to backup file
-4. Choose restore options:
-   - Drop schema if exists
-   - Stop on first error
-5. Click **Start Restore**
-
-### Copy Database
-
-1. Go to **Copy** tab
-2. Select source and target connections
-3. Choose what to copy (structure, data, or both)
-4. Click **Start Copy**
-
-### View Job History
-
-1. Go to **Jobs** tab
-2. See all backup, restore, and copy operations
-3. Download artifacts or re-run jobs
+Backup, restore, copy, and job history features are under active development and will return as part of upcoming releases.
 
 ## Development
 
 ### Running Tests
 
 ```bash
-# Run Rust tests
+# Run backend (Rust) tests
 cargo test -p dbpinball
 
-# Run React tests (when added)
-npm test
+# Run frontend (Vitest) tests
+npm run test
 ```
 
 ### Building for Production
@@ -157,10 +121,10 @@ This creates platform-specific installers in `src-tauri/target/release/bundle/`.
 ## Roadmap
 
 ### Phase 1 (Current)
-- ✅ MySQL & PostgreSQL backup/restore/copy
 - ✅ Connection management with encrypted storage
-- ✅ Job history and logging
-- ✅ Native tool integration
+- ✅ TablePlus-inspired workspace overlay and database listing
+- ✅ Vitest-based UI regression tests
+- 🚧 Backup/restore/copy flows (in progress)
 
 ### Phase 2
 - SSH tunnel support
