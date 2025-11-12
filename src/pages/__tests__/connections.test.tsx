@@ -8,6 +8,27 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+const setFullscreenMock = vi.fn((_: boolean) => Promise.resolve());
+
+vi.mock("@tauri-apps/api/window", () => {
+  const minimizeMock = vi.fn(() => Promise.resolve());
+  const maximizeMock = vi.fn(() => Promise.resolve());
+  const unmaximizeMock = vi.fn(() => Promise.resolve());
+  const isMaximizedMock = vi.fn(() => Promise.resolve(false));
+  const closeMock = vi.fn(() => Promise.resolve());
+
+  return {
+    getCurrentWindow: vi.fn(() => ({
+      setFullscreen: setFullscreenMock,
+      minimize: minimizeMock,
+      maximize: maximizeMock,
+      unmaximize: unmaximizeMock,
+      isMaximized: isMaximizedMock,
+      close: closeMock,
+    })),
+  };
+});
+
 const createConnections = () => [
   {
     id: "conn_1",
@@ -36,6 +57,7 @@ describe("ConnectionsPage", () => {
     localStorage.clear();
     vi.clearAllMocks();
     vi.mocked(invoke).mockReset();
+    setFullscreenMock.mockClear();
   });
 
   afterEach(() => {
@@ -87,6 +109,9 @@ describe("ConnectionsPage", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_databases_cmd", { conn: connections[0] });
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(setFullscreenMock).toHaveBeenCalledWith(true);
+    });
 
     expect(await screen.findByText("DBpinBall")).toBeInTheDocument();
     expect(screen.getByLabelText("Settings")).toBeInTheDocument();
@@ -229,5 +254,9 @@ describe("ConnectionsPage", () => {
     expect(errorMessages.length).toBeGreaterThan(0);
     const failureChips = await screen.findAllByText("Failed");
     expect(failureChips.length).toBeGreaterThan(0);
+
+    await waitFor(() => {
+      expect(setFullscreenMock).toHaveBeenCalledWith(true);
+    });
   });
 });

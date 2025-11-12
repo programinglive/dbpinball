@@ -149,6 +149,36 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
   });
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspaceState());
 
+  useEffect(() => {
+    if (!workspace.open) {
+      return;
+    }
+
+    const enterFullscreen = async () => {
+      try {
+        const window = getCurrentWindow();
+        await window.setFullscreen(true);
+      } catch (e) {
+        console.error("Enter fullscreen failed:", e);
+      }
+    };
+
+    void enterFullscreen();
+
+    return () => {
+      const exitFullscreen = async () => {
+        try {
+          const window = getCurrentWindow();
+          await window.setFullscreen(false);
+        } catch (e) {
+          console.error("Exit fullscreen failed:", e);
+        }
+      };
+
+      void exitFullscreen();
+    };
+  }, [workspace.open]);
+
   const activeContextMenu = useMemo(() => {
     if (!contextMenu.open || contextMenu.target !== "row" || !contextMenu.id || !contextMenu.position) {
       return null;

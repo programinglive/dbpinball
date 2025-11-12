@@ -4,6 +4,7 @@
 
 ### ♻️ Refactors
 - Streamlined the workspace top bar: replaced miscellaneous quick-action icons with a "DBpinBall" brand label and retained only essential window controls.
+- Workspace overlay now automatically launches the desktop window in fullscreen for an immersive experience.
 
 ### ✅ Tests
 - Added regression coverage ensuring the refined top bar renders the brand label and window controls while omitting the removed buttons.
