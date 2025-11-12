@@ -1,5 +1,15 @@
 # dbpinball Release Notes
 
+## Unreleased
+
+### ♻️ Refactors
+- Streamlined the workspace top bar: replaced miscellaneous quick-action icons with a "DBpinBall" brand label and retained only essential window controls.
+
+### ✅ Tests
+- Added regression coverage ensuring the refined top bar renders the brand label and window controls while omitting the removed buttons.
+
+---
+
 ## v0.1.2 (2025-11-11)
 
 ### ✨ Features

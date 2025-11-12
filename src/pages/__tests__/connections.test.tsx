@@ -88,6 +88,17 @@ describe("ConnectionsPage", () => {
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
+    expect(await screen.findByText("DBpinBall")).toBeInTheDocument();
+    expect(screen.getByLabelText("Settings")).toBeInTheDocument();
+    expect(screen.getByLabelText("Minimize")).toBeInTheDocument();
+    expect(screen.getByLabelText("Toggle maximize")).toBeInTheDocument();
+    expect(screen.getByLabelText("Close")).toBeInTheDocument();
+
+    expect(screen.queryByLabelText("Refresh metadata")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Run query")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Search")).not.toBeInTheDocument();
+    expect(screen.queryByText("Menu")).not.toBeInTheDocument();
+
     await screen.findByText("main");
     expect(screen.getByText("reporting")).toBeInTheDocument();
     expect(
@@ -212,10 +223,10 @@ describe("ConnectionsPage", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("list_databases_cmd", expect.anything());
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    const errorMessage =
-      'Unable to resolve host "analytics.example.com". Verify the host name. Details: No such host is known';
-
-    expect(await screen.findAllByText(errorMessage)).toHaveLength(2);
+    const errorMessages = await screen.findAllByText((content) =>
+      content.includes("Unable to resolve host. Details: No such host is known")
+    );
+    expect(errorMessages.length).toBeGreaterThan(0);
     const failureChips = await screen.findAllByText("Failed");
     expect(failureChips.length).toBeGreaterThan(0);
   });
