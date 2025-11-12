@@ -1,6 +1,11 @@
 use crate::models::*;
 use crate::secrets;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use serde_json::Value as JsonValue;
+use sqlx::mysql::{MySqlPool, MySqlRow};
+use sqlx::types::Decimal;
+use sqlx::{Column, Row, TypeInfo};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tauri::{Window, Emitter};
@@ -17,7 +22,7 @@ pub async fn test(conn: DbConnection) -> Result<()> {
         "mysql://{}:{}@{}:{}/{}",
         conn.username, password, conn.host, conn.port, conn.database
     );
-    let pool = sqlx::MySqlPool::connect(&url).await?;
+    let pool = MySqlPool::connect(&url).await?;
     sqlx::query("SELECT 1").execute(&pool).await?;
     Ok(())
 }
@@ -45,6 +50,48 @@ pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
         })
         .collect();
     Ok(filtered)
+}
+
+pub async fn list_tables(conn: DbConnection, database: String) -> Result<Vec<String>> {
+    let target_db = resolve_database(&conn, &database)?;
+    let pool = connect_to_mysql(&conn, &target_db).await?;
+    let tables = sqlx::query_scalar::<_, String>("SHOW TABLES")
+        .fetch_all(&pool)
+        .await?;
+    Ok(tables)
+}
+
+pub async fn run_query(
+    conn: DbConnection,
+    database: String,
+    sql: String,
+    limit: Option<i64>,
+) -> Result<QueryResult> {
+    let target_db = resolve_database(&conn, &database)?;
+    let pool = connect_to_mysql(&conn, &target_db).await?;
+
+    let mut rows = sqlx::query(&sql).fetch_all(&pool).await?;
+    if let Some(max) = limit {
+        if max >= 0 && rows.len() > max as usize {
+            rows.truncate(max as usize);
+        }
+    }
+
+    let columns = rows
+        .first()
+        .map(|row| row.columns().iter().map(|c| c.name().to_string()).collect())
+        .unwrap_or_else(Vec::new);
+
+    let mut data = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut record = Vec::with_capacity(columns.len());
+        for (idx, _) in row.columns().iter().enumerate() {
+            record.push(mysql_value_to_string(&row, idx)?);
+        }
+        data.push(record);
+    }
+
+    Ok(QueryResult { columns, rows: data })
 }
 
 pub async fn backup(
@@ -252,12 +299,112 @@ fn artifact_path(engine: &str, db: &str, compress: bool) -> Result<PathBuf> {
         .join("dbpinball")
         .join("backups");
     std::fs::create_dir_all(&base)?;
-    let fname = format!(
-        "{}_{}_{}{}",
-        engine,
-        db,
-        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
-        if compress { ".sql.zip" } else { ".sql" }
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let filename = if compress {
+        format!("{}_{}_{}.sql.deflate", engine, db, timestamp)
+    } else {
+        format!("{}_{}_{}.sql", engine, db, timestamp)
+    };
+    Ok(base.join(filename))
+}
+
+fn resolve_database(conn: &DbConnection, requested: &str) -> Result<String> {
+    if !requested.trim().is_empty() {
+        return Ok(requested.to_string());
+    }
+
+    if !conn.database.trim().is_empty() {
+        return Ok(conn.database.clone());
+    }
+
+    Err(anyhow!("Database name is required"))
+}
+
+async fn connect_to_mysql(conn: &DbConnection, database: &str) -> Result<MySqlPool> {
+    let password = secrets::get_password(&conn.id)?;
+    let url = format!(
+        "mysql://{}:{}@{}:{}/{}",
+        conn.username, password, conn.host, conn.port, database
     );
-    Ok(base.join(fname))
+    Ok(MySqlPool::connect(&url).await?)
+}
+
+fn mysql_value_to_string(row: &MySqlRow, index: usize) -> Result<Option<String>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+        return Ok(value);
+    }
+
+    if let Ok(value) = row.try_get::<Option<i64>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<i32>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<u32>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<i16>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<u16>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<i8>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<u8>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<u64>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<f64>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<Decimal>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<JsonValue>, _>(index) {
+        return Ok(value.map(|v| match v {
+            JsonValue::String(s) => s,
+            other => other.to_string(),
+        }));
+    }
+
+    if let Ok(value) = row.try_get::<Option<bool>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<NaiveDateTime>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<NaiveDate>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<NaiveTime>, _>(index) {
+        return Ok(value.map(|v| v.to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()));
+    }
+
+    if let Some(column) = row.columns().get(index) {
+        let type_name = column.type_info().name();
+        return Ok(Some(format!("[{type_name} value not supported]")));
+    }
+
+    Ok(Some("[value not supported]".to_string()))
 }

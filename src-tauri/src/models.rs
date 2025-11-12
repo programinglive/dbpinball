@@ -47,3 +47,10 @@ pub struct CopyOptions {
     pub data: bool,
     pub drop_in_target: bool,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+}

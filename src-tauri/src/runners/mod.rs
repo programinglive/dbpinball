@@ -18,6 +18,25 @@ pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
     }
 }
 
+pub async fn list_tables(conn: DbConnection, database: String) -> Result<Vec<String>> {
+    match conn.engine {
+        DbEngine::Mysql => mysql::list_tables(conn, database).await,
+        DbEngine::Postgres => postgres::list_tables(conn, database).await,
+    }
+}
+
+pub async fn run_query(
+    conn: DbConnection,
+    database: String,
+    sql: String,
+    limit: Option<i64>,
+) -> Result<QueryResult> {
+    match conn.engine {
+        DbEngine::Mysql => mysql::run_query(conn, database, sql, limit).await,
+        DbEngine::Postgres => postgres::run_query(conn, database, sql, limit).await,
+    }
+}
+
 pub async fn start_backup(
     window: &Window,
     conn: DbConnection,

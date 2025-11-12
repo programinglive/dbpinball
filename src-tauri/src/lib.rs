@@ -3,7 +3,9 @@ mod runners;
 mod secrets;
 
 use models::*;
-use runners::{list_databases, start_backup, start_copy, start_restore, test_connection};
+use runners::{
+    list_databases, list_tables, run_query, start_backup, start_copy, start_restore, test_connection,
+};
 
 #[tauri::command]
 async fn test_conn(conn: DbConnection) -> Result<String, String> {
@@ -16,6 +18,23 @@ async fn test_conn(conn: DbConnection) -> Result<String, String> {
 #[tauri::command]
 async fn list_databases_cmd(conn: DbConnection) -> Result<Vec<String>, String> {
     list_databases(conn).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_tables_cmd(conn: DbConnection, database: String) -> Result<Vec<String>, String> {
+    list_tables(conn, database).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn run_query_cmd(
+    conn: DbConnection,
+    database: String,
+    sql: String,
+    limit: Option<i64>,
+) -> Result<QueryResult, String> {
+    run_query(conn, database, sql, limit)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -75,6 +94,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             test_conn,
             list_databases_cmd,
+            list_tables_cmd,
+            run_query_cmd,
             backup,
             restore,
             copy_db,
