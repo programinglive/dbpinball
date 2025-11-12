@@ -870,6 +870,7 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 280px;
+  grid-template-areas: "sidebar workspace inspector";
   height: calc(100vh - 64px);
   background: rgba(2, 6, 23, 0.94);
 }
@@ -877,6 +878,7 @@ body {
 .connections-shell__sidebar {
   display: flex;
   flex-direction: column;
+  grid-area: sidebar;
   border-right: 1px solid rgba(148, 163, 184, 0.08);
   background: linear-gradient(180deg, rgba(9, 13, 28, 0.96) 0%, rgba(5, 8, 18, 0.94) 100%);
   backdrop-filter: blur(10px);
@@ -958,6 +960,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  grid-area: workspace;
   background: rgba(15, 18, 33, 0.92);
   padding: 1.5rem 2rem;
 }
@@ -1048,6 +1051,7 @@ body {
 .connections-shell__inspector {
   display: flex;
   flex-direction: column;
+  grid-area: inspector;
   border-left: 1px solid rgba(148, 163, 184, 0.08);
   background: rgba(12, 18, 35, 0.9);
 }
@@ -1119,26 +1123,24 @@ body {
   }
 
   .connections-shell__body {
-    grid-template-columns: 60px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
     grid-template-areas:
-      "rail rail"
-      "sidebar sidebar"
-      "workspace workspace"
-      "inspector inspector";
+      "sidebar"
+      "workspace"
+      "inspector";
+    row-gap: 1.25rem;
     height: auto;
-  }
-
-  .connections-shell__rail {
-    flex-direction: row;
-    justify-content: center;
-    border-right: none;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
   }
 
   .connections-shell__sidebar,
   .connections-shell__workspace,
   .connections-shell__inspector {
     border: none;
+  }
+
+  .connections-shell__sidebar {
+    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
   }
 
   .connections-shell__workspace {
@@ -1151,6 +1153,10 @@ body {
 
   .connections-shell__workspace-card-body dl {
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  .connections-shell__inspector {
+    border-top: 1px solid rgba(148, 163, 184, 0.08);
   }
 
   .connections-shell__inspector-body {
