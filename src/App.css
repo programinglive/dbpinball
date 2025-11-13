@@ -239,6 +239,40 @@
   color: rgba(248, 113, 113, 0.85);
   font-style: italic;
 }
+
+.workspace-panel__empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex: 1;
+  width: 100%;
+  padding: 2rem;
+  text-align: center;
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.workspace-panel__empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  opacity: 0.5;
+  color: rgba(148, 163, 184, 0.6);
+}
+
+.workspace-panel__empty-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.workspace-panel__empty-text {
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.6);
+}
 .toolbar__menu {
   background: #111827;
   border: 1px solid #1f2937;
@@ -1204,10 +1238,16 @@ body {
 
 .connections-shell__sidebar-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem 1.2rem;
+  flex-direction: column;
+  padding: 0;
   border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.connections-shell__sidebar-header .workspace-panel__tabs {
+  border-bottom: none;
+  background: transparent;
+  padding: 0.5rem 0;
+  margin: 0 1.2rem;
 }
 
 .connections-shell__sidebar-title {
@@ -1218,6 +1258,24 @@ body {
 }
 
 .connections-shell__sidebar-subtitle {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.65);
+}
+
+.connections-shell__sidebar-section-header {
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.connections-shell__sidebar-section-title {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.95);
+}
+
+.connections-shell__sidebar-section-subtitle {
   margin: 0.15rem 0 0;
   font-size: 0.75rem;
   color: rgba(148, 163, 184, 0.65);

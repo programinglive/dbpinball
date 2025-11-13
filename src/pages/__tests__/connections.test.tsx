@@ -122,8 +122,7 @@ describe("ConnectionsPage", () => {
     expect(screen.queryByLabelText("Search")).not.toBeInTheDocument();
     expect(screen.queryByText("Menu")).not.toBeInTheDocument();
 
-    await screen.findByText("main");
-    expect(screen.getByText("reporting")).toBeInTheDocument();
+    expect(await screen.findByText("Items content coming soon.")).toBeInTheDocument();
     expect(
       screen.getByText("Select a database from the left to explore its tables.")
     ).toBeInTheDocument();
@@ -160,7 +159,6 @@ describe("ConnectionsPage", () => {
     expect(invokeMock).toHaveBeenCalledWith("test_conn", { conn: connections[0] });
     expect(invokeMock).toHaveBeenCalledWith("list_databases_cmd", { conn: connections[0] });
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(await screen.findByText("main")).toBeInTheDocument();
   });
 
   it("opens edit dialog from context menu", async () => {

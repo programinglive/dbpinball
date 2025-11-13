@@ -1078,6 +1078,10 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                   );
                 })()}
 
+                <button type="button" className="connections-shell__icon-btn" aria-label="Select database" data-tauri-drag-region="false">
+                  <PlugZap size={16} />
+                </button>
+
                 <button type="button" className="connections-shell__icon-btn" aria-label="Settings" data-tauri-drag-region="false">
                   <Settings size={16} />
                 </button>
@@ -1117,39 +1121,39 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
             <div className="connections-shell__body">
               <section className="connections-shell__sidebar">
                 <div className="connections-shell__sidebar-header">
-                  <div>
-                    <h2 className="connections-shell__sidebar-title">Databases</h2>
-                    <p className="connections-shell__sidebar-subtitle">Fetched from server</p>
+                  <div className="workspace-panel__tabs">
+                    <button
+                      type="button"
+                      className={`workspace-panel__tab${workspaceTab === "items" ? " workspace-panel__tab--active" : ""}`}
+                      onClick={() => setWorkspaceTab("items")}
+                    >
+                      Items
+                    </button>
+                    <button
+                      type="button"
+                      className={`workspace-panel__tab${workspaceTab === "queries" ? " workspace-panel__tab--active" : ""}`}
+                      onClick={() => setWorkspaceTab("queries")}
+                    >
+                      Queries
+                    </button>
+                    <button
+                      type="button"
+                      className={`workspace-panel__tab${workspaceTab === "history" ? " workspace-panel__tab--active" : ""}`}
+                      onClick={() => setWorkspaceTab("history")}
+                    >
+                      History
+                    </button>
                   </div>
                 </div>
                 <div className="connections-shell__sidebar-body">
-                  {workspace.loading ? (
-                    <div className="connections-shell__sidebar-status">Loading databases…</div>
-                  ) : workspace.error ? (
-                    <div className="connections-shell__sidebar-error">{workspace.error}</div>
-                  ) : workspace.databases.length === 0 ? (
-                    <div className="connections-shell__sidebar-status">No databases returned.</div>
-                  ) : (
-                    <ul className="connections-shell__database-list">
-                      {workspace.databases.map((dbName) => {
-                        const isActive = workspace.selectedDatabase === dbName;
-                        return (
-                          <li key={dbName}>
-                            <button
-                              type="button"
-                              className={`connections-shell__database-item${isActive ? " connections-shell__database-item--active" : ""}`}
-                              onClick={() => void handleSelectDatabase(dbName)}
-                              disabled={workspace.tablesLoading && isActive}
-                            >
-                              <span>{dbName}</span>
-                              {isActive && workspace.tablesLoading && (
-                                <span className="connections-shell__pill">Loading…</span>
-                              )}
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                  {workspaceTab === "items" && (
+                    <div className="connections-shell__sidebar-status">Items content coming soon.</div>
+                  )}
+                  {workspaceTab === "queries" && (
+                    <div className="connections-shell__sidebar-status">No saved queries.</div>
+                  )}
+                  {workspaceTab === "history" && (
+                    <div className="connections-shell__sidebar-status">No query history.</div>
                   )}
                 </div>
               </section>
@@ -1169,30 +1173,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                       <div className="connections-shell__workspace-error">{workspace.error}</div>
                     ) : workspace.selectedDatabase ? (
                       <div className="workspace-panel">
-                        <div className="workspace-panel__tabs">
-                          <button
-                            type="button"
-                            className={`workspace-panel__tab${workspaceTab === "items" ? " workspace-panel__tab--active" : ""}`}
-                            onClick={() => setWorkspaceTab("items")}
-                          >
-                            Items
-                          </button>
-                          <button
-                            type="button"
-                            className={`workspace-panel__tab${workspaceTab === "queries" ? " workspace-panel__tab--active" : ""}`}
-                            onClick={() => setWorkspaceTab("queries")}
-                          >
-                            Queries
-                          </button>
-                          <button
-                            type="button"
-                            className={`workspace-panel__tab${workspaceTab === "history" ? " workspace-panel__tab--active" : ""}`}
-                            onClick={() => setWorkspaceTab("history")}
-                          >
-                            History
-                          </button>
-                        </div>
-
                         <div className="workspace-panel__summary">
                           <div>
                             <span className="workspace-panel__summary-label">Database</span>
@@ -1333,15 +1313,11 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                         )}
 
                         {workspaceTab === "queries" && (
-                        <div className="workspace-panel__content">
-                          <div className="workspace-panel__status">Saved queries will appear here.</div>
-                        </div>
+                        <div className="workspace-panel__empty-state" />
                         )}
 
                         {workspaceTab === "history" && (
-                        <div className="workspace-panel__content">
-                          <div className="workspace-panel__status">Query history will appear here.</div>
-                        </div>
+                        <div className="workspace-panel__empty-state" />
                         )}
                       </div>
                     ) : (
