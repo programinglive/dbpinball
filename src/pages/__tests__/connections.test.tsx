@@ -113,11 +113,9 @@ describe("ConnectionsPage", () => {
       expect(setFullscreenMock).toHaveBeenCalledWith(true);
     });
 
-    expect(await screen.findByText("DBpinBall")).toBeInTheDocument();
+    const [openListButton] = screen.getAllByRole("button", { name: "Open connection list" });
+    expect(openListButton).toBeInTheDocument();
     expect(screen.getByLabelText("Settings")).toBeInTheDocument();
-    expect(screen.getByLabelText("Minimize")).toBeInTheDocument();
-    expect(screen.getByLabelText("Toggle maximize")).toBeInTheDocument();
-    expect(screen.getByLabelText("Close")).toBeInTheDocument();
 
     expect(screen.queryByLabelText("Refresh metadata")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Run query")).not.toBeInTheDocument();
@@ -129,6 +127,7 @@ describe("ConnectionsPage", () => {
     expect(
       screen.getByText("Select a database from the left to explore its tables.")
     ).toBeInTheDocument();
+
   });
 
   it("connects via context menu actions", async () => {

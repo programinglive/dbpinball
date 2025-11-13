@@ -1,15 +1,16 @@
-import { useState, useEffect, useMemo, useImperativeHandle, forwardRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useImperativeHandle, forwardRef, useCallback, useRef } from "react";
+import type { ForwardedRef, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { invoke } from "@tauri-apps/api/core";
-import { Settings, Minus, Square, X } from "lucide-react";
+import { Settings, Minus, Square, X, PlugZap } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 interface DbConnection {
@@ -91,7 +92,10 @@ export type ConnectionsPageHandle = {
 
 type ConnectionsPageProps = {};
 
-const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(function ConnectionsPage(_props, ref) {
+const ConnectionsPage = forwardRef(function ConnectionsPage(
+  _props: ConnectionsPageProps,
+  ref: ForwardedRef<ConnectionsPageHandle>,
+) {
   const handleMinimizeWindow = useCallback(async () => {
     try {
       const window = getCurrentWindow();
@@ -148,6 +152,25 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
     position: null,
   });
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspaceState());
+  const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
+  const [connectionPickerQuery, setConnectionPickerQuery] = useState("");
+  const [connectionPickerSelectedId, setConnectionPickerSelectedId] = useState<string | null>(null);
+  const connectionPickerOpenRaf = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      console.log("[connection-picker] open state", connectionPickerOpen);
+    }
+  }, [connectionPickerOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (connectionPickerOpenRaf.current !== null) {
+        cancelAnimationFrame(connectionPickerOpenRaf.current);
+        connectionPickerOpenRaf.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!workspace.open) {
@@ -177,6 +200,14 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
 
       void exitFullscreen();
     };
+  }, [workspace.open]);
+
+  const previousWorkspaceOpen = useRef(workspace.open);
+  useEffect(() => {
+    if (!workspace.open && previousWorkspaceOpen.current) {
+      setConnectionPickerOpen(false);
+    }
+    previousWorkspaceOpen.current = workspace.open;
   }, [workspace.open]);
 
   const activeContextMenu = useMemo(() => {
@@ -515,6 +546,156 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
     return [...connections].sort((a, b) => a.name.localeCompare(b.name));
   }, [connections]);
 
+  const filteredConnections = useMemo(() => {
+    const query = connectionPickerQuery.trim().toLowerCase();
+    if (!query) {
+      return sortedConnections;
+    }
+
+    return sortedConnections.filter((conn) => {
+      const haystack = [
+        conn.name,
+        conn.host,
+        conn.database,
+        conn.username,
+        conn.engine,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(query);
+    });
+  }, [connectionPickerQuery, sortedConnections]);
+
+  const connectionPickerSearchRef = useRef<HTMLInputElement | null>(null);
+
+  const handleShowConnectionPicker = () => {
+    if (import.meta.env.DEV) {
+      console.log("[connection-picker] trigger");
+    }
+    setConnectionPickerQuery("");
+    const defaultId = workspace.connection?.id ?? sortedConnections[0]?.id ?? null;
+    setConnectionPickerSelectedId(defaultId);
+    if (connectionPickerOpenRaf.current !== null) {
+      cancelAnimationFrame(connectionPickerOpenRaf.current);
+    }
+    connectionPickerOpenRaf.current = requestAnimationFrame(() => {
+      setConnectionPickerOpen(true);
+      connectionPickerOpenRaf.current = null;
+    });
+  };
+
+  const handleCloseConnectionPicker = () => {
+    if (connectionPickerOpenRaf.current !== null) {
+      cancelAnimationFrame(connectionPickerOpenRaf.current);
+      connectionPickerOpenRaf.current = null;
+    }
+    setConnectionPickerOpen(false);
+  };
+
+  const handleConnectionPickerNavigate = (direction: 1 | -1) => {
+    if (filteredConnections.length === 0) {
+      return;
+    }
+
+    const currentIndex = filteredConnections.findIndex((conn) => conn.id === connectionPickerSelectedId);
+    const nextIndex = (() => {
+      if (currentIndex === -1) {
+        return direction === 1 ? 0 : filteredConnections.length - 1;
+      }
+
+      let tentative = currentIndex + direction;
+      if (tentative < 0) {
+        tentative = filteredConnections.length - 1;
+      } else if (tentative >= filteredConnections.length) {
+        tentative = 0;
+      }
+      return tentative;
+    })();
+
+    setConnectionPickerSelectedId(filteredConnections[nextIndex].id);
+  };
+
+  const handleConnectionPickerSelect = (conn: DbConnection) => {
+    setConnectionPickerSelectedId(conn.id);
+  };
+
+  const resolveConnectionForPicker = (candidate?: DbConnection | null) => {
+    if (candidate) {
+      return candidate;
+    }
+
+    const candidateId = connectionPickerSelectedId ?? filteredConnections[0]?.id ?? null;
+    if (!candidateId) {
+      return null;
+    }
+
+    return connections.find((item) => item.id === candidateId) ?? null;
+  };
+
+  const handleConfirmConnection = (explicit?: DbConnection | null) => {
+    const target = resolveConnectionForPicker(explicit ?? null);
+    if (!target) {
+      return;
+    }
+
+    setConnectionPickerOpen(false);
+    void handleConnect(target);
+  };
+
+  const handleConnectionPickerKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      handleConnectionPickerNavigate(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      handleConnectionPickerNavigate(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      handleConfirmConnection();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      handleCloseConnectionPicker();
+    }
+  };
+
+  const handleConnectionPickerNew = () => {
+    setConnectionPickerOpen(false);
+    openNewConnection();
+  };
+
+  useEffect(() => {
+    if (!connectionPickerOpen) {
+      return;
+    }
+
+    if (filteredConnections.length === 0) {
+      if (connectionPickerSelectedId !== null) {
+        setConnectionPickerSelectedId(null);
+      }
+      return;
+    }
+
+    const hasSelected = filteredConnections.some((conn) => conn.id === connectionPickerSelectedId);
+    if (!hasSelected) {
+      setConnectionPickerSelectedId(filteredConnections[0]?.id ?? null);
+    }
+  }, [connectionPickerOpen, filteredConnections, connectionPickerSelectedId]);
+
+
+  useEffect(() => {
+    if (!connectionPickerOpen) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      connectionPickerSearchRef.current?.focus();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [connectionPickerOpen]);
+
   const handleRootContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     setSelectedId(null);
@@ -570,6 +751,18 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
   return (
     <>
       <div className="connections-screen">
+        <div className="connections-screen__topbar">
+          <button
+            type="button"
+            className="connections-shell__icon-btn connections-shell__icon-btn--brand"
+            aria-label="Open connection list"
+            onClick={handleShowConnectionPicker}
+            data-tauri-drag-region="false"
+          >
+            <PlugZap size={16} />
+          </button>
+        </div>
+
         <Dialog
           open={open}
           onOpenChange={(nextOpen) => {
@@ -822,9 +1015,17 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
       {workspace.open && workspace.connection && (
         <div className="workspace-overlay" role="dialog" aria-modal="true">
           <div className="connections-shell">
-            <header className="connections-shell__topbar">
+            <header className="connections-shell__topbar" data-tauri-drag-region>
               <div className="connections-shell__topbar-section connections-shell__topbar-section--brand">
-                <span className="connections-shell__brand-title">DBpinBall</span>
+                <button
+                  type="button"
+                  className="connections-shell__icon-btn connections-shell__icon-btn--brand"
+                  aria-label="Open connection list"
+                  onClick={handleShowConnectionPicker}
+                  data-tauri-drag-region="false"
+                >
+                  <PlugZap size={16} />
+                </button>
               </div>
 
               <div className="connections-shell__topbar-section connections-shell__topbar-section--info">
@@ -876,7 +1077,7 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
                   );
                 })()}
 
-                <button type="button" className="connections-shell__icon-btn" aria-label="Settings">
+                <button type="button" className="connections-shell__icon-btn" aria-label="Settings" data-tauri-drag-region="false">
                   <Settings size={16} />
                 </button>
 
@@ -884,27 +1085,30 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
                   type="button"
                   className="connections-shell__icon-btn"
                   aria-label="Minimize"
-                  onClick={handleMinimizeWindow}
+                  onClick={() => void handleMinimizeWindow()}
+                  data-tauri-drag-region="false"
                 >
-                  <Minus size={16} />
+                  <Minus size={14} />
                 </button>
 
                 <button
                   type="button"
                   className="connections-shell__icon-btn"
                   aria-label="Toggle maximize"
-                  onClick={handleToggleMaximize}
+                  onClick={() => void handleToggleMaximize()}
+                  data-tauri-drag-region="false"
                 >
-                  <Square size={16} />
+                  <Square size={12} />
                 </button>
 
                 <button
                   type="button"
-                  className="connections-shell__icon-btn connections-shell__icon-btn--close"
+                  className="connections-shell__icon-btn"
                   aria-label="Close"
-                  onClick={handleCloseWindow}
+                  onClick={() => void handleCloseWindow()}
+                  data-tauri-drag-region="false"
                 >
-                  <X size={16} />
+                  <X size={12} />
                 </button>
               </div>
             </header>
@@ -1141,10 +1345,113 @@ const ConnectionsPage = forwardRef<ConnectionsPageHandle, ConnectionsPageProps>(
                   </ul>
                 </div>
               </aside>
+
             </div>
           </div>
         </div>
       )}
+
+      <Dialog open={connectionPickerOpen}>
+        <DialogPortal>
+          <DialogOverlay
+            className="connection-picker__overlay"
+            style={{ zIndex: 4000 }}
+          />
+          <DialogContent
+            className="connection-picker"
+            style={{ zIndex: 4100, width: "460px", maxWidth: "460px" }}
+            hideClose
+            onEscapeKeyDown={(event) => {
+              event.preventDefault();
+              handleCloseConnectionPicker();
+            }}
+            onPointerDownOutside={(event) => {
+              event.preventDefault();
+              handleCloseConnectionPicker();
+            }}
+          >
+            <div className="connection-picker__titlebar">
+              <DialogTitle className="connection-picker__title-text">Open connection</DialogTitle>
+              <div className="connection-picker__titlebar-actions">
+                <button
+                  type="button"
+                  className="connection-picker__titlebar-btn connection-picker__titlebar-btn--close"
+                  aria-label="Close connection picker"
+                  onClick={handleCloseConnectionPicker}
+                  data-tauri-drag-region="false"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+            <DialogDescription className="sr-only">
+              Search and pick from saved database connections. Use arrow keys to move and Enter to connect.
+            </DialogDescription>
+
+            <div className="connection-picker__body">
+              <Input
+                ref={connectionPickerSearchRef}
+                placeholder="Search for connection… (Ctrl F)"
+                value={connectionPickerQuery}
+                onChange={(event) => setConnectionPickerQuery(event.target.value)}
+                onKeyDown={handleConnectionPickerKeyDown}
+                className="connection-picker__search"
+                aria-label="Search connections"
+              />
+
+              <ScrollArea className="connection-picker__list" role="listbox" aria-label="Connections">
+                {filteredConnections.length === 0 ? (
+                  <div className="connection-picker__empty">No matching connections.</div>
+                ) : (
+                  <ul>
+                    {filteredConnections.map((conn) => {
+                      const isSelected = connectionPickerSelectedId === conn.id;
+                      const badge = conn.engine === "postgres" ? "Pg" : "My";
+                      const description = conn.database ? `${conn.host} · ${conn.database}` : conn.host;
+                      const statusChip = conn.engine === "postgres" ? "(PostgreSQL)" : "(MySQL)";
+
+                      return (
+                        <li key={conn.id}>
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            className={`connection-picker__item${isSelected ? " connection-picker__item--active" : ""}`}
+                            onMouseEnter={() => handleConnectionPickerSelect(conn)}
+                            onFocus={() => handleConnectionPickerSelect(conn)}
+                            onClick={() => handleConfirmConnection(conn)}
+                          >
+                            <span className="connection-picker__item-badge">{badge}</span>
+                            <span className="connection-picker__item-content">
+                              <span className="connection-picker__item-title">
+                                {conn.name} <span className="connection-picker__item-tag">{statusChip}</span>
+                              </span>
+                              <span className="connection-picker__item-description">{description}</span>
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </ScrollArea>
+            </div>
+
+            <div className="connection-picker__footer">
+              <Button variant="ghost" onClick={handleConnectionPickerNew} className="connection-picker__footer-btn">
+                New…
+              </Button>
+              <Button
+                onClick={() => handleConfirmConnection()}
+                disabled={filteredConnections.length === 0}
+                className="connection-picker__footer-btn connection-picker__footer-btn--primary"
+              >
+                Open
+              </Button>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </Dialog>
     </>
   );
 });
