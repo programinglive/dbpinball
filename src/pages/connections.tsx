@@ -155,6 +155,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
   const [connectionPickerQuery, setConnectionPickerQuery] = useState("");
   const [connectionPickerSelectedId, setConnectionPickerSelectedId] = useState<string | null>(null);
+  const [workspaceTab, setWorkspaceTab] = useState<"items" | "queries" | "history">("items");
   const connectionPickerOpenRaf = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1168,6 +1169,30 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                       <div className="connections-shell__workspace-error">{workspace.error}</div>
                     ) : workspace.selectedDatabase ? (
                       <div className="workspace-panel">
+                        <div className="workspace-panel__tabs">
+                          <button
+                            type="button"
+                            className={`workspace-panel__tab${workspaceTab === "items" ? " workspace-panel__tab--active" : ""}`}
+                            onClick={() => setWorkspaceTab("items")}
+                          >
+                            Items
+                          </button>
+                          <button
+                            type="button"
+                            className={`workspace-panel__tab${workspaceTab === "queries" ? " workspace-panel__tab--active" : ""}`}
+                            onClick={() => setWorkspaceTab("queries")}
+                          >
+                            Queries
+                          </button>
+                          <button
+                            type="button"
+                            className={`workspace-panel__tab${workspaceTab === "history" ? " workspace-panel__tab--active" : ""}`}
+                            onClick={() => setWorkspaceTab("history")}
+                          >
+                            History
+                          </button>
+                        </div>
+
                         <div className="workspace-panel__summary">
                           <div>
                             <span className="workspace-panel__summary-label">Database</span>
@@ -1181,6 +1206,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                           </div>
                         </div>
 
+                        {workspaceTab === "items" && (
                         <div className="workspace-panel__content">
                           <aside className="workspace-panel__tables">
                             <header className="workspace-panel__tables-header">
@@ -1304,6 +1330,19 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                             </div>
                           </section>
                         </div>
+                        )}
+
+                        {workspaceTab === "queries" && (
+                        <div className="workspace-panel__content">
+                          <div className="workspace-panel__status">Saved queries will appear here.</div>
+                        </div>
+                        )}
+
+                        {workspaceTab === "history" && (
+                        <div className="workspace-panel__content">
+                          <div className="workspace-panel__status">Query history will appear here.</div>
+                        </div>
+                        )}
                       </div>
                     ) : (
                       <div className="connections-shell__workspace-placeholder">

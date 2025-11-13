@@ -31,6 +31,37 @@
   white-space: nowrap;
 }
 
+.workspace-panel__tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid rgba(59, 130, 246, 0.12);
+  background: rgba(2, 6, 23, 0.4);
+}
+
+.workspace-panel__tab {
+  padding: 0.75rem 1.2rem;
+  border: none;
+  background: transparent;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.workspace-panel__tab:hover {
+  color: rgba(226, 232, 240, 0.85);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.workspace-panel__tab--active {
+  color: rgba(226, 232, 240, 0.95);
+  border-bottom-color: rgba(59, 130, 246, 0.6);
+  background: rgba(59, 130, 246, 0.12);
+}
+
 .workspace-panel__content {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
