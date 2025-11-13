@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import ConnectionsPage from "@/pages/connections";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -113,7 +113,20 @@ describe("ConnectionsPage", () => {
       expect(setFullscreenMock).toHaveBeenCalledWith(true);
     });
 
-    const [openListButton] = screen.getAllByRole("button", { name: "Open connection list" });
+    const databasePickerDialog = await screen.findByRole("dialog", { name: "Open database" });
+    expect(databasePickerDialog).toBeInTheDocument();
+    expect(within(databasePickerDialog).getByText("main")).toBeInTheDocument();
+
+    const closeDatabasePickerButton = within(databasePickerDialog).getByRole("button", {
+      name: "Close database picker",
+    });
+    fireEvent.click(closeDatabasePickerButton);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Open database" })).not.toBeInTheDocument();
+    });
+
+    const [openListButton] = await screen.findAllByRole("button", { name: "Open connection list" });
     expect(openListButton).toBeInTheDocument();
     expect(screen.getByLabelText("Settings")).toBeInTheDocument();
 

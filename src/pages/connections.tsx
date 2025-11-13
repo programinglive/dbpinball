@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { invoke } from "@tauri-apps/api/core";
-import { Settings, Minus, Square, X, PlugZap } from "lucide-react";
+import { Settings, Minus, Square, X, PlugZap, Database, ChevronRight, Search } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 interface DbConnection {
@@ -156,7 +156,17 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const [connectionPickerQuery, setConnectionPickerQuery] = useState("");
   const [connectionPickerSelectedId, setConnectionPickerSelectedId] = useState<string | null>(null);
   const [workspaceTab, setWorkspaceTab] = useState<"items" | "queries" | "history">("items");
+  const [databasePickerOpen, setDatabasePickerOpen] = useState(false);
+  const [databasePickerQuery, setDatabasePickerQuery] = useState("");
+  const [databasePickerSelected, setDatabasePickerSelected] = useState<string | null>(null);
+  const [databasePickerSuppressed, setDatabasePickerSuppressed] = useState(false);
+  const [itemsSidebarQuery, setItemsSidebarQuery] = useState("");
+  const [itemsFunctionsOpen, setItemsFunctionsOpen] = useState(true);
+  const [itemsTablesOpen, setItemsTablesOpen] = useState(true);
+  const connectionPickerSearchRef = useRef<HTMLInputElement | null>(null);
+  const databasePickerSearchRef = useRef<HTMLInputElement | null>(null);
   const connectionPickerOpenRaf = useRef<number | null>(null);
+  const databasePickerOpenRaf = useRef<number | null>(null);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -170,8 +180,55 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
         cancelAnimationFrame(connectionPickerOpenRaf.current);
         connectionPickerOpenRaf.current = null;
       }
+      if (databasePickerOpenRaf.current !== null) {
+        cancelAnimationFrame(databasePickerOpenRaf.current);
+        databasePickerOpenRaf.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!databasePickerOpen) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      databasePickerSearchRef.current?.focus();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [databasePickerOpen]);
+
+  useEffect(() => {
+    if (workspace.databases.length === 0) {
+      if (databasePickerOpenRaf.current !== null) {
+        cancelAnimationFrame(databasePickerOpenRaf.current);
+        databasePickerOpenRaf.current = null;
+      }
+
+      setDatabasePickerSelected(null);
+      setDatabasePickerOpen(false);
+      setDatabasePickerSuppressed(false);
+      return;
+    }
+
+    setDatabasePickerSelected((current) => {
+      if (current && workspace.databases.includes(current)) {
+        return current;
+      }
+
+      if (workspace.selectedDatabase && workspace.databases.includes(workspace.selectedDatabase)) {
+        return workspace.selectedDatabase;
+      }
+
+      return workspace.databases[0] ?? null;
+    });
+
+    if (workspace.open && !workspace.selectedDatabase && !databasePickerOpen && !databasePickerSuppressed) {
+      setDatabasePickerQuery("");
+      setDatabasePickerOpen(true);
+    }
+  }, [workspace.databases, workspace.selectedDatabase, workspace.open, databasePickerOpen, databasePickerSuppressed]);
 
   useEffect(() => {
     if (!workspace.open) {
@@ -543,33 +600,43 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     }
   };
 
-  const sortedConnections = useMemo(() => {
-    return [...connections].sort((a, b) => a.name.localeCompare(b.name));
-  }, [connections]);
+  const sortedConnections = useMemo(
+    () => [...connections].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })),
+    [connections],
+  );
 
   const filteredConnections = useMemo(() => {
-    const query = connectionPickerQuery.trim().toLowerCase();
-    if (!query) {
+    const normalized = connectionPickerQuery.trim().toLowerCase();
+    if (normalized.length === 0) {
       return sortedConnections;
     }
 
     return sortedConnections.filter((conn) => {
-      const haystack = [
-        conn.name,
-        conn.host,
-        conn.database,
-        conn.username,
-        conn.engine,
-      ]
+      const haystack = [conn.name, conn.host, conn.database, conn.username]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-
-      return haystack.includes(query);
+      return haystack.includes(normalized);
     });
   }, [connectionPickerQuery, sortedConnections]);
 
-  const connectionPickerSearchRef = useRef<HTMLInputElement | null>(null);
+  const filteredDatabases = useMemo(() => {
+    const normalized = databasePickerQuery.trim().toLowerCase();
+    if (normalized.length === 0) {
+      return workspace.databases;
+    }
+
+    return workspace.databases.filter((dbName) => dbName.toLowerCase().includes(normalized));
+  }, [databasePickerQuery, workspace.databases]);
+
+  const filteredTables = useMemo(() => {
+    const normalized = itemsSidebarQuery.trim().toLowerCase();
+    if (normalized.length === 0) {
+      return workspace.tables;
+    }
+
+    return workspace.tables.filter((tableName) => tableName.toLowerCase().includes(normalized));
+  }, [itemsSidebarQuery, workspace.tables]);
 
   const handleShowConnectionPicker = () => {
     if (import.meta.env.DEV) {
@@ -578,13 +645,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     setConnectionPickerQuery("");
     const defaultId = workspace.connection?.id ?? sortedConnections[0]?.id ?? null;
     setConnectionPickerSelectedId(defaultId);
-    if (connectionPickerOpenRaf.current !== null) {
-      cancelAnimationFrame(connectionPickerOpenRaf.current);
-    }
-    connectionPickerOpenRaf.current = requestAnimationFrame(() => {
-      setConnectionPickerOpen(true);
-      connectionPickerOpenRaf.current = null;
-    });
   };
 
   const handleCloseConnectionPicker = () => {
@@ -666,6 +726,111 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     openNewConnection();
   };
 
+  const handleShowDatabasePicker = () => {
+    if (workspace.databases.length === 0) {
+      return;
+    }
+
+    setDatabasePickerSuppressed(false);
+    setDatabasePickerQuery("");
+    const defaultSelection =
+      (workspace.selectedDatabase && workspace.databases.includes(workspace.selectedDatabase)
+        ? workspace.selectedDatabase
+        : workspace.databases[0]) ?? null;
+    setDatabasePickerSelected(defaultSelection);
+
+    if (databasePickerOpenRaf.current !== null) {
+      cancelAnimationFrame(databasePickerOpenRaf.current);
+    }
+
+    databasePickerOpenRaf.current = requestAnimationFrame(() => {
+      setDatabasePickerOpen(true);
+      databasePickerOpenRaf.current = null;
+    });
+  };
+
+  const handleCloseDatabasePicker = () => {
+    if (databasePickerOpenRaf.current !== null) {
+      cancelAnimationFrame(databasePickerOpenRaf.current);
+      databasePickerOpenRaf.current = null;
+    }
+
+    setDatabasePickerSuppressed(true);
+    setDatabasePickerOpen(false);
+    setDatabasePickerQuery("");
+  };
+
+  const handleDatabasePickerQueryChange = (value: string) => {
+    setDatabasePickerQuery(value);
+
+    const trimmed = value.trim().toLowerCase();
+    const matches = trimmed
+      ? workspace.databases.filter((dbName) => dbName.toLowerCase().includes(trimmed))
+      : workspace.databases;
+
+    setDatabasePickerSelected((current) => {
+      if (current && matches.includes(current)) {
+        return current;
+      }
+      return matches[0] ?? null;
+    });
+  };
+
+  const handleDatabasePickerNavigate = (direction: 1 | -1) => {
+    if (filteredDatabases.length === 0) {
+      return;
+    }
+
+    const currentIndex = databasePickerSelected ? filteredDatabases.indexOf(databasePickerSelected) : -1;
+    const nextIndex = (() => {
+      if (currentIndex === -1) {
+        return direction === 1 ? 0 : filteredDatabases.length - 1;
+      }
+
+      let tentative = currentIndex + direction;
+      if (tentative < 0) {
+        tentative = filteredDatabases.length - 1;
+      } else if (tentative >= filteredDatabases.length) {
+        tentative = 0;
+      }
+      return tentative;
+    })();
+
+    setDatabasePickerSelected(filteredDatabases[nextIndex]);
+  };
+
+  const handleDatabasePickerSelect = (dbName: string) => {
+    setDatabasePickerSelected(dbName);
+  };
+
+  const handleConfirmDatabase = (dbName?: string | null) => {
+    const target = dbName ?? databasePickerSelected;
+    if (!target) {
+      return;
+    }
+
+    setDatabasePickerSuppressed(true);
+    handleCloseDatabasePicker();
+    setWorkspaceTab("items");
+    void handleSelectDatabase(target);
+  };
+
+  const handleDatabasePickerKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      handleDatabasePickerNavigate(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      handleDatabasePickerNavigate(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      handleConfirmDatabase();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      handleCloseDatabasePicker();
+    }
+  };
+
   useEffect(() => {
     if (!connectionPickerOpen) {
       return;
@@ -683,7 +848,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
       setConnectionPickerSelectedId(filteredConnections[0]?.id ?? null);
     }
   }, [connectionPickerOpen, filteredConnections, connectionPickerSelectedId]);
-
 
   useEffect(() => {
     if (!connectionPickerOpen) {
@@ -1027,36 +1191,41 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                 >
                   <PlugZap size={16} />
                 </button>
+                <button
+                  type="button"
+                  className="connections-shell__icon-btn"
+                  aria-label="Open database picker"
+                  onClick={handleShowDatabasePicker}
+                  disabled={workspace.databases.length === 0}
+                  data-tauri-drag-region="false"
+                >
+                  <Database size={14} />
+                </button>
               </div>
 
               <div className="connections-shell__topbar-section connections-shell__topbar-section--info">
-                <div className="connections-shell__session-line" title={`${workspace.connection.host}:${workspace.connection.port}`}>
-                  <span className="connections-shell__session-env">{workspace.connection.name}</span>
-                  <span className="connections-shell__session-separator">|</span>
-                  <span className="connections-shell__session-meta">
-                    {workspace.connection.engine === "postgres" ? "PostgreSQL" : "MySQL"} · {workspace.connection.host}:{workspace.connection.port}
-                  </span>
-                  {workspace.selectedDatabase ? (
-                    <>
-                      <span className="connections-shell__session-separator">|</span>
-                      <span className="connections-shell__session-path">
-                        <span>{workspace.selectedDatabase}</span>
-                        {workspace.selectedTable && (
-                          <>
-                            <span className="connections-shell__session-path-separator">›</span>
-                            <span>{workspace.selectedTable}</span>
-                          </>
-                        )}
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="connections-shell__session-separator">|</span>
-                      <span className="connections-shell__session-path connections-shell__session-path--muted">
-                        No database selected
-                      </span>
-                    </>
-                  )}
+                <div className="workspace-panel__tabs">
+                  <button
+                    type="button"
+                    className={`workspace-panel__tab${workspaceTab === "items" ? " workspace-panel__tab--active" : ""}`}
+                    onClick={() => setWorkspaceTab("items")}
+                  >
+                    Items
+                  </button>
+                  <button
+                    type="button"
+                    className={`workspace-panel__tab${workspaceTab === "queries" ? " workspace-panel__tab--active" : ""}`}
+                    onClick={() => setWorkspaceTab("queries")}
+                  >
+                    Queries
+                  </button>
+                  <button
+                    type="button"
+                    className={`workspace-panel__tab${workspaceTab === "history" ? " workspace-panel__tab--active" : ""}`}
+                    onClick={() => setWorkspaceTab("history")}
+                  >
+                    History
+                  </button>
                 </div>
               </div>
 
@@ -1077,10 +1246,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                     </span>
                   );
                 })()}
-
-                <button type="button" className="connections-shell__icon-btn" aria-label="Select database" data-tauri-drag-region="false">
-                  <PlugZap size={16} />
-                </button>
 
                 <button type="button" className="connections-shell__icon-btn" aria-label="Settings" data-tauri-drag-region="false">
                   <Settings size={16} />
@@ -1147,13 +1312,118 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                 </div>
                 <div className="connections-shell__sidebar-body">
                   {workspaceTab === "items" && (
-                    <div className="connections-shell__sidebar-status">Items content coming soon.</div>
+                    workspace.databases.length === 0 ? (
+                      <div className="connections-shell__sidebar-status connections-shell__sidebar-status--empty">
+                        <Database size={36} strokeWidth={1.2} aria-hidden="true" />
+                        <p>No databases available.</p>
+                        <span>Create or connect to a database to browse its items.</span>
+                      </div>
+                    ) : workspace.selectedDatabase ? (
+                      <div className="items-sidebar">
+                        <div className="items-sidebar__search">
+                          <Search size={14} aria-hidden="true" />
+                          <Input
+                            value={itemsSidebarQuery}
+                            onChange={(event) => setItemsSidebarQuery(event.target.value)}
+                            placeholder="Search items"
+                            className="items-sidebar__search-input"
+                          />
+                        </div>
+
+                        <ScrollArea className="items-sidebar__scroll">
+                          <div className="items-sidebar__section">
+                            <button
+                              type="button"
+                              className="items-sidebar__section-header"
+                              onClick={() => setItemsFunctionsOpen((prev) => !prev)}
+                            >
+                              <span>Functions</span>
+                              <ChevronRight
+                                size={14}
+                                className={`items-sidebar__section-icon${itemsFunctionsOpen ? " items-sidebar__section-icon--open" : ""}`}
+                              />
+                            </button>
+
+                            {itemsFunctionsOpen && (
+                              <div className="items-sidebar__section-body">
+                                <div className="items-sidebar__empty">
+                                  <Database size={32} strokeWidth={1.3} aria-hidden="true" />
+                                  <p>No functions yet.</p>
+                                  <span>Create a function to see it here.</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="items-sidebar__section">
+                            <button
+                              type="button"
+                              className="items-sidebar__section-header"
+                              onClick={() => setItemsTablesOpen((prev) => !prev)}
+                            >
+                              <span>Tables</span>
+                              <ChevronRight
+                                size={14}
+                                className={`items-sidebar__section-icon${itemsTablesOpen ? " items-sidebar__section-icon--open" : ""}`}
+                              />
+                            </button>
+
+                            {itemsTablesOpen && (
+                              <div className="items-sidebar__section-body">
+                                {workspace.tablesError ? (
+                                  <div className="items-sidebar__status items-sidebar__status--error">{workspace.tablesError}</div>
+                                ) : workspace.tablesLoading ? (
+                                  <div className="items-sidebar__status">Loading tables…</div>
+                                ) : filteredTables.length === 0 ? (
+                                  <div className="items-sidebar__empty">
+                                    <Database size={32} strokeWidth={1.3} aria-hidden="true" />
+                                    <p>No tables match your search.</p>
+                                    <span>Try a different search or refresh.</span>
+                                  </div>
+                                ) : (
+                                  <ul className="items-sidebar__list">
+                                    {filteredTables.map((tableName) => {
+                                      const isSelected = workspace.selectedTable === tableName;
+                                      return (
+                                        <li key={tableName}>
+                                          <button
+                                            type="button"
+                                            className={`items-sidebar__item${isSelected ? " items-sidebar__item--active" : ""}`}
+                                            onClick={() => handleSelectTable(tableName)}
+                                          >
+                                            <span>{tableName}</span>
+                                          </button>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </ScrollArea>
+                      </div>
+                    ) : (
+                      <div className="connections-shell__sidebar-status connections-shell__sidebar-status--empty">
+                        <Database size={36} strokeWidth={1.2} aria-hidden="true" />
+                        <p>Items content coming soon.</p>
+                        <span>Select a database from the left to explore its tables.</span>
+                      </div>
+                    )
                   )}
                   {workspaceTab === "queries" && (
-                    <div className="connections-shell__sidebar-status">No saved queries.</div>
+                    <div className="connections-shell__sidebar-status connections-shell__sidebar-status--empty">
+                      <Database size={36} strokeWidth={1.2} aria-hidden="true" />
+                      <p>No saved queries yet.</p>
+                      <span>Run a query and save it to see it here.</span>
+                    </div>
                   )}
                   {workspaceTab === "history" && (
-                    <div className="connections-shell__sidebar-status">No query history.</div>
+                    <div className="connections-shell__sidebar-status connections-shell__sidebar-status--empty">
+                      <Database size={36} strokeWidth={1.2} aria-hidden="true" />
+                      <p>No query history yet.</p>
+                      <span>Your recent queries will appear here.</span>
+                    </div>
                   )}
                 </div>
               </section>
@@ -1187,39 +1457,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                         </div>
 
                         {workspaceTab === "items" && (
-                        <div className="workspace-panel__content">
-                          <aside className="workspace-panel__tables">
-                            <header className="workspace-panel__tables-header">
-                              <h4>Tables</h4>
-                              {workspace.tablesLoading && <span className="workspace-panel__pill">Loading…</span>}
-                            </header>
-
-                            {workspace.tablesError ? (
-                              <div className="workspace-panel__error">{workspace.tablesError}</div>
-                            ) : workspace.tables.length === 0 ? (
-                              <div className="workspace-panel__status">No tables returned.</div>
-                            ) : (
-                              <ScrollArea className="workspace-panel__table-scroll">
-                                <ul className="workspace-panel__table-list">
-                                  {workspace.tables.map((tableName) => {
-                                    const isSelected = workspace.selectedTable === tableName;
-                                    return (
-                                      <li key={tableName}>
-                                        <button
-                                          type="button"
-                                          className={`workspace-panel__table-item${isSelected ? " workspace-panel__table-item--active" : ""}`}
-                                          onClick={() => handleSelectTable(tableName)}
-                                        >
-                                          <span>{tableName}</span>
-                                        </button>
-                                      </li>
-                                    );
-                                  })}
-                                </ul>
-                              </ScrollArea>
-                            )}
-                          </aside>
-
+                        <div className="workspace-panel__content workspace-panel__content--single">
                           <section className="workspace-panel__query">
                             <div className="workspace-panel__editor">
                               <Textarea
@@ -1322,7 +1560,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                       </div>
                     ) : (
                       <div className="connections-shell__workspace-placeholder">
-                        Select a database from the left to explore its tables.
+                        Choose a database to run queries and explore its data.
                       </div>
                     )}
                   </div>
@@ -1460,6 +1698,92 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                 onClick={() => handleConfirmConnection()}
                 disabled={filteredConnections.length === 0}
                 className="connection-picker__footer-btn connection-picker__footer-btn--primary"
+              >
+                Open
+              </Button>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </Dialog>
+
+      <Dialog open={databasePickerOpen}>
+        <DialogPortal>
+          <DialogOverlay className="database-picker__overlay" style={{ zIndex: 5000 }} />
+          <DialogContent
+            className="database-picker"
+            style={{ zIndex: 5010, width: "420px", maxWidth: "420px" }}
+            hideClose
+            onEscapeKeyDown={(event) => {
+              event.preventDefault();
+              handleCloseDatabasePicker();
+            }}
+            onPointerDownOutside={(event) => {
+              event.preventDefault();
+              handleCloseDatabasePicker();
+            }}
+          >
+            <div className="database-picker__titlebar">
+              <DialogTitle className="database-picker__title-text">Open database</DialogTitle>
+              <div className="database-picker__titlebar-actions">
+                <button
+                  type="button"
+                  className="database-picker__titlebar-btn database-picker__titlebar-btn--close"
+                  aria-label="Close database picker"
+                  onClick={handleCloseDatabasePicker}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+            <DialogDescription className="sr-only">
+              Search and select a database to load its tables.
+            </DialogDescription>
+
+            <div className="database-picker__body">
+              <Input
+                ref={databasePickerSearchRef}
+                placeholder="Search for database…"
+                value={databasePickerQuery}
+                onChange={(event) => handleDatabasePickerQueryChange(event.target.value)}
+                onKeyDown={handleDatabasePickerKeyDown}
+                className="database-picker__search"
+                aria-label="Search databases"
+              />
+
+              <ScrollArea className="database-picker__list" role="listbox" aria-label="Databases">
+                {filteredDatabases.length === 0 ? (
+                  <div className="database-picker__empty">No databases found.</div>
+                ) : (
+                  <ul>
+                    {filteredDatabases.map((dbName) => {
+                      const isActive = databasePickerSelected === dbName;
+
+                      return (
+                        <li key={dbName}>
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={isActive}
+                            className={`database-picker__item${isActive ? " database-picker__item--active" : ""}`}
+                            onMouseEnter={() => handleDatabasePickerSelect(dbName)}
+                            onFocus={() => handleDatabasePickerSelect(dbName)}
+                            onClick={() => handleConfirmDatabase(dbName)}
+                          >
+                            <span className="database-picker__item-label">{dbName}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </ScrollArea>
+            </div>
+
+            <div className="database-picker__footer">
+              <Button
+                onClick={() => handleConfirmDatabase()}
+                disabled={filteredDatabases.length === 0}
+                className="database-picker__footer-btn database-picker__footer-btn--primary"
               >
                 Open
               </Button>
