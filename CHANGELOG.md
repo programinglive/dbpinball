@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.4](https://github.com/programinglive/dbpinball/compare/v0.1.3...v0.1.4) (2025-11-13)
+
+
+### 🐛 Bug Fixes
+
+* improve connections workspace responsive layout ([467ab0c](https://github.com/programinglive/dbpinball/commit/467ab0c21feb6e8c9a6c7bb6d3a4a80479ee08a3))
+
+
+### ✨ Features
+
+* auto-fullscreen workspace overlay ([e46c35f](https://github.com/programinglive/dbpinball/commit/e46c35f8cde3f6b25d81f5b6ea1e8d236614b230))
+* **tauri:** add postgres table list and query support ([6f49d12](https://github.com/programinglive/dbpinball/commit/6f49d12bd9dc43fb5a1e81bee92639c83ce89b9e))
+
+
+### ♻️ Refactors
+
+* connection picker styling and layout refinements ([33357a6](https://github.com/programinglive/dbpinball/commit/33357a69cc14e1f0672d0c3ada366b278a479ac9))
+* streamline workspace top bar UI ([285b852](https://github.com/programinglive/dbpinball/commit/285b8528d7b2f57073520e701855f72ddda986a3))
+
 ### [0.1.3](https://github.com/programinglive/dbpinball/compare/v0.1.2...v0.1.3) (2025-11-11)
 
 
