@@ -36,6 +36,8 @@ export default function ResultGrid({ result, running, error, tableName }: Result
   const [viewMode, setViewMode] = useState<ResultViewMode>("data");
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const resizingRef = useRef<ResizingState | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const hscrollRef = useRef<HTMLDivElement | null>(null);
   const columns = useMemo(() => result?.columns ?? [], [result?.columns]);
 
   const hasResult = !!result && result.columns.length > 0;
@@ -60,6 +62,99 @@ export default function ResultGrid({ result, running, error, tableName }: Result
       return next;
     });
   }, [columns]);
+
+  // Dedicated horizontal scrollbar below the grid controls the table scrollLeft.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const hscroll = hscrollRef.current;
+    if (!viewport || !hscroll) {
+      return;
+    }
+
+    const updateHelperWidth = () => {
+      const inner = hscroll.firstElementChild as HTMLDivElement | null;
+      if (!inner || !viewport) return;
+
+      const table = viewport.querySelector('.workspace-panel__result-table') as HTMLElement | null;
+      const clientWidth = viewport.clientWidth;
+      const tableScrollWidth = table?.scrollWidth ?? clientWidth;
+
+      // Make helper track match the table's scrollable width
+      const helperWidth = Math.max(tableScrollWidth, clientWidth + 100);
+      inner.style.width = `${helperWidth}px`;
+
+      setTimeout(() => {
+        console.log('[Helper] Updated width:', {
+          clientWidth,
+          helperWidth,
+          innerWidth: inner.style.width,
+          hscrollScrollWidth: hscroll.scrollWidth,
+          hscrollClientWidth: hscroll.clientWidth,
+          hscrollMaxScroll: hscroll.scrollWidth - hscroll.clientWidth,
+          tableWidth: table?.offsetWidth,
+          tableScrollWidth,
+          columnCount: columns.length,
+          totalColumnWidth: columns.reduce((sum, col) => sum + (columnWidths[col] || 160), 0)
+        });
+      }, 0);
+    };
+
+    updateHelperWidth();
+
+    // Update helper width when viewport content changes
+    const resizeObserver = new ResizeObserver(() => {
+      updateHelperWidth();
+    });
+    resizeObserver.observe(viewport);
+
+    const handleHelperScroll = () => {
+      if (!viewport || !hscroll) {
+        console.log('[Helper] Missing refs:', { viewport: !!viewport, hscroll: !!hscroll });
+        return;
+      }
+
+      const table = viewport.querySelector('.workspace-panel__result-table') as HTMLElement | null;
+      const tableScrollWidth = table?.scrollWidth ?? viewport.scrollWidth;
+      const maxViewportScroll = tableScrollWidth - viewport.clientWidth;
+      const maxHelperScroll = hscroll.scrollWidth - hscroll.clientWidth;
+
+      console.log('[Helper] Scroll event:', {
+        helperScrollLeft: hscroll.scrollLeft,
+        maxViewportScroll,
+        maxHelperScroll,
+        viewportScrollWidth: viewport.scrollWidth,
+        viewportClientWidth: viewport.clientWidth,
+        hscrollScrollWidth: hscroll.scrollWidth,
+        hscrollClientWidth: hscroll.clientWidth,
+        tableScrollWidth
+      });
+
+      if (maxViewportScroll <= 0 || maxHelperScroll <= 0) {
+        console.log('[Helper] No scroll range available');
+        return;
+      }
+
+      const ratio = hscroll.scrollLeft / maxHelperScroll;
+      const newScrollLeft = ratio * maxViewportScroll;
+
+      // Apply scroll position in two ways:
+      // 1) Set viewport.scrollLeft (native scrolling if browser recognizes overflow)
+      // 2) Translate the table as a fallback so content always moves visually
+      viewport.scrollLeft = newScrollLeft;
+      if (table) {
+        table.style.transform = `translateX(${-newScrollLeft}px)`;
+      }
+
+      console.log('[Helper] Set viewport.scrollLeft:', newScrollLeft, 'ratio:', ratio);
+    };
+
+    hscroll.addEventListener("scroll", handleHelperScroll, { passive: true });
+
+    return () => {
+      resizeObserver.disconnect();
+      hscroll.removeEventListener("scroll", handleHelperScroll);
+    };
+  }, [columns, columnWidths, hasResult]);
 
   const handleMouseMove = useCallback((event: MouseEvent) => {
     const resizing = resizingRef.current;
@@ -207,67 +302,72 @@ export default function ResultGrid({ result, running, error, tableName }: Result
     if (viewMode === "data") {
       content = (
         <div className="workspace-panel__result-scroll">
-          <Table className="workspace-panel__result-table">
-            <TableHeader>
-              <TableRow>
-                {columns.map((column, columnIndex) => {
-                  const width = columnWidths[column];
-                  const prevColumn = columns[columnIndex - 1];
-                  const nextColumn = columns[columnIndex + 1];
-                  return (
-                    <TableHead
-                      key={`${column}-${columnIndex}`}
-                      style={width ? { width, minWidth: width } : undefined}
-                    >
-                      {prevColumn && (
-                        <span
-                          role="separator"
-                          aria-label={`Resize boundary between ${prevColumn} and ${column}`}
-                          className="workspace-panel__result-resizer workspace-panel__result-resizer--left"
-                          onMouseDown={(event) => startBoundaryResize(prevColumn, column, event)}
-                        />
-                      )}
-                      <div className="workspace-panel__result-th">
-                        <span className="workspace-panel__result-th-label">{column}</span>
-                      </div>
-                      <span
-                        role="separator"
-                        aria-label={`Resize ${column}${nextColumn ? ` and ${nextColumn}` : ""}`}
-                        className="workspace-panel__result-resizer workspace-panel__result-resizer--right"
-                        onMouseDown={(event) =>
-                          nextColumn
-                            ? startBoundaryResize(column, nextColumn, event)
-                            : startSingleResize(column, event)
-                        }
-                      />
-                    </TableHead>
-                  );
-                })}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {result!.rows.map((row, rowIndex) => (
-                <TableRow key={rowIndex}>
-                  {row.map((value, cellIndex) => (
-                    <TableCell
-                      key={cellIndex}
-                      style={(() => {
+          <div className="workspace-panel__result-viewport" ref={viewportRef}>
+            <Table className="workspace-panel__result-table">
+              <TableHeader>
+                <TableRow>
+                  {columns.map((column, columnIndex) => {
+                      const width = columnWidths[column];
+                      const prevColumn = columns[columnIndex - 1];
+                      const nextColumn = columns[columnIndex + 1];
+                      return (
+                        <TableHead
+                          key={`${column}-${columnIndex}`}
+                          style={width ? { width, minWidth: width } : undefined}
+                        >
+                          {prevColumn && (
+                            <span
+                              role="separator"
+                              aria-label={`Resize boundary between ${prevColumn} and ${column}`}
+                              className="workspace-panel__result-resizer workspace-panel__result-resizer--left"
+                              onMouseDown={(event) => startBoundaryResize(prevColumn, column, event)}
+                            />
+                          )}
+                          <div className="workspace-panel__result-th">
+                            <span className="workspace-panel__result-th-label">{column}</span>
+                          </div>
+                          <span
+                            role="separator"
+                            aria-label={`Resize ${column}${nextColumn ? ` and ${nextColumn}` : ""}`}
+                            className="workspace-panel__result-resizer workspace-panel__result-resizer--right"
+                            onMouseDown={(event) =>
+                              nextColumn
+                                ? startBoundaryResize(column, nextColumn, event)
+                                : startSingleResize(column, event)
+                            }
+                          />
+                        </TableHead>
+                      );
+                    })}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {result!.rows.map((row, rowIndex) => (
+                    <TableRow key={rowIndex}>
+                      {row.map((value, cellIndex) => {
                         const columnName = columns[cellIndex];
                         const width = columnWidths[columnName];
-                        return width ? { width, minWidth: width } : undefined;
-                      })()}
-                    >
-                      {value === null ? (
-                        <span className="workspace-panel__result-null">NULL</span>
-                      ) : (
-                        value
-                      )}
-                    </TableCell>
+                        return (
+                          <TableCell
+                            key={cellIndex}
+                            style={width ? { width, minWidth: width } : undefined}
+                          >
+                            {value === null ? (
+                              <span className="workspace-panel__result-null">NULL</span>
+                            ) : (
+                              value
+                            )}
+                          </TableCell>
+                        );
+                      })}
+                    </TableRow>
                   ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                </TableBody>
+              </Table>
+            </div>
+          <div className="workspace-panel__result-hscroll" ref={hscrollRef}>
+            <div className="workspace-panel__result-hscroll-inner" />
+          </div>
         </div>
       );
     } else if (viewMode === "structure") {

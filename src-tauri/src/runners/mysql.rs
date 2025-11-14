@@ -1,7 +1,7 @@
 use crate::models::*;
 use crate::secrets;
 use anyhow::{anyhow, Context, Result};
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::mysql::{MySqlPool, MySqlRow};
 use sqlx::types::Decimal;
@@ -386,15 +386,19 @@ fn mysql_value_to_string(row: &MySqlRow, index: usize) -> Result<Option<String>>
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveDateTime>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string()));
+    }
+
+    if let Ok(value) = row.try_get::<Option<DateTime<Utc>>, _>(index) {
+        return Ok(value.map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveDate>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%Y-%m-%d").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveTime>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%H:%M:%S").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {

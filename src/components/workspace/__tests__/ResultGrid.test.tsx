@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll } from "vitest";
 import ResultGrid from "../ResultGrid";
 
 describe("ResultGrid layout", () => {
@@ -12,6 +12,18 @@ describe("ResultGrid layout", () => {
       ["2", "Bob"],
     ],
   };
+
+  beforeAll(() => {
+    // jsdom does not implement ResizeObserver; provide a minimal mock
+    if (!(globalThis as any).ResizeObserver) {
+      class ResizeObserverMock {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+      (globalThis as any).ResizeObserver = ResizeObserverMock as any;
+    }
+  });
 
   it("renders the info bar and status bar for a selected table", () => {
     render(
@@ -49,5 +61,25 @@ describe("ResultGrid layout", () => {
 
     await user.click(within(viewToggle).getByRole("button", { name: "Data" }));
     expect(screen.getAllByRole("table").length).toBeGreaterThan(0);
+  });
+
+  it("renders the helper scrollbar alongside the result viewport", () => {
+    const wideResult = {
+      columns: ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+      rows: [["1", "2", "3", "4", "5", "6", "7", "8"]],
+    };
+
+    render(<ResultGrid result={wideResult} running={false} error={null} tableName="wide" />);
+
+    const viewport = document.querySelector(
+      ".workspace-panel__result-viewport"
+    ) as HTMLDivElement | null;
+    const helper = document.querySelector(
+      ".workspace-panel__result-hscroll"
+    ) as HTMLDivElement | null;
+
+    expect(viewport).toBeInTheDocument();
+    expect(helper).toBeInTheDocument();
+
   });
 });

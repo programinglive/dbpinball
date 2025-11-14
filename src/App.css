@@ -1,3 +1,8 @@
+html,
+body {
+  overflow-x: hidden;
+}
+
 .workspace-panel {
   display: flex;
   flex-direction: column;
@@ -498,6 +503,7 @@
   flex: 1;
   min-height: 0;
   position: relative;
+  overflow: hidden; /* prevent table from stretching the whole layout; scrolling is inside result-scroll */
   background: radial-gradient(
     circle at top left,
     rgba(15, 23, 42, 0.98),
@@ -675,35 +681,105 @@
 .workspace-panel__result-scroll {
   flex: 1;
   min-height: 0;
-  width: 100%;
-  overflow: auto;
-  padding: 4px 8px 32px; /* leave room for status bar */
-  scrollbar-gutter: stable;
+  min-width: 0; /* allow shrinking below content */
+  display: flex;
+  flex-direction: column;
+  background: rgba(2, 6, 23, 0.95);
+  border-top: 1px solid rgba(15, 23, 42, 0.85);
+  overflow: hidden; /* prevent native scrollbars on this wrapper */
 }
 
-.workspace-panel__result-scroll::-webkit-scrollbar {
-  width: 8px;
+/* Vertical scrolling lives in the viewport only */
+.workspace-panel__result-viewport {
+  flex: 1;
+  min-height: 0;
+  min-width: 0; /* critical: allow flex item to shrink below content size */
+  overflow-y: auto;
+  overflow-x: hidden; /* hide native horizontal scroll, use helper bar instead */
+  scrollbar-width: thin; /* Firefox vertical scrollbar */
+  scrollbar-color: rgba(71, 85, 105, 0.7) rgba(15, 23, 42, 0.95);
+}
+
+/* Hide horizontal scrollbar on inner shadcn table wrapper div */
+.workspace-panel__result-viewport > .relative.w-full.overflow-auto {
+  overflow-x: hidden !important; /* override Tailwind overflow-auto */
+  scrollbar-width: none; /* Firefox: hide both scrollbars for this wrapper */
+}
+
+.workspace-panel__result-viewport > .relative.w-full.overflow-auto::-webkit-scrollbar {
+  display: none; /* WebKit: hide any scrollbar here */
+}
+
+/* Vertical scrollbar styling (WebKit) */
+.workspace-panel__result-viewport::-webkit-scrollbar {
+  width: 8px;      /* vertical bar width */
+}
+
+.workspace-panel__result-viewport::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.95);
+  border-radius: 0;
+}
+
+.workspace-panel__result-viewport::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(71, 85, 105, 0.7);
+  border: 1px solid rgba(15, 23, 42, 0.9);
+}
+
+.workspace-panel__result-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
+}
+
+/* Extra guard: hide any horizontal scrollbar in WebKit */
+.workspace-panel__result-viewport::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+/* Helper horizontal scrollbar below the grid */
+.workspace-panel__result-hscroll {
+  height: 8px;
+  overflow-x: scroll; /* always show horizontal bar */
+  overflow-y: hidden;
+  background: rgba(15, 23, 42, 0.95);
+}
+
+.workspace-panel__result-hscroll-inner {
+  height: 1px;
+  /* width is set dynamically by JS to match viewport scroll width */
+}
+
+.workspace-panel__result-hscroll::-webkit-scrollbar {
   height: 8px;
 }
 
-.workspace-panel__result-scroll::-webkit-scrollbar-track {
-  background: transparent;
+.workspace-panel__result-hscroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.9);
+  border-radius: 0;
 }
 
-.workspace-panel__result-scroll::-webkit-scrollbar-thumb {
-  background: rgba(30, 41, 59, 0.9);
-  border-radius: 999px;
+.workspace-panel__result-hscroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.9); /* lighter thumb so it stands out */
+  border: 1px solid rgba(30, 41, 59, 0.9);
 }
 
-.workspace-panel__result-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(51, 65, 85, 1);
+.workspace-panel__result-hscroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
 }
 
 .workspace-panel__result-table {
-  width: 100%;
+  width: max-content !important;  /* table grows to fit all columns without wrapping */
+  max-width: none !important;     /* allow growth beyond viewport */
+  min-width: 100%;                /* at least as wide as viewport */
+  border-radius: 0;
+  overflow: visible;
+  border: 1px solid rgba(15, 23, 42, 0.9);
+  background: #020617;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: 0.8rem;
   color: #e5e7eb;
+  table-layout: auto;             /* allow columns to size based on content */
 }
 
 .workspace-panel__result-table thead tr {
@@ -754,23 +830,6 @@
 .workspace-panel__result-null {
   font-style: italic;
   color: rgba(148, 163, 184, 0.9);
-}
-
-.workspace-panel__result-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-x: auto;
-  overflow-y: auto;
-}
-
-.workspace-panel__result-table {
-  border-radius: 0;
-  overflow: hidden;
-  border: 1px solid rgba(15, 23, 42, 0.9);
-  background: #020617;
-  font-size: 0.8rem;
-  border-collapse: collapse;
-  min-width: max-content;
 }
 
 .workspace-panel__result-table th,
@@ -927,11 +986,7 @@
   font-size: 0.74rem;
   color: rgba(148, 163, 184, 0.9);
   min-height: 26px;
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10;
+  flex-shrink: 0; /* keep bar pinned at bottom of flex column */
 }
 
 .workspace-panel__statusbar-left {

@@ -334,15 +334,15 @@ fn pg_value_to_string(row: &PgRow, index: usize) -> Result<Option<String>> {
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveDateTime>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveDate>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%Y-%m-%d").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<NaiveTime>, _>(index) {
-        return Ok(value.map(|v| v.to_string()));
+        return Ok(value.map(|v| v.format("%H:%M:%S").to_string()));
     }
 
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
