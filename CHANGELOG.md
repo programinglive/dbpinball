@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.5](https://github.com/programinglive/dbpinball/compare/v0.1.4...v0.1.5) (2025-11-14)
+
+
+### ✨ Features
+
+* add database button to workspace topbar ([137a72a](https://github.com/programinglive/dbpinball/commit/137a72ad96fee766682f93a02ab66b91527a9ee3))
+* add TablePlus-style tab bar to workspace panel ([a3e3991](https://github.com/programinglive/dbpinball/commit/a3e3991bee1f2c2f4bf6f288c41b5e195298c3d6))
+* refine items sidebar and database picker ([b406490](https://github.com/programinglive/dbpinball/commit/b406490388c28af446843fc3001775d7d423967e))
+* refine TablePlus toolbar styling ([86d3555](https://github.com/programinglive/dbpinball/commit/86d3555d26cdcad3ae1c79178f13d6be5fc45309))
+
 ### [0.1.4](https://github.com/programinglive/dbpinball/compare/v0.1.3...v0.1.4) (2025-11-13)
 
 
