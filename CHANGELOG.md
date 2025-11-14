@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.6](https://github.com/programinglive/dbpinball/compare/v0.1.5...v0.1.6) (2025-11-14)
+
+
+### 🧹 Chores
+
+* refine workspace topbar and collapse empty functions section ([bfe8ceb](https://github.com/programinglive/dbpinball/commit/bfe8cebd29ba3af64994d8805e2c89ae3ecdceea))
+* simplify items workspace to pure table view ([1f51c32](https://github.com/programinglive/dbpinball/commit/1f51c3256f8b455bfaa3562f07f2e6eee6f1d28d))
+
+
+### ♻️ Refactors
+
+* connections page and polish workspace UI ([86008b9](https://github.com/programinglive/dbpinball/commit/86008b920182d833a0f273eb1701101556873528))
+
+
+### ✨ Features
+
+* add dual column resizing for result grid ([a64e2c3](https://github.com/programinglive/dbpinball/commit/a64e2c344c79373808691cc460f373b14295b99b))
+* compact centered connection dialog and bump sqlx 0.8 ([413be20](https://github.com/programinglive/dbpinball/commit/413be207e6ba2994dc79b2e16611aedce400f1de))
+* lock workspace layout and add ResultGrid tests ([e13a75b](https://github.com/programinglive/dbpinball/commit/e13a75b4bf57a33272cc081026a6d53c01251dbd))
+* **result-grid:** add helper horizontal scrollbar with tests and docs ([2bd583d](https://github.com/programinglive/dbpinball/commit/2bd583d525a72163d211ca5fd185b3d02c4e8b0b))
+* **workspace:** add ctrl+w tab close shortcut with tests and docs ([8d94ea4](https://github.com/programinglive/dbpinball/commit/8d94ea41facda72700ca5c2b83656aa842659c16))
+
+
+### 📝 Documentation
+
+* **release-notes:** add explicit 0.1.3-0.1.5 sections ([a800fce](https://github.com/programinglive/dbpinball/commit/a800fce215418c581f7215d99faf0c0d20cac05a))
+
 ### [0.1.5](https://github.com/programinglive/dbpinball/compare/v0.1.4...v0.1.5) (2025-11-14)
 
 
