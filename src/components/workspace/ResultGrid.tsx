@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 type QueryResultRow = (string | null)[];
@@ -17,10 +18,150 @@ interface ResultGridProps {
 
 type ResultViewMode = "data" | "structure" | "raw";
 
+const MIN_COLUMN_WIDTH = 80;
+const DEFAULT_COLUMN_WIDTH = 160;
+
+type ResizingState =
+  | { kind: "single"; column: string; startX: number; startWidth: number }
+  | {
+      kind: "dual";
+      leftColumn: string;
+      rightColumn: string;
+      startX: number;
+      leftWidth: number;
+      rightWidth: number;
+    };
+
 export default function ResultGrid({ result, running, error, tableName }: ResultGridProps) {
   const [viewMode, setViewMode] = useState<ResultViewMode>("data");
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const resizingRef = useRef<ResizingState | null>(null);
+  const columns = useMemo(() => result?.columns ?? [], [result?.columns]);
 
   const hasResult = !!result && result.columns.length > 0;
+
+  useEffect(() => {
+    if (!columns.length) {
+      return;
+    }
+
+    setColumnWidths((prev) => {
+      let next = prev;
+      columns.forEach((column) => {
+        if (!(column in next)) {
+          if (next === prev) {
+            next = { ...prev };
+          }
+
+          next[column] = DEFAULT_COLUMN_WIDTH;
+        }
+      });
+
+      return next;
+    });
+  }, [columns]);
+
+  const handleMouseMove = useCallback((event: MouseEvent) => {
+    const resizing = resizingRef.current;
+    if (!resizing) {
+      return;
+    }
+
+    if (resizing.kind === "single") {
+      const delta = event.clientX - resizing.startX;
+      const newWidth = Math.max(MIN_COLUMN_WIDTH, resizing.startWidth + delta);
+
+      setColumnWidths((prev) => {
+        const current = prev[resizing.column];
+        if (current === newWidth) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [resizing.column]: newWidth,
+        };
+      });
+      return;
+    }
+
+    const delta = event.clientX - resizing.startX;
+    const minDelta = MIN_COLUMN_WIDTH - resizing.leftWidth;
+    const maxDelta = resizing.rightWidth - MIN_COLUMN_WIDTH;
+    const clampedDelta = Math.min(Math.max(delta, minDelta), maxDelta);
+    const nextLeftWidth = resizing.leftWidth + clampedDelta;
+    const nextRightWidth = resizing.rightWidth - clampedDelta;
+
+    setColumnWidths((prev) => {
+      const leftChanged = prev[resizing.leftColumn] !== nextLeftWidth;
+      const rightChanged = prev[resizing.rightColumn] !== nextRightWidth;
+      if (!leftChanged && !rightChanged) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        [resizing.leftColumn]: nextLeftWidth,
+        [resizing.rightColumn]: nextRightWidth,
+      };
+    });
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    resizingRef.current = null;
+    window.removeEventListener("mousemove", handleMouseMove);
+    window.removeEventListener("mouseup", handleMouseUp);
+  }, [handleMouseMove]);
+
+  const startSingleResize = useCallback(
+    (column: string, event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const currentWidth = columnWidths[column] ?? DEFAULT_COLUMN_WIDTH;
+
+      resizingRef.current = {
+        kind: "single",
+        column,
+        startX: event.clientX,
+        startWidth: currentWidth,
+      };
+
+      window.addEventListener("mousemove", handleMouseMove);
+      window.addEventListener("mouseup", handleMouseUp);
+    },
+    [columnWidths, handleMouseMove, handleMouseUp]
+  );
+
+  const startBoundaryResize = useCallback(
+    (leftColumn: string, rightColumn: string, event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const leftWidth = columnWidths[leftColumn] ?? DEFAULT_COLUMN_WIDTH;
+      const rightWidth = columnWidths[rightColumn] ?? DEFAULT_COLUMN_WIDTH;
+
+      resizingRef.current = {
+        kind: "dual",
+        leftColumn,
+        rightColumn,
+        startX: event.clientX,
+        leftWidth,
+        rightWidth,
+      };
+
+      window.addEventListener("mousemove", handleMouseMove);
+      window.addEventListener("mouseup", handleMouseUp);
+    },
+    [columnWidths, handleMouseMove, handleMouseUp]
+  );
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [handleMouseMove, handleMouseUp]);
 
   let statusLabel: string;
   if (running) {
@@ -69,16 +210,53 @@ export default function ResultGrid({ result, running, error, tableName }: Result
           <Table className="workspace-panel__result-table">
             <TableHeader>
               <TableRow>
-                {result!.columns.map((column, columnIndex) => (
-                  <TableHead key={`${column}-${columnIndex}`}>{column}</TableHead>
-                ))}
+                {columns.map((column, columnIndex) => {
+                  const width = columnWidths[column];
+                  const prevColumn = columns[columnIndex - 1];
+                  const nextColumn = columns[columnIndex + 1];
+                  return (
+                    <TableHead
+                      key={`${column}-${columnIndex}`}
+                      style={width ? { width, minWidth: width } : undefined}
+                    >
+                      {prevColumn && (
+                        <span
+                          role="separator"
+                          aria-label={`Resize boundary between ${prevColumn} and ${column}`}
+                          className="workspace-panel__result-resizer workspace-panel__result-resizer--left"
+                          onMouseDown={(event) => startBoundaryResize(prevColumn, column, event)}
+                        />
+                      )}
+                      <div className="workspace-panel__result-th">
+                        <span className="workspace-panel__result-th-label">{column}</span>
+                      </div>
+                      <span
+                        role="separator"
+                        aria-label={`Resize ${column}${nextColumn ? ` and ${nextColumn}` : ""}`}
+                        className="workspace-panel__result-resizer workspace-panel__result-resizer--right"
+                        onMouseDown={(event) =>
+                          nextColumn
+                            ? startBoundaryResize(column, nextColumn, event)
+                            : startSingleResize(column, event)
+                        }
+                      />
+                    </TableHead>
+                  );
+                })}
               </TableRow>
             </TableHeader>
             <TableBody>
               {result!.rows.map((row, rowIndex) => (
                 <TableRow key={rowIndex}>
                   {row.map((value, cellIndex) => (
-                    <TableCell key={cellIndex}>
+                    <TableCell
+                      key={cellIndex}
+                      style={(() => {
+                        const columnName = columns[cellIndex];
+                        const width = columnWidths[columnName];
+                        return width ? { width, minWidth: width } : undefined;
+                      })()}
+                    >
                       {value === null ? (
                         <span className="workspace-panel__result-null">NULL</span>
                       ) : (
