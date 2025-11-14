@@ -30,14 +30,12 @@ describe("ResultGrid layout", () => {
       <ResultGrid result={sampleResult} running={false} error={null} tableName="activity_log" />
     );
 
-    expect(screen.getByText("activity_log")).toBeInTheDocument();
     expect(screen.getByText("2 rows")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Data" })).toHaveClass(
       "workspace-panel__statusbar-seg--active"
     );
     const [actions] = screen.getAllByTestId("result-view-actions");
     expect(actions).toBeInTheDocument();
-    expect(within(actions).getByText("Columns")).toBeInTheDocument();
   });
 
   it("switches between Data, Structure, and Raw views without breaking controls", async () => {

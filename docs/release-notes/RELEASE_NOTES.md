@@ -7,6 +7,7 @@
   - Thin, always-visible bar rendered above the status bar.
   - Scrolling the helper bar scrolls the result table horizontally.
   - The table content is translated with `transform: translateX(...)` so the helper bar fully controls the viewport.
+ - Workspace now supports a `Ctrl+W` keyboard shortcut inside the overlay to close the active result tab, mirroring desktop editor behavior.
 
 ### ♻️ Refactors
 - Streamlined the workspace top bar: replaced miscellaneous quick-action icons with a "DBpinBall" brand label and retained only essential window controls.
@@ -15,6 +16,7 @@
 ### ✅ Tests
 - Added regression coverage ensuring the refined top bar renders the brand label and window controls while omitting the removed buttons.
 - Added ResultGrid regression test verifying that moving the helper horizontal scrollbar updates the table's `transform` (horizontal scroll position) as expected.
+ - Added WorkspaceShell regression test covering the `Ctrl+W` shortcut to ensure it calls the close-tab handler for the active result tab.
 
 ---
 

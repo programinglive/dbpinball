@@ -32,7 +32,7 @@ type ResizingState =
       rightWidth: number;
     };
 
-export default function ResultGrid({ result, running, error, tableName }: ResultGridProps) {
+export default function ResultGrid({ result, running, error, tableName: _tableName }: ResultGridProps) {
   const [viewMode, setViewMode] = useState<ResultViewMode>("data");
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const resizingRef = useRef<ResizingState | null>(null);
@@ -82,21 +82,6 @@ export default function ResultGrid({ result, running, error, tableName }: Result
       // Make helper track match the table's scrollable width
       const helperWidth = Math.max(tableScrollWidth, clientWidth + 100);
       inner.style.width = `${helperWidth}px`;
-
-      setTimeout(() => {
-        console.log('[Helper] Updated width:', {
-          clientWidth,
-          helperWidth,
-          innerWidth: inner.style.width,
-          hscrollScrollWidth: hscroll.scrollWidth,
-          hscrollClientWidth: hscroll.clientWidth,
-          hscrollMaxScroll: hscroll.scrollWidth - hscroll.clientWidth,
-          tableWidth: table?.offsetWidth,
-          tableScrollWidth,
-          columnCount: columns.length,
-          totalColumnWidth: columns.reduce((sum, col) => sum + (columnWidths[col] || 160), 0)
-        });
-      }, 0);
     };
 
     updateHelperWidth();
@@ -109,7 +94,6 @@ export default function ResultGrid({ result, running, error, tableName }: Result
 
     const handleHelperScroll = () => {
       if (!viewport || !hscroll) {
-        console.log('[Helper] Missing refs:', { viewport: !!viewport, hscroll: !!hscroll });
         return;
       }
 
@@ -118,19 +102,7 @@ export default function ResultGrid({ result, running, error, tableName }: Result
       const maxViewportScroll = tableScrollWidth - viewport.clientWidth;
       const maxHelperScroll = hscroll.scrollWidth - hscroll.clientWidth;
 
-      console.log('[Helper] Scroll event:', {
-        helperScrollLeft: hscroll.scrollLeft,
-        maxViewportScroll,
-        maxHelperScroll,
-        viewportScrollWidth: viewport.scrollWidth,
-        viewportClientWidth: viewport.clientWidth,
-        hscrollScrollWidth: hscroll.scrollWidth,
-        hscrollClientWidth: hscroll.clientWidth,
-        tableScrollWidth
-      });
-
       if (maxViewportScroll <= 0 || maxHelperScroll <= 0) {
-        console.log('[Helper] No scroll range available');
         return;
       }
 
@@ -144,8 +116,6 @@ export default function ResultGrid({ result, running, error, tableName }: Result
       if (table) {
         table.style.transform = `translateX(${-newScrollLeft}px)`;
       }
-
-      console.log('[Helper] Set viewport.scrollLeft:', newScrollLeft, 'ratio:', ratio);
     };
 
     hscroll.addEventListener("scroll", handleHelperScroll, { passive: true });
@@ -395,31 +365,6 @@ export default function ResultGrid({ result, running, error, tableName }: Result
 
   return (
     <>
-      {tableName && (
-        <div className="workspace-panel__infobar">
-          <div className="workspace-panel__infobar-left">
-            <span className="workspace-panel__infobar-table">{tableName}</span>
-          </div>
-          <div className="workspace-panel__infobar-right">
-            <button type="button" className="workspace-panel__infobar-btn" disabled>
-              Error
-            </button>
-            <button type="button" className="workspace-panel__infobar-btn" disabled>
-              Filters
-            </button>
-            <button type="button" className="workspace-panel__infobar-btn" disabled>
-              Columns
-            </button>
-            <span className="workspace-panel__infobar-sep" />
-            <button type="button" className="workspace-panel__infobar-icon" disabled>
-              ⟲
-            </button>
-            <button type="button" className="workspace-panel__infobar-icon" disabled>
-              ☰
-            </button>
-          </div>
-        </div>
-      )}
       {content}
       <div className="workspace-panel__statusbar">
         <div
@@ -451,8 +396,6 @@ export default function ResultGrid({ result, running, error, tableName }: Result
         </div>
         <div className="workspace-panel__statusbar-center">{statusLabel}</div>
         <div className="workspace-panel__statusbar-right" data-testid="result-view-actions">
-          <button type="button" className="workspace-panel__statusbar-btn">Filter</button>
-          <button type="button" className="workspace-panel__statusbar-btn">Columns</button>
           <button type="button" className="workspace-panel__statusbar-nav" disabled>
             &#x2039;
           </button>

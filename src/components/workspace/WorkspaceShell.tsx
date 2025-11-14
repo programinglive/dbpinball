@@ -1,4 +1,5 @@
 import { Settings, Minus, Square, X, PlugZap, Database } from "lucide-react";
+import { useEffect } from "react";
 import type { WorkspaceState } from "@/pages/connections.types";
 import ItemsSidebar from "@/components/workspace/ItemsSidebar";
 import TableTabs from "@/components/workspace/TableTabs";
@@ -46,6 +47,29 @@ export default function WorkspaceShell(props: WorkspaceShellProps) {
     onToggleMaximize,
     onCloseWindow,
   } = props;
+
+  // Close the active result tab with Ctrl+W, similar to desktop editors.
+  useEffect(() => {
+    if (!workspace.open || !workspace.connection) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || (event.key !== "w" && event.key !== "W")) {
+        return;
+      }
+
+      if (!workspace.selectedTable) {
+        return;
+      }
+
+      event.preventDefault();
+      onCloseTableTab(workspace.selectedTable);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [workspace.open, workspace.connection, workspace.selectedTable, onCloseTableTab]);
 
   if (!workspace.open || !workspace.connection) return null;
 
