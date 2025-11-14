@@ -1,7 +1,5 @@
 import { useRef, type ReactNode } from "react";
 import { BrowserRouter as Router } from "react-router-dom";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
 import ConnectionsPage, { type ConnectionsPageHandle } from "@/pages/connections";
 import {
   DropdownMenu,
@@ -9,25 +7,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { LucideIcon } from "lucide-react";
-import { Database, Plus, Search } from "lucide-react";
+import { Plus, Search, UploadCloud, RotateCcw, PlugZap } from "lucide-react";
 import "./App.css";
-
-type NavItem = {
-  value: "connections";
-  label: string;
-  description: string;
-  icon: LucideIcon;
-};
-
-const NAV_ITEMS: NavItem[] = [
-  {
-    value: "connections",
-    label: "Connections",
-    description: "Create connection…",
-    icon: Database,
-  },
-];
 
 const Panel = ({ children }: { children: ReactNode }) => <section className="panel">{children}</section>;
 
@@ -36,28 +17,70 @@ function App() {
 
   return (
     <Router>
-      <Tabs defaultValue="connections" className="app-shell">
+      <div className="app-shell">
         <div className="app-layout">
-          <aside className="nav-rail">
-            <TabsList className="nav-rail__tabs" aria-label="Workspace areas">
-              {NAV_ITEMS.map(({ value, label, description, icon: Icon }) => (
-                <TabsTrigger key={value} value={value} className="nav-rail__trigger">
-                  <Icon className="nav-rail__trigger-icon" size={18} />
-                  <div className="nav-rail__trigger-text">
-                    <span>{label}</span>
-                    <small>{description}</small>
-                  </div>
-                </TabsTrigger>
-              ))}
-            </TabsList>
+          <aside className="nav-rail" data-tauri-drag-region>
+            <div className="nav-rail__brand">
+              <img src="/logo_dbpinball.png" alt="DB Pinball logo" className="nav-rail__logo" />
+              <div className="nav-rail__text">
+                <h1 className="nav-rail__title">DB Pinball</h1>
+                <p className="nav-rail__subtitle">Version 0.1.4 (preview)</p>
+                <p className="nav-rail__notice">You are using the free trial</p>
+              </div>
+            </div>
+
+            <div className="nav-rail__actions">
+              <button type="button" className="nav-rail__action nav-rail__action--primary" data-tauri-drag-region="false">
+                Purchase
+              </button>
+              <button type="button" className="nav-rail__action" data-tauri-drag-region="false">
+                Activate
+              </button>
+            </div>
+
+            <div className="nav-rail__cta-stack">
+              <button
+                type="button"
+                className="nav-rail__cta"
+                aria-label="Backup database"
+                data-tauri-drag-region="false"
+              >
+                <UploadCloud size={16} className="nav-rail__cta-icon" />
+                <span>Backup database…</span>
+              </button>
+              <button
+                type="button"
+                className="nav-rail__cta"
+                aria-label="Restore databases"
+                data-tauri-drag-region="false"
+              >
+                <RotateCcw size={16} className="nav-rail__cta-icon" />
+                <span>Restore databases…</span>
+              </button>
+              <button
+                type="button"
+                className="nav-rail__cta"
+                aria-label="Create connection"
+                onClick={() => connectionsRef.current?.openNewConnection()}
+                data-tauri-drag-region="false"
+              >
+                <PlugZap size={16} className="nav-rail__cta-icon" />
+                <span>Create connection…</span>
+              </button>
+            </div>
           </aside>
 
           <main className="main-stage">
-            <header className="main-stage__toolbar">
+            <header className="main-stage__toolbar" data-tauri-drag-region>
               <div className="toolbar__left">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <button className="toolbar__icon-button" type="button" aria-label="Add database connection">
+                    <button
+                      className="toolbar__icon-button"
+                      type="button"
+                      aria-label="Add database connection"
+                      data-tauri-drag-region="false"
+                    >
                       <Plus size={16} />
                     </button>
                   </DropdownMenuTrigger>
@@ -78,21 +101,24 @@ function App() {
                 </DropdownMenu>
                 <div className="toolbar__search">
                   <Search className="toolbar__search-icon" size={16} />
-                  <Input placeholder="Search for connection… (Ctrl F)" className="toolbar__search-input" />
+                  <input
+                    type="text"
+                    placeholder="Search for connection… (Ctrl F)"
+                    className="toolbar__search-input"
+                    data-tauri-drag-region="false"
+                  />
                 </div>
               </div>
             </header>
 
             <section className="main-stage__content">
-              <TabsContent value="connections" className="workspace__panel" forceMount>
-                <Panel>
-                  <ConnectionsPage ref={connectionsRef} />
-                </Panel>
-              </TabsContent>
+              <Panel>
+                <ConnectionsPage ref={connectionsRef} />
+              </Panel>
             </section>
           </main>
         </div>
-      </Tabs>
+      </div>
     </Router>
   );
 }

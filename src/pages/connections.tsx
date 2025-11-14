@@ -169,9 +169,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const databasePickerOpenRaf = useRef<number | null>(null);
 
   useEffect(() => {
-    if (import.meta.env.DEV) {
-      console.log("[connection-picker] open state", connectionPickerOpen);
-    }
+    return;
   }, [connectionPickerOpen]);
 
   useEffect(() => {
@@ -639,9 +637,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   }, [itemsSidebarQuery, workspace.tables]);
 
   const handleShowConnectionPicker = () => {
-    if (import.meta.env.DEV) {
-      console.log("[connection-picker] trigger");
-    }
     setConnectionPickerQuery("");
     const defaultId = workspace.connection?.id ?? sortedConnections[0]?.id ?? null;
     setConnectionPickerSelectedId(defaultId);
@@ -916,17 +911,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   return (
     <>
       <div className="connections-screen">
-        <div className="connections-screen__topbar">
-          <button
-            type="button"
-            className="connections-shell__icon-btn connections-shell__icon-btn--brand"
-            aria-label="Open connection list"
-            onClick={handleShowConnectionPicker}
-            data-tauri-drag-region="false"
-          >
-            <PlugZap size={16} />
-          </button>
-        </div>
 
         <Dialog
           open={open}
