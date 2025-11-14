@@ -161,7 +161,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const [databasePickerSelected, setDatabasePickerSelected] = useState<string | null>(null);
   const [databasePickerSuppressed, setDatabasePickerSuppressed] = useState(false);
   const [itemsSidebarQuery, setItemsSidebarQuery] = useState("");
-  const [itemsFunctionsOpen, setItemsFunctionsOpen] = useState(true);
+  const [itemsFunctionsOpen, setItemsFunctionsOpen] = useState(false);
   const [itemsTablesOpen, setItemsTablesOpen] = useState(true);
   const connectionPickerSearchRef = useRef<HTMLInputElement | null>(null);
   const databasePickerSearchRef = useRef<HTMLInputElement | null>(null);
@@ -1187,50 +1187,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                 </button>
               </div>
 
-              <div className="connections-shell__topbar-section connections-shell__topbar-section--info">
-                <div className="workspace-panel__tabs">
-                  <button
-                    type="button"
-                    className={`workspace-panel__tab${workspaceTab === "items" ? " workspace-panel__tab--active" : ""}`}
-                    onClick={() => setWorkspaceTab("items")}
-                  >
-                    Items
-                  </button>
-                  <button
-                    type="button"
-                    className={`workspace-panel__tab${workspaceTab === "queries" ? " workspace-panel__tab--active" : ""}`}
-                    onClick={() => setWorkspaceTab("queries")}
-                  >
-                    Queries
-                  </button>
-                  <button
-                    type="button"
-                    className={`workspace-panel__tab${workspaceTab === "history" ? " workspace-panel__tab--active" : ""}`}
-                    onClick={() => setWorkspaceTab("history")}
-                  >
-                    History
-                  </button>
-                </div>
-              </div>
-
               <div className="connections-shell__topbar-section connections-shell__topbar-section--actions">
-                {(() => {
-                  const status = testResult[workspace.connection!.id];
-                  const statusLabel =
-                    status === undefined ? "Unknown" : status ? "Connected" : "Error";
-                  const statusState =
-                    status === undefined ? "pending" : status ? "success" : "error";
-
-                  return (
-                    <span
-                      className={`connections-shell__status-chip connections-shell__status-chip--${statusState}`}
-                      title="Connection health"
-                    >
-                      {statusLabel}
-                    </span>
-                  );
-                })()}
-
                 <button type="button" className="connections-shell__icon-btn" aria-label="Settings" data-tauri-drag-region="false">
                   <Settings size={16} />
                 </button>

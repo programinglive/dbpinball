@@ -1318,6 +1318,7 @@ body {
 
 .connections-shell__topbar-section--actions {
   flex: 0 0 auto;
+  margin-left: auto;
   gap: 0.4rem;
 }
 
