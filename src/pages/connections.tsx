@@ -6,7 +6,6 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { invoke } from "@tauri-apps/api/core";
@@ -508,95 +507,64 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
         selectedTable: tableName,
         queryText: nextQueryText,
         queryDirty: shouldResetQuery ? false : prev.queryDirty,
+        // we will immediately run a fresh preview below when resetting the query
         queryResult: shouldResetQuery ? null : prev.queryResult,
+        queryError: null,
+      };
+    });
+
+    // Auto-run a preview for the selected table, similar to TablePlus behaviour.
+    setWorkspace((prev) => {
+      if (!prev.connection || !prev.selectedDatabase) {
+        return prev;
+      }
+
+      const sql = buildSelectQuery(prev.connection.engine, tableName, prev.queryLimit);
+
+      // Kick off the async query; result handling mirrors handleRunQuery.
+      (async () => {
+        const conn = prev.connection!;
+        const connectionId = conn.id;
+        const database = prev.selectedDatabase!;
+
+        try {
+          const result = await invoke<QueryResultPayload>("run_query_cmd", {
+            conn,
+            database,
+            sql,
+            limit: prev.queryLimit,
+          });
+
+          setWorkspace((current) => {
+            if (!current.connection || current.connection.id !== connectionId || current.selectedDatabase !== database) {
+              return current;
+            }
+
+            return {
+              ...current,
+              queryRunning: false,
+              queryResult: result,
+              queryError: null,
+            };
+          });
+        } catch (err) {
+          setWorkspace((current) => ({
+            ...current,
+            queryRunning: false,
+            queryError: formatError(err),
+          }));
+        }
+      })().catch(console.error);
+
+      return {
+        ...prev,
+        queryRunning: true,
         queryError: null,
       };
     });
   };
 
-  const handleQueryTextChange = (value: string) => {
-    setWorkspace((prev) => ({
-      ...prev,
-      queryText: value,
-      queryDirty: true,
-    }));
-  };
-
-  const handleQueryLimitInputChange = (value: string) => {
-    setWorkspace((prev) => {
-      const sanitized = value.replace(/[^0-9]/g, "");
-      const parsed = sanitized === "" ? Number.NaN : Number.parseInt(sanitized, 10);
-      return {
-        ...prev,
-        queryLimitInput: sanitized,
-        queryLimit: Number.isNaN(parsed) ? prev.queryLimit : parsed,
-      };
-    });
-  };
-
-  const handleRunQuery = async () => {
-    if (!workspace.connection) {
-      return;
-    }
-
-    if (!workspace.selectedDatabase) {
-      setWorkspace((prev) => ({
-        ...prev,
-        queryError: "Select a database before running a query.",
-      }));
-      return;
-    }
-
-    const sql = workspace.queryText.trim();
-    if (sql.length === 0) {
-      setWorkspace((prev) => ({
-        ...prev,
-        queryError: "Enter a SQL query to run.",
-      }));
-      return;
-    }
-
-    const conn = workspace.connection;
-    const connectionId = conn.id;
-    const database = workspace.selectedDatabase;
-    const limitInput = workspace.queryLimitInput.trim();
-    const parsedLimit = limitInput === "" ? null : Number.parseInt(limitInput, 10);
-    const limitValue = Number.isNaN(parsedLimit ?? NaN) ? null : parsedLimit;
-
-    setWorkspace((prev) => ({
-      ...prev,
-      queryRunning: true,
-      queryError: null,
-    }));
-
-    try {
-      const result = await invoke<QueryResultPayload>("run_query_cmd", {
-        conn,
-        database,
-        sql,
-        limit: limitValue,
-      });
-
-      setWorkspace((prev) => {
-        if (!prev.connection || prev.connection.id !== connectionId || prev.selectedDatabase !== database) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          queryRunning: false,
-          queryResult: result,
-          queryError: null,
-        };
-      });
-    } catch (err) {
-      setWorkspace((prev) => ({
-        ...prev,
-        queryRunning: false,
-        queryError: formatError(err),
-      }));
-    }
-  };
+  // Query editor handlers were removed from the Items tab; editor will live elsewhere.
 
   const sortedConnections = useMemo(
     () => [...connections].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })),
@@ -1187,6 +1155,28 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                 </button>
               </div>
 
+              <div className="connections-shell__topbar-section connections-shell__topbar-section--info">
+                <div className="connections-shell__session-line" aria-label="Current connection summary">
+                  <span className="connections-shell__session-env">LOCAL</span>
+                  <span className="connections-shell__session-separator">|</span>
+                  <span className="connections-shell__session-meta">
+                    {workspace.connection.engine === "postgres" ? "PostgreSQL" : "MySQL"}
+                  </span>
+                  <span className="connections-shell__session-separator">·</span>
+                  <span className="connections-shell__session-path">
+                    <span className="connections-shell__session-path--muted">{workspace.connection.username}</span>
+                    <span className="connections-shell__session-path-separator">@</span>
+                    <span>{workspace.connection.host}:{workspace.connection.port}</span>
+                    {workspace.selectedDatabase && (
+                      <>
+                        <span className="connections-shell__session-path-separator">·</span>
+                        <span>{workspace.selectedDatabase}</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+              </div>
+
               <div className="connections-shell__topbar-section connections-shell__topbar-section--actions">
                 <button type="button" className="connections-shell__icon-btn" aria-label="Settings" data-tauri-drag-region="false">
                   <Settings size={16} />
@@ -1371,12 +1361,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
 
               <main className="connections-shell__workspace">
                 <div className="connections-shell__workspace-card">
-                  <header className="connections-shell__workspace-card-header">
-                    <h3>{workspace.connection.name}</h3>
-                    <span className="connections-shell__workspace-connection">
-                      {workspace.connection.username}@{workspace.connection.host}:{workspace.connection.port}
-                    </span>
-                  </header>
                   <div className="connections-shell__workspace-card-body">
                     {workspace.loading ? (
                       <div className="connections-shell__workspace-status">Testing connection…</div>
@@ -1400,36 +1384,6 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                         {workspaceTab === "items" && (
                         <div className="workspace-panel__content workspace-panel__content--single">
                           <section className="workspace-panel__query">
-                            <div className="workspace-panel__editor">
-                              <Textarea
-                                value={workspace.queryText}
-                                onChange={(event) => handleQueryTextChange(event.target.value)}
-                                placeholder="Write a SQL query…"
-                                className="workspace-panel__textarea"
-                                rows={6}
-                              />
-                            </div>
-
-                            <div className="workspace-panel__controls">
-                              <div className="workspace-panel__limit">
-                                <Label htmlFor="workspace-query-limit">Row limit</Label>
-                                <Input
-                                  id="workspace-query-limit"
-                                  inputMode="numeric"
-                                  value={workspace.queryLimitInput}
-                                  onChange={(event) => handleQueryLimitInputChange(event.target.value)}
-                                />
-                              </div>
-                              <Button
-                                type="button"
-                                onClick={() => void handleRunQuery()}
-                                disabled={workspace.queryRunning}
-                                className="workspace-panel__run"
-                              >
-                                {workspace.queryRunning ? "Running…" : "Run query"}
-                              </Button>
-                            </div>
-
                             {workspace.queryError && (
                               <p className="workspace-panel__error" role="alert">
                                 {workspace.queryError}
@@ -1437,54 +1391,37 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
                             )}
 
                             <div className="workspace-panel__result">
-                              {workspace.queryRunning ? (
-                                <div className="workspace-panel__status">Running query…</div>
-                              ) : workspace.queryResult ? (
-                                workspace.queryResult.columns.length === 0 ? (
-                                  <div className="workspace-panel__status">Query executed successfully. No columns returned.</div>
-                                ) : (
-                                  <>
-                                    <div className="workspace-panel__result-meta">
-                                      Showing {workspace.queryResult.rows.length} row(s)
-                                    </div>
-                                    <ScrollArea className="workspace-panel__result-scroll">
-                                      <Table className="workspace-panel__result-table">
-                                        <TableHeader>
-                                          <TableRow>
-                                            {workspace.queryResult.columns.map((column, columnIndex) => (
-                                              <TableHead key={`${column}-${columnIndex}`}>{column}</TableHead>
-                                            ))}
-                                          </TableRow>
-                                        </TableHeader>
-                                        <TableBody>
-                                          {workspace.queryResult.rows.length === 0 ? (
-                                            <TableRow>
-                                              <TableCell colSpan={workspace.queryResult.columns.length} className="workspace-panel__status">
-                                                Query returned zero rows.
-                                              </TableCell>
-                                            </TableRow>
-                                          ) : (
-                                            workspace.queryResult.rows.map((row, rowIndex) => (
-                                              <TableRow key={rowIndex}>
-                                                {row.map((value, cellIndex) => (
-                                                  <TableCell key={cellIndex}>
-                                                    {value === null ? (
-                                                      <span className="workspace-panel__result-null">NULL</span>
-                                                    ) : (
-                                                      value
-                                                    )}
-                                                  </TableCell>
-                                                ))}
-                                              </TableRow>
-                                            ))
-                                          )}
-                                        </TableBody>
-                                      </Table>
-                                    </ScrollArea>
-                                  </>
-                                )
-                              ) : (
-                                <div className="workspace-panel__status">Run a query to see results.</div>
+                              {workspace.queryRunning && !workspace.queryResult ? (
+                                <div className="workspace-panel__status">Running query</div>
+                              ) : null}
+
+                              {!workspace.queryRunning && workspace.queryResult && workspace.queryResult.columns.length > 0 && (
+                                <ScrollArea className="workspace-panel__result-scroll">
+                                  <Table className="workspace-panel__result-table">
+                                    <TableHeader>
+                                      <TableRow>
+                                        {workspace.queryResult.columns.map((column, columnIndex) => (
+                                          <TableHead key={`${column}-${columnIndex}`}>{column}</TableHead>
+                                        ))}
+                                      </TableRow>
+                                    </TableHeader>
+                                    <TableBody>
+                                      {workspace.queryResult.rows.map((row, rowIndex) => (
+                                        <TableRow key={rowIndex}>
+                                          {row.map((value, cellIndex) => (
+                                            <TableCell key={cellIndex}>
+                                              {value === null ? (
+                                                <span className="workspace-panel__result-null">NULL</span>
+                                              ) : (
+                                                value
+                                              )}
+                                            </TableCell>
+                                          ))}
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                </ScrollArea>
                               )}
                             </div>
                           </section>
