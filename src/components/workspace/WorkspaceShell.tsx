@@ -233,6 +233,7 @@ export default function WorkspaceShell(props: WorkspaceShellProps) {
                               result={workspace.queryResult}
                               running={workspace.queryRunning}
                               error={workspace.queryError}
+                              tableName={workspace.selectedTable}
                             />
                           </div>
                         </section>

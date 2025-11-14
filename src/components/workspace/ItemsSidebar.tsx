@@ -110,7 +110,8 @@ export default function ItemsSidebar(props: ItemsSidebarProps) {
                           className={`items-sidebar__item${isSelected ? " items-sidebar__item--active" : ""}`}
                           onClick={() => onSelectTable(tableName)}
                         >
-                          <span>{tableName}</span>
+                          <span className="items-sidebar__item-icon" aria-hidden="true" />
+                          <span className="items-sidebar__item-label">{tableName}</span>
                         </button>
                       </li>
                     );

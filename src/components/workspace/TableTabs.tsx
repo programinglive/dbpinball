@@ -20,8 +20,9 @@ export default function TableTabs({ tabs, active, onSelect, onClose }: TableTabs
             onClick={() => onSelect(name)}
           >
             <span className="workspace-panel__table-tab-label">{name}</span>
-            <button
-              type="button"
+            <span
+              role="button"
+              aria-label={`Close ${name}`}
               className="workspace-panel__table-tab-close"
               onClick={(event) => {
                 event.stopPropagation();
@@ -29,7 +30,7 @@ export default function TableTabs({ tabs, active, onSelect, onClose }: TableTabs
               }}
             >
               ×
-            </button>
+            </span>
           </button>
         );
       })}

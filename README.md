@@ -87,6 +87,15 @@ dbpinball/
 5. Double-click a connection (or choose **Connect** from the context menu) to open the TablePlus-style workspace overlay.
 6. Browse databases from the left sidebar; connection details remain visible in the inspector on the right.
 
+### TablePlus Layout Expectations
+
+The workspace intentionally mirrors TablePlus. When editing this screen, keep these constraints in mind:
+
+- **Full-height Scaffold**: `.connections-shell`, the grid areas (sidebar / workspace / inspector), and their flex children must all use `flex: 1` + `min-height: 0` so nothing scrolls the root window. Only the sidebar list and result grid scroll internally.
+- **Items Sidebar**: Search input + collapsible sections live inside `.items-sidebar__scroll`, which always shows a thin scrollbar. Expanding long table lists should never push the sidebar out of view.
+- **Result Area**: Tabs (when present), a top info bar (table name + Filters/Columns/etc.), the data view (Data / Structure / Raw), and the bottom status bar form a single column. The info bar and status bar remain visible even when thousands of rows render, because the table sits in a flex child with `overflow: auto`.
+- **Status & Controls**: The Data / Structure / Raw toggle as well as placeholder Filter/Columns buttons are part of the fixed bottom bar. Tests in `src/components/workspace/__tests__/ResultGrid.test.tsx` will fail if the markup or class names disappear.
+
 ### Planned Workflows
 
 Backup, restore, copy, and job history features are under active development and will return as part of upcoming releases.
