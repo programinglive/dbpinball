@@ -796,14 +796,16 @@ body {
   box-shadow: 0 26px 60px rgba(8, 12, 24, 0.65);
   padding: 0;
   overflow: hidden;
-  max-height: min(90vh, 720px);
-  width: min(540px, 92vw);
+  max-height: min(90vh, 640px);
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
   display: grid;
   grid-template-rows: auto 1fr;
 }
 
 .connection-dialog__header {
-  padding: 1.6rem 1.8rem 1.1rem;
+  padding: 0.8rem 1.3rem 0.55rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
   background: inherit;
   position: sticky;
@@ -812,21 +814,22 @@ body {
 }
 
 .connection-dialog__title {
-  font-size: 1.1rem;
+  font-size: 0.96rem;
   font-weight: 600;
   color: rgba(226, 232, 240, 0.96);
 }
 
 .connection-dialog__description {
-  color: rgba(148, 163, 184, 0.78);
-  margin-top: 0.35rem;
+  color: rgba(148, 163, 184, 0.74);
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
 }
 
 .connection-form {
-  padding: 1.5rem 1.8rem 1.8rem;
+  padding: 0.7rem 1.3rem 0.85rem;
   display: flex;
   flex-direction: column;
-  gap: 1.35rem;
+  gap: 0.7rem;
   overflow-y: auto;
   min-height: 0;
 }
@@ -834,12 +837,12 @@ body {
 .connection-form__section {
   background: rgba(17, 24, 39, 0.9);
   border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 0.9rem;
-  padding: 1.1rem 1.2rem 1.25rem;
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.9rem 0.7rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.6rem;
 }
 
 .connection-form__section-header {
@@ -852,21 +855,21 @@ body {
 
 .connection-form__section-title {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 600;
   color: rgba(226, 232, 240, 0.94);
 }
 
 .connection-form__section-description {
   margin: 0;
-  font-size: 0.78rem;
-  color: rgba(148, 163, 184, 0.76);
+  font-size: 0.76rem;
+  color: rgba(148, 163, 184, 0.7);
 }
 
 .connection-form__row {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .connection-form__row--single {
@@ -876,12 +879,12 @@ body {
 .connection-field {
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
+  gap: 0.4rem;
   min-width: 0;
 }
 
 .connection-field label {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(148, 163, 184, 0.78);
@@ -905,9 +908,9 @@ body {
   border: 1px solid rgba(100, 116, 139, 0.35);
   background: #1c2334;
   color: rgba(226, 232, 240, 0.96);
-  height: 2.6rem;
-  padding: 0.6rem 0.75rem;
-  font-size: 0.88rem;
+  height: 2rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
@@ -933,14 +936,17 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   border-top: 1px solid rgba(148, 163, 184, 0.12);
-  padding-top: 1.1rem;
-  margin-top: 0.2rem;
+  padding-top: 0.45rem;
+  margin-top: 0.05rem;
+  position: sticky;
+  bottom: 0;
+  background: #101826;
 }
 
 .connection-form__footer-hint {
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   color: rgba(148, 163, 184, 0.75);
 }
 
@@ -951,7 +957,7 @@ body {
 
 .connection-btn {
   border-radius: 0.65rem;
-  padding: 0.6rem 1.2rem;
+  padding: 0.38rem 0.85rem;
   font-weight: 600;
 }
 
