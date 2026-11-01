@@ -1,5 +1,8 @@
 # dbpinball Release Notes
 
+| Version | Date       | Highlights |
+|---------|------------|------------|
+
 ## Unreleased
 
 _No unreleased changes yet._
