@@ -1,0 +1,6 @@
+{
+  "name": "@programinglive/dbpinball-laravel-adapter",
+  "version": "1.0.0",
+  "description": "Laravel backup and orchestration adapter for dbpinball",
+  "private": true
+}

@@ -37,6 +37,11 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## Monorepo Packages
+
+- **Desktop Workspace (`apps/desktop` / root)**: Tauri + React interactive database manager and local dump runners.
+- **Laravel Adapter ([`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md))**: Server-side Laravel package (formerly `laravel-simple-backup`) providing Artisan backup automation, retention policies, and cloud storage drivers.
+
 ## Architecture
 
 ### Frontend (React + TypeScript)
