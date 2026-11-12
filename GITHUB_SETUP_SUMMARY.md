@@ -1,5 +1,7 @@
 # GitHub Setup & @programinglive/commiter Integration Summary
 
+> **Historical record.** This document describes the repository state at the time of initial setup. Its commands and versions are outdated: releases now run through `commiter release` (see `package.json`), and `scripts/release.js` no longer exists. For current instructions see [`README.md`](README.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## ✅ Completed Tasks
 
 ### 1. Fixed All IDE Issues

@@ -1,5 +1,7 @@
 # @programinglive/commiter Setup Guide
 
+> **Historical record.** The installed version is now `@programinglive/commiter@^1.5.1`, and releases run through `commiter release`. The `scripts/release.js` path described below no longer exists. See `package.json` for the current scripts.
+
 ## Overview
 
 dbpinball uses `@programinglive/commiter` for standardized commit messages, changelog generation, and semantic versioning. This ensures clean, professional release management.

@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible defect in DBPinball
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not include real credentials, connection strings, production dumps, or customer data.**
+        Use synthetic data and redact hosts and usernames.
+
+        For security vulnerabilities, do not open an issue. See SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: DBPinball version
+      description: The version shown in the app, or the commit SHA.
+      placeholder: "0.1.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      options:
+        - MySQL
+        - PostgreSQL
+        - Not database-related
+    validations:
+      required: true
+  - type: input
+    id: engine-version
+    attributes:
+      label: Engine version
+      placeholder: "PostgreSQL 16.2 / MySQL 8.0.36"
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11, macOS 15, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic data only.
+      placeholder: |
+        1. Create a connection to a local test database
+        2. Open the workspace
+        3. Select table X
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact hosts, usernames, and any connection details.
+      render: text
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have not included real credentials or production data.
+          required: true
+        - label: I checked the README capability states and this is not a documented limitation.
+          required: true
