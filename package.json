@@ -4,6 +4,10 @@
   "version": "0.1.6",
   "license": "MIT",
   "type": "module",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

@@ -65,6 +65,11 @@ These exist in the codebase but are **not reachable from the current UI**, or ar
 
 The CLI and Safe Sync are **not available**. No command in this README should be assumed to exist until the corresponding milestone ships.
 
+## Monorepo Packages
+
+- **Desktop Workspace (`apps/desktop` / root)**: Tauri + React interactive database manager and local dump runners.
+- **Laravel Adapter ([`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md))**: Server-side Laravel package (formerly `laravel-simple-backup`) providing Artisan backup automation, retention policies, and cloud storage drivers.
+
 ## Architecture
 
 ### Current implementation
@@ -118,9 +123,11 @@ Backup and restore additionally require the vendor client tools (`mysqldump`, `m
 
 ## Framework compatibility
 
-DBPinball is framework-agnostic. It connects to database engines, not to application frameworks, so any project using MySQL or PostgreSQL is compatible.
+DBPinball is framework-agnostic at its core. It connects to database engines, not to application frameworks, so any project using MySQL or PostgreSQL is compatible.
 
-No framework-specific adapter ships in this repository. There is no Laravel, Rails, Django, or Prisma integration here, and none is claimed.
+A **Laravel adapter** ships in this repository at [`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md). It provides Artisan backup automation, retention policies, and cloud storage drivers for Laravel applications. It is a separate package with its own `composer.json` and PHP test suite.
+
+No other framework-specific adapter ships here. There is no Rails, Django, or Prisma integration, and none is claimed.
 
 ## Desktop quick start
 
@@ -209,7 +216,7 @@ npm test                          # frontend (Vitest)
 cd src-tauri && cargo test        # Rust
 ```
 
-The Rust test suite currently contains **0 tests**. The frontend suite contains 10.
+The Rust test suite currently contains **0 tests**. The frontend suite contains 11.
 
 ### Lint and type-check
 
@@ -233,13 +240,14 @@ dbpinball/
 │   └── src/runners/          MySQL and PostgreSQL implementations
 ├── docs/                     architecture, audit, and release notes
 └── scripts/                  pre-commit test verification
+└── packages/laravel-adapter/ Laravel adapter package (PHP)
 ```
 
 ## Testing and validation
 
 | Suite | Command | Current result |
 | --- | --- | --- |
-| Frontend | `npm test` | 3 files, 10 tests passing |
+| Frontend | `npm test` | 4 files, 11 tests passing |
 | Rust | `cd src-tauri && cargo test` | 0 tests |
 | Type check | `npm run lint` | passing |
 | Rust format | `cd src-tauri && cargo fmt --all -- --check` | passing |
@@ -280,6 +288,6 @@ Do not open a public issue for a vulnerability. See [`SECURITY.md`](SECURITY.md)
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+This project is licensed under the [MIT License](LICENSE).
 
 Third-party attributions are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
