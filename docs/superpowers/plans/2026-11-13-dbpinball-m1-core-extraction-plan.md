@@ -296,7 +296,35 @@ Integration tests (`crates/dbpinball-core/tests/inspect_integration.rs`, gated):
 #![cfg(feature = "integration")]
 ```
 
-Reads `DBPINBALL_TEST_PG_URL` and `DBPINBALL_TEST_MYSQL_URL`. Skips with a clear message when unset. Covers `test_connection`, `list_databases`, `list_tables` against disposable databases.
+The fixture is a disposable Docker Compose stack, `docker-compose.test.yml` at the repository root:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dbpinball
+      POSTGRES_DB: dbpinball_test
+    ports: ["55432:5432"]
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: dbpinball
+      MYSQL_DATABASE: dbpinball_test
+    ports: ["53306:3306"]
+```
+
+Run:
+
+```bash
+docker compose -f docker-compose.test.yml up -d --wait
+DBPINBALL_TEST_PG_URL=postgres://postgres:dbpinball@127.0.0.1:55432/dbpinball_test \
+DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
+cargo test -p dbpinball-core --features integration
+docker compose -f docker-compose.test.yml down -v
+```
+
+The tests skip with a clear message when the variables are unset, so `cargo test` stays fast and offline. CI does not run the integration job in M1; enabling it is a follow-up once the fixture is proven stable, so a Docker outage cannot block the main pipeline.
 
 ### Task 10 — Documentation
 
