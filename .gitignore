@@ -7,18 +7,66 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Node
 node_modules
 dist
 dist-ssr
 *.local
+coverage
+.vite
+
+# Rust / Tauri build output
+target/
+src-tauri/target/
+src-tauri/gen/android
+src-tauri/gen/apple
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*
+secrets.json
+
+# Local connection configuration and application data
+connections.json
+/dbpinball/
+/backups/
+/snapshots/
+
+# Database dumps and snapshots
+# Note: *.sql is intentionally NOT ignored, so schemas, migrations, and
+# synthetic fixtures remain trackable. Only dump-shaped artifacts are excluded.
+*.dump
+*.dump.gz
+*.sql.gz
+*.sql.deflate
+*.snapshot
+*.snapshot.gz
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.orig
+*.rej
