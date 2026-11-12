@@ -4,7 +4,8 @@ mod secrets;
 
 use models::*;
 use runners::{
-    list_databases, list_tables, run_query, start_backup, start_copy, start_restore, test_connection,
+    list_databases, list_tables, run_query, start_backup, start_copy, start_restore,
+    test_connection,
 };
 
 #[tauri::command]

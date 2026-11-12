@@ -8,7 +8,7 @@ use sqlx::types::Decimal;
 use sqlx::{Column, Row, TypeInfo};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tauri::{Window, Emitter};
+use tauri::{Emitter, Window};
 use tokio::io::AsyncWriteExt;
 use which::which;
 
@@ -39,7 +39,9 @@ pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
         conn.username, password, conn.host, conn.port, fallback
     );
     let pool = sqlx::MySqlPool::connect(&url).await?;
-    let names: Vec<String> = sqlx::query_scalar("SHOW DATABASES").fetch_all(&pool).await?;
+    let names: Vec<String> = sqlx::query_scalar("SHOW DATABASES")
+        .fetch_all(&pool)
+        .await?;
     let filtered = names
         .into_iter()
         .filter(|name| {
@@ -91,14 +93,13 @@ pub async fn run_query(
         data.push(record);
     }
 
-    Ok(QueryResult { columns, rows: data })
+    Ok(QueryResult {
+        columns,
+        rows: data,
+    })
 }
 
-pub async fn backup(
-    window: &Window,
-    conn: DbConnection,
-    opts: BackupOptions,
-) -> Result<String> {
+pub async fn backup(window: &Window, conn: DbConnection, opts: BackupOptions) -> Result<String> {
     // Try mysqldump first
     if let Ok(bin) = which("mysqldump") {
         emit(window, "Using mysqldump…");
@@ -163,11 +164,17 @@ async fn dump_with_mysqldump(
 
     if opts.compress {
         let encoder = async_compression::tokio::write::DeflateEncoder::new(output_file);
-        tokio::io::copy(&mut tokio::io::BufReader::new(stdout), &mut Box::new(encoder))
-            .await?;
+        tokio::io::copy(
+            &mut tokio::io::BufReader::new(stdout),
+            &mut Box::new(encoder),
+        )
+        .await?;
     } else {
-        tokio::io::copy(&mut tokio::io::BufReader::new(stdout), &mut Box::new(output_file))
-            .await?;
+        tokio::io::copy(
+            &mut tokio::io::BufReader::new(stdout),
+            &mut Box::new(output_file),
+        )
+        .await?;
     }
 
     let status = child.wait().await?;
@@ -179,11 +186,7 @@ async fn dump_with_mysqldump(
     Ok(out.to_string_lossy().to_string())
 }
 
-async fn internal_dump(
-    window: &Window,
-    conn: DbConnection,
-    opts: BackupOptions,
-) -> Result<String> {
+async fn internal_dump(window: &Window, conn: DbConnection, opts: BackupOptions) -> Result<String> {
     let password = secrets::get_password(&conn.id)?;
     let url = format!(
         "mysql://{}:{}@{}:{}/{}",
@@ -198,11 +201,12 @@ async fn internal_dump(
 
     if opts.structure {
         // Dump tables
-        let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?")
-                .bind(&conn.database)
-                .fetch_all(&pool)
-                .await?;
+        let tables: Vec<(String,)> = sqlx::query_as(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+        )
+        .bind(&conn.database)
+        .fetch_all(&pool)
+        .await?;
 
         for (table_name,) in tables {
             emit(window, &format!("Dumping table: {}", table_name));
@@ -230,11 +234,19 @@ pub async fn restore(
         let password = secrets::get_password(&conn.id)?;
 
         let mut cmd = tokio::process::Command::new(&bin);
-        cmd.args(["-h", &conn.host, "-P", &conn.port.to_string(), "-u", &conn.username, &conn.database])
-            .env("MYSQL_PWD", &password)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "-h",
+            &conn.host,
+            "-P",
+            &conn.port.to_string(),
+            "-u",
+            &conn.username,
+            &conn.database,
+        ])
+        .env("MYSQL_PWD", &password)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().context("spawn mysql")?;
         let stdin = child.stdin.take().context("get stdin")?;
