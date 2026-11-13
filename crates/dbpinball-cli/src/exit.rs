@@ -8,6 +8,8 @@ pub fn exit_code(error: &CoreError) -> i32 {
         ErrorCode::PolicyRefusal => 4,
         ErrorCode::Operation | ErrorCode::Unsupported => 5,
         ErrorCode::NotFound => 7,
+        ErrorCode::Conflict => 8,
+        ErrorCode::Busy => 9,
     }
 }
 
@@ -27,5 +29,7 @@ mod tests {
         assert_eq!(exit_code(&error(ErrorCode::Operation)), 5);
         assert_eq!(exit_code(&error(ErrorCode::Unsupported)), 5);
         assert_eq!(exit_code(&error(ErrorCode::NotFound)), 7);
+        assert_eq!(exit_code(&error(ErrorCode::Conflict)), 8);
+        assert_eq!(exit_code(&error(ErrorCode::Busy)), 9);
     }
 }

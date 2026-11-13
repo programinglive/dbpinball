@@ -9,8 +9,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTauriWindowControls } from "@/hooks/useTauriWindowControls";
 import { useWorkspaceFullscreen } from "@/hooks/useWorkspaceFullscreen";
 import { useWorkspaceQuery } from "@/hooks/useWorkspaceQuery";
-import type { DbConnection, WorkspaceState } from "./connections.types";
+import type { DbConnection, MigrationReport, MigrationStatus, WorkspaceState } from "./connections.types";
 import { createInitialWorkspaceState, formatError } from "./connections.types";
+
+const LEGACY_STORAGE_KEY = "dbpinball_connections";
 
 export type ConnectionsPageHandle = {
   openNewConnection: (engine?: "mysql" | "postgres") => void;
@@ -25,6 +27,11 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const { handleMinimizeWindow, handleToggleMaximize, handleCloseWindow } = useTauriWindowControls();
 
   const [connections, setConnections] = useState<DbConnection[]>([]);
+  const [revision, setRevision] = useState(0);
+  const [storeError, setStoreError] = useState<string | null>(null);
+  const [migrationReport, setMigrationReport] = useState<MigrationReport | null>(null);
+  const [migrationStatus, setMigrationStatus] = useState<MigrationStatus | null>(null);
+  const [migrationError, setMigrationError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [testResult, setTestResult] = useState<Record<string, boolean>>({});
   const [formData, setFormData] = useState<Partial<DbConnection>>({
@@ -141,23 +148,72 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   }, [connections, contextMenu]);
 
   useEffect(() => {
-    loadConnections();
+    void bootstrapConnections();
   }, []);
 
   const loadConnections = async () => {
     try {
-      const stored = localStorage.getItem("dbpinball_connections");
-      if (stored) {
-        setConnections(JSON.parse(stored));
-      }
+      const list = await invoke<DbConnection[]>("connections_list");
+      setConnections(list);
+      setStoreError(null);
+
+      const status = await invoke<MigrationStatus>("connections_migration_status");
+      setRevision(status.revision);
+      setMigrationStatus(status);
     } catch (e) {
-      console.error("Failed to load connections:", e);
+      setStoreError(formatError(e));
     }
   };
 
-  const saveConnections = (conns: DbConnection[]) => {
-    localStorage.setItem("dbpinball_connections", JSON.stringify(conns));
-    setConnections(conns);
+  /**
+   * Migrate the legacy localStorage profiles once, then read the shared store.
+   *
+   * localStorage is never written again and never deleted: it stays as a
+   * read-only rollback artifact for one release. A failed migration is shown as
+   * a recoverable error, never as a silent fallback to the old store.
+   */
+  const bootstrapConnections = async () => {
+    await migrateLegacyProfiles();
+    await loadConnections();
+  };
+
+  const migrateLegacyProfiles = async () => {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    } catch {
+      return;
+    }
+
+    if (!raw) {
+      return;
+    }
+
+    let legacy: unknown;
+    try {
+      legacy = JSON.parse(raw);
+    } catch {
+      setMigrationError("Legacy connection profiles could not be read. They were left untouched.");
+      return;
+    }
+
+    if (!Array.isArray(legacy) || legacy.length === 0) {
+      return;
+    }
+
+    try {
+      const status = await invoke<MigrationStatus>("connections_migration_status");
+      if (status.migratedFrom) {
+        return;
+      }
+
+      const report = await invoke<MigrationReport>("connections_migrate_local_storage", {
+        records: legacy,
+      });
+      setMigrationReport(report);
+    } catch (e) {
+      setMigrationError(formatError(e));
+    }
   };
 
   const resetForm = () => {
@@ -190,7 +246,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     }
 
     const baseConnection: DbConnection = {
-      id: editingId ?? `conn_${Date.now()}`,
+      id: editingId ?? "",
       name: formData.name,
       engine: (formData.engine as "mysql" | "postgres") ?? "mysql",
       host: formData.host,
@@ -207,22 +263,20 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
 
     try {
       if (editingId) {
-        const updatedConnections = connections.map((existing) =>
-          existing.id === editingId ? baseConnection : existing
-        );
-        if (password.trim()) {
-          await invoke("store_password", { id: editingId, password });
-        }
-        saveConnections(updatedConnections);
+        await invoke("connections_update", {
+          connection: baseConnection,
+          password: password.trim() ? password : null,
+          expectedRevision: revision,
+        });
       } else {
-        await invoke("store_password", { id: baseConnection.id, password });
-        saveConnections([...connections, baseConnection]);
+        await invoke("connections_create", { connection: baseConnection, password });
       }
 
+      await loadConnections();
       setOpen(false);
       resetForm();
     } catch (e) {
-      alert(`Failed to save connection: ${e}`);
+      alert(`Failed to save connection: ${formatError(e)}`);
     }
   };
 
@@ -565,17 +619,80 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     };
   }, [contextMenu.open]);
 
-  const handleDeleteConnection = (id: string) => {
-    if (confirm("Are you sure you want to delete this connection?")) {
-      invoke("delete_password", { id }).catch(console.error);
-      saveConnections(connections.filter((c) => c.id !== id));
+  const handleDeleteConnection = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this connection?")) {
+      return;
+    }
+
+    try {
+      await invoke("connections_delete", { id, expectedRevision: revision });
+      await loadConnections();
+    } catch (e) {
+      alert(`Failed to delete connection: ${formatError(e)}`);
     }
   };
 
   return (
     <>
-      <ConnectionDialog
-        open={open}
+      {storeError && (
+        <div
+          role="alert"
+          className="mx-4 mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+        >
+          Connection store unavailable: {storeError}
+        </div>
+      )}
+
+      {migrationError && (
+        <div
+          role="alert"
+          className="mx-4 mt-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200"
+        >
+          Migration did not complete: {migrationError} Your previous profiles were left untouched.
+        </div>
+      )}
+
+      {migrationStatus && !migrationStatus.complete && migrationStatus.report && (
+        <div
+          role="alert"
+          className="mx-4 mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+        >
+          Migration completed with unresolved items:{" "}
+          {migrationStatus.report.skippedInvalid.length} unreadable and{" "}
+          {migrationStatus.report.skippedConflicts.length} conflicting. Your previous profiles
+          were kept and nothing was overwritten.
+        </div>
+      )}
+
+      {migrationReport && (
+        <div
+          role="status"
+          className="mx-4 mt-3 flex items-start justify-between gap-3 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm text-sky-100"
+        >
+          <span>
+            Imported {migrationReport.imported} connection profile
+            {migrationReport.imported === 1 ? "" : "s"}.
+            {migrationReport.skippedDuplicates > 0
+              ? ` ${migrationReport.skippedDuplicates} already existed.`
+              : ""}
+            {migrationReport.skippedInvalid.length > 0
+              ? ` ${migrationReport.skippedInvalid.length} could not be read and were skipped.`
+              : ""}
+            {migrationReport.skippedConflicts.length > 0
+              ? ` ${migrationReport.skippedConflicts.length} conflicted with an existing profile and were kept as they were.`
+              : ""}
+          </span>
+          <button
+            type="button"
+            className="shrink-0 rounded px-2 py-0.5 text-xs text-sky-200 hover:bg-sky-500/20"
+            onClick={() => setMigrationReport(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <ConnectionDialog        open={open}
         editingId={editingId}
         formData={formData}
         password={password}

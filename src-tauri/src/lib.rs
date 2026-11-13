@@ -1,7 +1,9 @@
+mod connections;
 mod models;
 mod runners;
 mod secrets;
 
+use dbpinball_core::store::{ImportReport, MigrationStatus};
 use models::*;
 use runners::{
     list_databases, list_tables, run_query, start_backup, start_copy, start_restore,
@@ -88,6 +90,48 @@ fn delete_password(id: String) -> Result<(), String> {
     secrets::delete_password(&id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn connections_list() -> Result<Vec<DbConnection>, String> {
+    connections::list()
+}
+
+#[tauri::command]
+fn connections_create(
+    connection: DbConnection,
+    password: Option<String>,
+) -> Result<DbConnection, String> {
+    connections::create(connection, password)
+}
+
+#[tauri::command]
+fn connections_update(
+    connection: DbConnection,
+    password: Option<String>,
+    expected_revision: Option<u64>,
+) -> Result<(), String> {
+    connections::update(connection, password, expected_revision)
+}
+
+#[tauri::command]
+fn connections_delete(id: String, expected_revision: Option<u64>) -> Result<bool, String> {
+    connections::delete(id, expected_revision)
+}
+
+#[tauri::command]
+fn connections_import(records: Vec<DbConnection>) -> Result<ImportReport, String> {
+    connections::import(records)
+}
+
+#[tauri::command]
+fn connections_migrate_local_storage(records: Vec<DbConnection>) -> Result<ImportReport, String> {
+    connections::migrate_local_storage(records)
+}
+
+#[tauri::command]
+fn connections_migration_status() -> Result<MigrationStatus, String> {
+    connections::migration_status()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -102,7 +146,14 @@ pub fn run() {
             copy_db,
             store_password,
             get_password,
-            delete_password
+            delete_password,
+            connections_list,
+            connections_create,
+            connections_update,
+            connections_delete,
+            connections_import,
+            connections_migrate_local_storage,
+            connections_migration_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

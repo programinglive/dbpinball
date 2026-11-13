@@ -68,7 +68,7 @@ fn add(cli: &Cli, args: &AddArgs) -> Result<i32, CoreError> {
     }
 
     let password = read_password()?;
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = dbpinball_core::store::ConnectionStore::new_id();
 
     let connection = DbConnection {
         id: id.clone(),

@@ -163,6 +163,18 @@ Installers are written to `src-tauri/target/release/bundle/`.
 4. Test the connection, then save it.
 5. Double-click the connection to open the workspace.
 
+### Connection profiles are shared with the CLI
+
+The desktop and the CLI read and write the same store at
+`dirs::config_dir()/dbpinball/connections.json`. A profile created in one appears
+in the other. Passwords stay in the OS keyring (service `dbpinball`, account =
+connection id) and are never written to the store.
+
+On first launch the desktop imports any profiles left in the old browser
+`localStorage` and shows a report. The old data is kept as a read-only rollback
+artifact for one release. See [docs/connection-store.md](docs/connection-store.md)
+for the migration, concurrency and rollback rules.
+
 ## CLI quick start
 
 The `dbpinball` CLI is available for read-only inspection. It shares the same Rust core as the desktop app.
@@ -295,7 +307,7 @@ Dependency status is tracked in [`docs/security/DEPENDENCY_VULNERABILITY_REPORT.
 | M0 | Audit and baseline verification | Complete |
 | M1 | Incremental core extraction with desktop compatibility | Complete |
 | M2 | CLI foundation and contract tests | Complete |
-| M2.1 | Desktop import of `localStorage` profiles into the shared store | Planned |
+| M2.1 | Desktop import of `localStorage` profiles into the shared store | Complete |
 | M3 | Shared security policy and destination verification | Planned |
 | M4 | PostgreSQL Safe Sync through the CLI | Planned |
 | M5 | Desktop Safe Sync integration | Planned |
