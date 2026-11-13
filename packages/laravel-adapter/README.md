@@ -178,6 +178,15 @@ Please see the repository [CONTRIBUTING.md](../../CONTRIBUTING.md) for details.
 
 Please see the repository [SECURITY.md](../../SECURITY.md) for the disclosure process. Do not open a public issue for a vulnerability.
 
+### Credential handling
+
+Database dumps run through Symfony Process with an argument array, so no shell interprets connection values. Passwords are never placed in the argument list or the environment:
+
+- **MySQL**: credentials are written to a private `--defaults-extra-file` (mode `0600`) and removed after the run.
+- **PostgreSQL**: the password is written to a private `.pgpass` file (mode `0600`) referenced by `PGPASSFILE` and removed after the run.
+
+Backup output is written to a temporary file and renamed into place only on success, so a failed or timed-out dump never leaves a partial backup. Error messages redact the password, and backup filenames are sanitized so a database name cannot escape the backup directory.
+
 ## License
 
 MIT License. See the repository [LICENSE](../../LICENSE) file for details.
