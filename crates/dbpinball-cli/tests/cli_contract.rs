@@ -343,47 +343,44 @@ fn security_policy_check_requires_a_valid_operation() {
 fn security_policy_check_for_a_read_only_operation_needs_no_database() {
     let temp = TempDir::new().unwrap();
 
-    // Create a profile without a password; a read-only policy check must not
-    // need one, because it never opens a connection.
+    // Import a profile instead of `connections add`: import does not touch the
+    // OS keyring, so this test also runs on a headless CI runner.
+    let profile = json!([{
+        "id": "conn-readonly",
+        "name": "local",
+        "engine": "postgres",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "app",
+        "username": "postgres",
+        "useSsl": false
+    }]);
+    let file = temp.path().join("profiles.json");
+    std::fs::write(&file, serde_json::to_string(&profile).unwrap()).unwrap();
+
     let (code, _, _) = run(
         &temp,
-        &[
-            "connections",
-            "add",
-            "--name",
-            "local",
-            "--engine",
-            "postgres",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "5432",
-            "--database",
-            "app",
-            "--username",
-            "postgres",
-            "--target",
-            "local",
-        ],
-        Some("secret\n"),
+        &["connections", "import", file.to_str().unwrap()],
+        None,
     );
-    assert_eq!(code, 0, "profile creation should succeed");
+    assert_eq!(code, 0, "profile import should succeed");
 
+    // A read-only policy check must not open a database connection, so it
+    // succeeds even though no database is reachable.
     let (code, stdout, _) = run(
         &temp,
         &[
             "--json",
             "security",
             "policy-check",
-            "PLACEHOLDER",
+            "conn-readonly",
             "--operation",
             "query",
         ],
         None,
     );
-    // The placeholder id does not exist, so this still exits 7; the point is
-    // that the command is wired and returns one JSON object.
-    assert_eq!(code, 7);
+    assert_eq!(code, 0, "a read-only operation is allowed");
     let value: Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
-    assert_eq!(value["error"]["code"], "not_found");
+    assert_eq!(value["data"]["allowed"], true);
+    assert_eq!(value["data"]["decision"]["code"], "read_only_allowed");
 }
