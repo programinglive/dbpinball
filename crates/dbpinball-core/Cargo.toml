@@ -7,6 +7,7 @@ description = "Headless database services for DBPinball"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres", "mysql", "chrono", "rust_decimal", "json"] }
@@ -15,6 +16,7 @@ keyring = "2"
 [dev-dependencies]
 serde_json = "1"
 url = "2"
+tempfile = "3"
 
 [features]
 integration = []

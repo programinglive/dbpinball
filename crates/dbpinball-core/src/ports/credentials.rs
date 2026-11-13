@@ -7,6 +7,8 @@ use crate::domain::error::CoreError;
 /// secret from configuration or the environment directly.
 pub trait CredentialProvider: Send + Sync {
     fn get(&self, connection_id: &str) -> Result<Secret, CoreError>;
+    fn set(&self, connection_id: &str, secret: &Secret) -> Result<(), CoreError>;
+    fn delete(&self, connection_id: &str) -> Result<(), CoreError>;
 }
 
 /// A secret value that never renders itself.

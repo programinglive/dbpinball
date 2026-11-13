@@ -215,6 +215,7 @@ mod tests {
             database: database.into(),
             username: "postgres".into(),
             use_ssl: false,
+            target: crate::domain::connection::TargetClass::Unknown,
         }
     }
 

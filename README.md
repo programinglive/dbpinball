@@ -34,8 +34,9 @@ The project is being rebuilt around a **core-first, CLI-first** architecture: a 
 | Table listing | Available | Lists tables in the selected database |
 | Query execution | Available | Runs SQL and renders results in a grid with column resizing and horizontal scroll |
 | Window controls | Available | Custom title bar with minimize, maximize, close, and fullscreen |
+| `dbpinball` CLI | Available | `doctor`, `connections list/add/set-password/test/remove/import`, `schema inspect`; JSON output and stable exit codes |
 
-Verified by the frontend test suite (10 tests across 3 files) and manual use.
+Verified by the frontend test suite (11 tests across 4 files), the Rust workspace tests (23 core, 19 CLI), and real PostgreSQL/MySQL integration tests.
 
 ### In development
 
@@ -56,14 +57,13 @@ These exist in the codebase but are **not reachable from the current UI**, or ar
 
 | Capability | Milestone |
 | --- | --- |
-| `dbpinball` CLI | M2 |
 | Shared security policy and destination verification | M3 |
 | PostgreSQL Safe Sync (sanitized production → development) | M4 |
 | Desktop Safe Sync integration | M5 |
 | MySQL Safe Sync | M6 |
 | Advanced snapshots and relational dependency resolution | M7 |
 
-The CLI and Safe Sync are **not available**. No command in this README should be assumed to exist until the corresponding milestone ships.
+Safe Sync is **not available**. No command in this README should be assumed to exist until the corresponding milestone ships.
 
 ## Monorepo Packages
 
@@ -165,16 +165,33 @@ Installers are written to `src-tauri/target/release/bundle/`.
 
 ## CLI quick start
 
-**Not available yet.** The `dbpinball` binary is planned for milestone M2. There is no CLI in this repository today, and no command below should be assumed to work.
-
-When it ships, the intended shape is:
+The `dbpinball` CLI is available for read-only inspection. It shares the same Rust core as the desktop app.
 
 ```bash
-dbpinball doctor
-dbpinball connections list --json
-dbpinball schema inspect --connection <id> --json
-dbpinball query run --connection <id> --database <db> --sql "select 1" --read-only --json
+# Build and run from the workspace
+cargo run -p dbpinball-cli -- --help
+
+# Check the local environment
+cargo run -p dbpinball-cli -- doctor --json
+
+# Add a profile; the password is read from stdin and stored in the OS keyring
+cargo run -p dbpinball-cli -- connections add \
+  --name local-dev --engine postgres --host 127.0.0.1 --port 5432 \
+  --database app --username postgres --target local
+
+# List profiles (never prints passwords) and test one
+cargo run -p dbpinball-cli -- connections list --json
+cargo run -p dbpinball-cli -- connections test <id> --json
+
+# Inspect databases, or tables in one database
+cargo run -p dbpinball-cli -- schema inspect --connection <id> --json
+cargo run -p dbpinball-cli -- schema inspect --connection <id> --database app --json
 ```
+
+Global options: `--json`, `--config-dir <path>`, `--credential-source <keyring|env>`.
+For CI, `--credential-source env` reads `DBPINBALL_PASSWORD`; it never falls back to plaintext storage.
+
+The CLI is **read-only at the database layer**. It does not run arbitrary SQL, write data, back up, restore, or copy. See [`docs/cli.md`](docs/cli.md) for the full contract.
 
 ## Security and data-handling principles
 
@@ -276,8 +293,9 @@ Dependency status is tracked in [`docs/security/DEPENDENCY_VULNERABILITY_REPORT.
 | Milestone | Scope | State |
 | --- | --- | --- |
 | M0 | Audit and baseline verification | Complete |
-| M1 | Incremental core extraction with desktop compatibility | Planned |
-| M2 | CLI foundation and contract tests | Planned |
+| M1 | Incremental core extraction with desktop compatibility | Complete |
+| M2 | CLI foundation and contract tests | Complete |
+| M2.1 | Desktop import of `localStorage` profiles into the shared store | Planned |
 | M3 | Shared security policy and destination verification | Planned |
 | M4 | PostgreSQL Safe Sync through the CLI | Planned |
 | M5 | Desktop Safe Sync integration | Planned |
