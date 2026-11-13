@@ -1,0 +1,123 @@
+/**
+ * DBPinball documentation theme.
+ *
+ * Restrained blue accent, neutral surfaces, and high-contrast code blocks.
+ * Light is the default; dark mode is opt-in through the appearance switch.
+ */
+
+:root {
+  --vp-c-brand-1: #2563eb;
+  --vp-c-brand-2: #1d4ed8;
+  --vp-c-brand-3: #1e40af;
+  --vp-c-brand-soft: rgba(37, 99, 235, 0.12);
+
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-alt: #f7f8fa;
+  --vp-c-bg-soft: #f2f4f7;
+  --vp-c-divider: #e5e7eb;
+  --vp-c-text-1: #111827;
+  --vp-c-text-2: #4b5563;
+
+  --vp-font-family-base: "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --vp-code-block-bg: #0f172a;
+  --vp-code-line-highlight-color: rgba(37, 99, 235, 0.16);
+}
+
+.dark {
+  --vp-c-brand-1: #60a5fa;
+  --vp-c-brand-2: #3b82f6;
+  --vp-c-brand-3: #2563eb;
+  --vp-c-brand-soft: rgba(96, 165, 250, 0.16);
+
+  --vp-c-bg: #0b1120;
+  --vp-c-bg-alt: #0f172a;
+  --vp-c-bg-soft: #111c33;
+  --vp-c-divider: #1f2a44;
+  --vp-c-text-1: #e5e7eb;
+  --vp-c-text-2: #9ca3af;
+
+  --vp-code-block-bg: #060b16;
+}
+
+/* Code blocks: readable line height and a subtle border. */
+.vp-doc div[class*="language-"] {
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc div[class*="language-"] code {
+  font-size: 0.86rem;
+  line-height: 1.7;
+}
+
+/* Inline code: distinct from body text without shouting. */
+.vp-doc :not(pre) > code {
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+/* Tables: compact and scannable. */
+.vp-doc table {
+  display: table;
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+.vp-doc th {
+  background: var(--vp-c-bg-alt);
+  font-weight: 600;
+}
+
+/* Status labels used across the docs. */
+.status {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  vertical-align: middle;
+}
+
+.status-available {
+  background: rgba(16, 185, 129, 0.14);
+  color: #047857;
+}
+
+.status-planned {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+}
+
+.status-unavailable {
+  background: rgba(239, 68, 68, 0.14);
+  color: #b91c1c;
+}
+
+.dark .status-available {
+  color: #34d399;
+}
+
+.dark .status-planned {
+  color: #fbbf24;
+}
+
+.dark .status-unavailable {
+  color: #f87171;
+}
+
+/* Home page hero: keep it technical, not marketing. */
+.VPHero .name {
+  letter-spacing: -0.02em;
+}
+
+.VPHero .text {
+  max-width: 40rem;
+}
