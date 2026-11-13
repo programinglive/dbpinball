@@ -92,6 +92,9 @@ export default defineConfig({
           text: "Security",
           items: [
             { text: "Overview", link: "/security/" },
+            { text: "Security policy", link: "/security/policy" },
+            { text: "Destination verification", link: "/security/destination-verification" },
+            { text: "Threat model", link: "/security/threat-model" },
             { text: "Credential storage", link: "/security/credential-storage" },
             { text: "No plaintext fallback", link: "/security/no-plaintext-fallback" },
             { text: "OS keyring integration", link: "/security/keyring" },
@@ -107,6 +110,7 @@ export default defineConfig({
           text: "Reference",
           items: [
             { text: "CLI commands", link: "/reference/cli" },
+            { text: "Security CLI", link: "/reference/security-cli" },
             { text: "Configuration", link: "/reference/configuration" },
             { text: "Error behaviour", link: "/reference/errors" },
             { text: "Profile schema", link: "/reference/profile-schema" },
