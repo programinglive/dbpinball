@@ -61,9 +61,11 @@ The repository is a Cargo workspace with two members: `crates/dbpinball-core` (h
 ```bash
 cargo check --workspace
 cargo test --workspace
+cargo test -p dbpinball-cli
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 node scripts/check-boundaries.cjs
+cargo run -p dbpinball-cli -- --help
 ```
 
 `dbpinball-core` must not depend on Tauri or a CLI parser; the boundary check fails the build if it does.
@@ -75,6 +77,9 @@ docker compose -f docker-compose.test.yml up -d --wait
 DBPINBALL_TEST_PG_URL=postgres://postgres:dbpinball@127.0.0.1:55432/dbpinball_test \
 DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
   cargo test -p dbpinball-core --features integration
+DBPINBALL_TEST_PG_URL=postgres://postgres:dbpinball@127.0.0.1:55432/dbpinball_test \
+DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
+  cargo test -p dbpinball-cli --features integration
 docker compose -f docker-compose.test.yml down -v
 ```
 
