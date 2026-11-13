@@ -15,6 +15,15 @@ export default defineConfig({
   lang: "en-US",
   cleanUrls: true,
   lastUpdated: true,
+  // The repository root has a Tailwind PostCSS config for the desktop app.
+  // VitePress must not inherit it: the docs site has its own CSS and CI does not
+  // install the root node_modules. An explicit empty plugin list stops Vite from
+  // searching for a config file.
+  vite: {
+    css: {
+      postcss: { plugins: [] },
+    },
+  },
   head: [
     ["meta", { name: "theme-color", content: "#2563eb" }],
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
