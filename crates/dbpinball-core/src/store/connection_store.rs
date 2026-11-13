@@ -2,10 +2,13 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::domain::connection::DbConnection;
+use serde::Serialize;
+
+use crate::domain::connection::{DbConnection, TargetClass};
 use crate::domain::error::{CoreError, ErrorCode};
+use crate::store::lock;
 use crate::store::record::{
-    ConnectionRecord, ImportReport, InvalidRecord, StoreFile, STORE_VERSION,
+    ConflictRecord, ConnectionRecord, ImportReport, InvalidRecord, StoreFile, STORE_VERSION,
 };
 
 const FILE_NAME: &str = "connections.json";
@@ -14,13 +17,35 @@ const FILE_NAME: &str = "connections.json";
 ///
 /// The store takes the directory as a parameter so it stays independent of the
 /// `dirs` crate and testable without touching the real user configuration.
+///
+/// Every mutation takes a cross-process lock, re-reads the file inside it, and
+/// bumps a monotonic revision. A caller that supplies an expected revision and
+/// finds a different one gets [`ErrorCode::Conflict`] instead of overwriting
+/// another writer's change.
 pub struct ConnectionStore {
     root: PathBuf,
+}
+
+/// A read-only snapshot of the store's migration state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStatus {
+    pub migrated_from: Option<String>,
+    pub revision: u64,
+    pub profiles: usize,
 }
 
 impl ConnectionStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    /// A collision-resistant profile id.
+    ///
+    /// Core owns id generation so the desktop and the CLI cannot produce
+    /// different id shapes.
+    pub fn new_id() -> String {
+        uuid::Uuid::new_v4().to_string()
     }
 
     pub fn path(&self) -> PathBuf {
@@ -65,13 +90,244 @@ impl ConnectionStore {
         Ok(self.load_file()?.connections)
     }
 
-    pub fn save(&self, connections: &[ConnectionRecord]) -> Result<(), CoreError> {
-        let mut file = self.load_file()?;
-        file.connections = connections.to_vec();
-        self.save_file(&file)
+    pub fn get(&self, id: &str) -> Result<Option<ConnectionRecord>, CoreError> {
+        Ok(self.load()?.into_iter().find(|record| record.id == id))
     }
 
-    pub fn save_file(&self, file: &StoreFile) -> Result<(), CoreError> {
+    pub fn migration_status(&self) -> Result<MigrationStatus, CoreError> {
+        let file = self.load_file()?;
+        Ok(MigrationStatus {
+            migrated_from: file.migrated_from,
+            revision: file.revision,
+            profiles: file.connections.len(),
+        })
+    }
+
+    /// Replace the whole profile list.
+    pub fn save(&self, connections: &[ConnectionRecord]) -> Result<(), CoreError> {
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+        file.connections = connections.to_vec();
+        self.write_locked(&mut file)
+    }
+
+    /// Write a file the caller already built, refusing a stale revision.
+    pub fn save_file_if_revision(
+        &self,
+        file: &StoreFile,
+        expected_revision: u64,
+    ) -> Result<(), CoreError> {
+        let _guard = lock::acquire(&self.root)?;
+        let current = self.load_file()?;
+
+        if current.revision != expected_revision {
+            return Err(revision_conflict(current.revision, expected_revision));
+        }
+
+        let mut next = file.clone();
+        next.revision = current.revision;
+        self.write_locked(&mut next)
+    }
+
+    /// Add a profile, assigning a collision-resistant id when none is supplied.
+    pub fn create(&self, mut connection: ConnectionRecord) -> Result<ConnectionRecord, CoreError> {
+        if connection.id.trim().is_empty() {
+            connection.id = uuid::Uuid::new_v4().to_string();
+        }
+
+        validate(&connection).map_err(|reason| CoreError::new(ErrorCode::Usage, reason))?;
+
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if file
+            .connections
+            .iter()
+            .any(|existing| existing.id == connection.id)
+        {
+            return Err(CoreError::new(
+                ErrorCode::Usage,
+                "a connection with this id already exists",
+            ));
+        }
+
+        file.connections.push(connection.clone());
+        self.write_locked(&mut file)?;
+
+        Ok(connection)
+    }
+
+    /// Add a profile with a caller-supplied id.
+    pub fn add(&self, connection: ConnectionRecord) -> Result<(), CoreError> {
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if file
+            .connections
+            .iter()
+            .any(|existing| existing.id == connection.id)
+        {
+            return Err(CoreError::new(
+                ErrorCode::Usage,
+                "a connection with this id already exists",
+            ));
+        }
+
+        file.connections.push(connection);
+        self.write_locked(&mut file)
+    }
+
+    /// Replace an existing profile, optionally refusing a stale revision.
+    pub fn update(
+        &self,
+        connection: ConnectionRecord,
+        expected_revision: Option<u64>,
+    ) -> Result<(), CoreError> {
+        validate(&connection).map_err(|reason| CoreError::new(ErrorCode::Usage, reason))?;
+
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if let Some(expected) = expected_revision {
+            if file.revision != expected {
+                return Err(revision_conflict(file.revision, expected));
+            }
+        }
+
+        let position = file
+            .connections
+            .iter()
+            .position(|existing| existing.id == connection.id)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::NotFound,
+                    format!("connection '{}' was not found", connection.id),
+                )
+            })?;
+
+        file.connections[position] = connection;
+        self.write_locked(&mut file)
+    }
+
+    /// Remove a profile, optionally refusing a stale revision.
+    pub fn remove_with_revision(
+        &self,
+        id: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<bool, CoreError> {
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if let Some(expected) = expected_revision {
+            if file.revision != expected {
+                return Err(revision_conflict(file.revision, expected));
+            }
+        }
+
+        let before = file.connections.len();
+        file.connections.retain(|record| record.id != id);
+        let removed = file.connections.len() != before;
+
+        if removed {
+            self.write_locked(&mut file)?;
+        }
+
+        Ok(removed)
+    }
+
+    pub fn remove(&self, id: &str) -> Result<bool, CoreError> {
+        self.remove_with_revision(id, None)
+    }
+
+    /// Import profiles without changing provenance.
+    pub fn import(&self, incoming: Vec<ConnectionRecord>) -> Result<ImportReport, CoreError> {
+        self.import_inner(incoming, None)
+    }
+
+    /// Import profiles and record where they came from.
+    ///
+    /// The provenance marker is written only after the store write succeeds, so
+    /// a failed migration never looks complete.
+    pub fn import_with_provenance(
+        &self,
+        incoming: Vec<ConnectionRecord>,
+        migrated_from: &str,
+    ) -> Result<ImportReport, CoreError> {
+        self.import_inner(incoming, Some(migrated_from))
+    }
+
+    fn import_inner(
+        &self,
+        incoming: Vec<ConnectionRecord>,
+        migrated_from: Option<&str>,
+    ) -> Result<ImportReport, CoreError> {
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+        let marker_missing = file.migrated_from.is_none();
+
+        let mut report = ImportReport::empty();
+
+        for (index, mut connection) in incoming.into_iter().enumerate() {
+            if let Err(reason) = validate(&connection) {
+                report.skipped_invalid.push(InvalidRecord { index, reason });
+                continue;
+            }
+
+            // Imported profiles are never trusted as a target classification.
+            connection.target = TargetClass::Unknown;
+
+            if let Some(existing) = file
+                .connections
+                .iter()
+                .find(|existing| existing.id == connection.id)
+            {
+                if same_identity(existing, &connection) {
+                    report.skipped_duplicates += 1;
+                } else {
+                    report.skipped_conflicts.push(ConflictRecord {
+                        index,
+                        id: connection.id.clone(),
+                        reason: "id already exists with different connection details".to_string(),
+                    });
+                }
+                continue;
+            }
+
+            if file
+                .connections
+                .iter()
+                .any(|existing| same_identity(existing, &connection))
+            {
+                report.skipped_duplicates += 1;
+                continue;
+            }
+
+            file.connections.push(connection);
+            report.imported += 1;
+        }
+
+        if report.imported > 0 || (marker_missing && migrated_from.is_some()) {
+            if let Some(source) = migrated_from {
+                if file.migrated_from.is_none() {
+                    file.migrated_from = Some(source.to_string());
+                }
+            }
+            self.write_locked(&mut file)?;
+        }
+
+        Ok(report)
+    }
+
+    /// Write the file atomically and bump the revision.
+    ///
+    /// The caller must already hold the lock.
+    fn write_locked(&self, file: &mut StoreFile) -> Result<(), CoreError> {
+        file.version = STORE_VERSION;
+        file.revision = file.revision.saturating_add(1);
+        self.write_atomic(file)
+    }
+
+    fn write_atomic(&self, file: &StoreFile) -> Result<(), CoreError> {
         fs::create_dir_all(&self.root).map_err(|error| {
             CoreError::new(
                 ErrorCode::Operation,
@@ -136,78 +392,13 @@ impl ConnectionStore {
 
         Ok(())
     }
+}
 
-    pub fn get(&self, id: &str) -> Result<Option<ConnectionRecord>, CoreError> {
-        Ok(self.load()?.into_iter().find(|record| record.id == id))
-    }
-
-    pub fn add(&self, connection: ConnectionRecord) -> Result<(), CoreError> {
-        let mut file = self.load_file()?;
-
-        if file
-            .connections
-            .iter()
-            .any(|existing| existing.id == connection.id)
-        {
-            return Err(CoreError::new(
-                ErrorCode::Usage,
-                "a connection with this id already exists",
-            ));
-        }
-
-        file.connections.push(connection);
-        self.save_file(&file)
-    }
-
-    pub fn remove(&self, id: &str) -> Result<bool, CoreError> {
-        let mut file = self.load_file()?;
-        let before = file.connections.len();
-        file.connections.retain(|record| record.id != id);
-
-        let removed = file.connections.len() != before;
-
-        if removed {
-            self.save_file(&file)?;
-        }
-
-        Ok(removed)
-    }
-
-    pub fn import(&self, incoming: Vec<ConnectionRecord>) -> Result<ImportReport, CoreError> {
-        let mut file = self.load_file()?;
-        let mut skipped_invalid = Vec::new();
-        let mut skipped_duplicates = 0;
-        let mut imported = 0;
-
-        for (index, connection) in incoming.into_iter().enumerate() {
-            if let Err(reason) = validate(&connection) {
-                skipped_invalid.push(InvalidRecord { index, reason });
-                continue;
-            }
-
-            if file
-                .connections
-                .iter()
-                .any(|existing| same_identity(existing, &connection))
-            {
-                skipped_duplicates += 1;
-                continue;
-            }
-
-            file.connections.push(connection);
-            imported += 1;
-        }
-
-        if imported > 0 {
-            self.save_file(&file)?;
-        }
-
-        Ok(ImportReport {
-            imported,
-            skipped_invalid,
-            skipped_duplicates,
-        })
-    }
+fn revision_conflict(actual: u64, expected: u64) -> CoreError {
+    CoreError::new(
+        ErrorCode::Conflict,
+        format!("the connection store changed since it was read (revision {actual}, expected {expected})"),
+    )
 }
 
 fn validate(connection: &DbConnection) -> Result<(), String> {
@@ -267,6 +458,7 @@ mod tests {
 
         assert!(store.load().unwrap().is_empty());
         assert_eq!(store.load_file().unwrap().version, STORE_VERSION);
+        assert_eq!(store.load_file().unwrap().revision, 0);
     }
 
     #[test]
@@ -332,6 +524,31 @@ mod tests {
     }
 
     #[test]
+    fn create_assigns_a_uuid_when_the_id_is_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let mut incoming = connection("", "app");
+        incoming.id = String::new();
+        let created = store.create(incoming).unwrap();
+
+        assert_eq!(created.id.len(), 36);
+        assert!(store.get(&created.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn create_preserves_a_valid_legacy_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let created = store
+            .create(connection("conn_1700000000000", "app"))
+            .unwrap();
+
+        assert_eq!(created.id, "conn_1700000000000");
+    }
+
+    #[test]
     fn import_skips_invalid_and_duplicate_records() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConnectionStore::new(directory.path());
@@ -353,7 +570,102 @@ mod tests {
         assert_eq!(report.skipped_invalid.len(), 1);
         assert_eq!(report.skipped_invalid[0].index, 1);
         assert_eq!(report.skipped_duplicates, 1);
+        assert!(report.skipped_conflicts.is_empty());
         assert_eq!(store.load().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn import_reports_a_conflicting_id_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("shared", "original")).unwrap();
+
+        let report = store
+            .import(vec![connection("shared", "different")])
+            .unwrap();
+
+        assert_eq!(report.imported, 0);
+        assert_eq!(report.skipped_conflicts.len(), 1);
+        assert_eq!(report.skipped_conflicts[0].id, "shared");
+        assert_eq!(store.get("shared").unwrap().unwrap().database, "original");
+    }
+
+    #[test]
+    fn import_sets_provenance_and_unknown_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let report = store
+            .import_with_provenance(vec![connection("legacy", "app")], "localStorage@v1")
+            .unwrap();
+
+        assert_eq!(report.imported, 1);
+        let file = store.load_file().unwrap();
+        assert_eq!(file.migrated_from.as_deref(), Some("localStorage@v1"));
+        assert_eq!(file.connections[0].target, TargetClass::Unknown);
+    }
+
+    #[test]
+    fn repeated_migration_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let first = store
+            .import_with_provenance(vec![connection("legacy", "app")], "localStorage@v1")
+            .unwrap();
+        let second = store
+            .import_with_provenance(vec![connection("legacy", "app")], "localStorage@v1")
+            .unwrap();
+
+        assert_eq!(first.imported, 1);
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.skipped_duplicates, 1);
+        assert_eq!(store.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn revision_increments_on_every_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+        let first = store.load_file().unwrap().revision;
+        store.add(connection("b", "app")).unwrap();
+        let second = store.load_file().unwrap().revision;
+
+        assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn a_stale_revision_is_a_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+        let stale = store.load_file().unwrap().revision;
+        store.add(connection("b", "app")).unwrap();
+
+        let error = store
+            .update(connection("a", "renamed"), Some(stale))
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Conflict);
+    }
+
+    #[test]
+    fn migration_status_reports_provenance_and_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store
+            .import_with_provenance(vec![connection("legacy", "app")], "localStorage@v1")
+            .unwrap();
+
+        let status = store.migration_status().unwrap();
+        assert_eq!(status.migrated_from.as_deref(), Some("localStorage@v1"));
+        assert_eq!(status.profiles, 1);
+        assert!(status.revision >= 1);
     }
 
     #[test]
@@ -382,11 +694,15 @@ mod tests {
         let store = ConnectionStore::new(directory.path());
 
         store
-            .save_file(&StoreFile {
-                version: STORE_VERSION,
-                migrated_from: Some("localStorage@v1".to_string()),
-                connections: vec![connection("a", "app")],
-            })
+            .save_file_if_revision(
+                &StoreFile {
+                    version: STORE_VERSION,
+                    migrated_from: Some("localStorage@v1".to_string()),
+                    revision: 0,
+                    connections: vec![connection("a", "app")],
+                },
+                0,
+            )
             .unwrap();
 
         store.add(connection("b", "other")).unwrap();

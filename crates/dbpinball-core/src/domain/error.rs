@@ -11,6 +11,10 @@ pub enum ErrorCode {
     NotFound,
     PolicyRefusal,
     Unsupported,
+    /// A concurrent writer changed the store since this caller read it.
+    Conflict,
+    /// The store lock could not be acquired within the bounded wait.
+    Busy,
 }
 
 /// The error type returned by every public core service.
