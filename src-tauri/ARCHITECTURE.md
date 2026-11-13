@@ -4,6 +4,10 @@
 
 The Rust backend is built on Tauri 2.x and provides async database operations for MySQL and PostgreSQL. It uses a vendor-first approach: prefer native tools (mysqldump, pg_dump) when available, with internal dumpers as fallback.
 
+> **Core extraction (M1).** Connection test, database listing, and table listing now live in `crates/dbpinball-core` (`services::inspect`). The Tauri commands delegate to that service through `KeyringCredentialProvider`, so the desktop and a future CLI share the same implementation. Backup, restore, copy, and query still live in `runners/` and are unchanged.
+>
+> `dbpinball-core` must not depend on Tauri or a CLI parser. `scripts/check-boundaries.cjs` enforces this in CI.
+
 ## Module Structure
 
 ### `lib.rs` - Tauri Commands

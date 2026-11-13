@@ -69,16 +69,19 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Check formatting
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        run: cargo fmt --all -- --check
+
+      - name: Check dependency boundaries
+        run: node scripts/check-boundaries.cjs
 
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --workspace
 
   php:
     name: PHP / Laravel Adapter
@@ -109,6 +112,73 @@ jobs:
       - name: Run PHPUnit
         run: ./vendor/bin/phpunit
 
+  database-integration:
+    name: Database integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dbpinball_root
+          POSTGRES_DB: dbpinball_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dbpinball_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dbpinball_root
+          MYSQL_DATABASE: dbpinball_test
+          MYSQL_USER: dbpinball
+          MYSQL_PASSWORD: dbpinball_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -udbpinball -pdbpinball_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The tests must not run as a superuser. Create a role scoped to the
+      # disposable test database with only CONNECT, USAGE, and CREATE.
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Create least-privilege PostgreSQL role
+        env:
+          PGPASSWORD: dbpinball_root
+        run: |
+          psql -h 127.0.0.1 -U postgres -d dbpinball_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE dbpinball LOGIN PASSWORD 'dbpinball_test';
+          GRANT CONNECT ON DATABASE dbpinball_test TO dbpinball;
+          GRANT USAGE, CREATE ON SCHEMA public TO dbpinball;
+          SQL
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # Ephemeral service containers are torn down by the runner after the job.
+      - name: Run database integration tests
+        env:
+          DBPINBALL_TEST_PG_URL: postgres://dbpinball:dbpinball_test@127.0.0.1:5432/dbpinball_test
+          DBPINBALL_TEST_MYSQL_URL: mysql://dbpinball:dbpinball_test@127.0.0.1:3306/dbpinball_test
+        run: cargo test -p dbpinball-core --features integration --test inspect_integration -- --nocapture
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -135,10 +205,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.23.0
 
-      # Runs in src-tauri so cargo-audit reads src-tauri/.cargo/audit.toml,
+      # Runs from the workspace root so cargo-audit reads .cargo/audit.toml,
       # which is the single source of truth for accepted advisories.
       - name: Rust advisory audit
-        working-directory: src-tauri
         run: cargo audit
 
   secrets:

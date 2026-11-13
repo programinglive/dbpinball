@@ -56,15 +56,29 @@ Tests live next to the code in `__tests__` directories. Add a test for any behav
 
 ## Rust workflow
 
+The repository is a Cargo workspace with two members: `crates/dbpinball-core` (headless services) and `src-tauri` (the desktop adapter). Run commands from the repository root.
+
 ```bash
-cd src-tauri
-cargo check
-cargo test
-cargo clippy
-cargo fmt
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+node scripts/check-boundaries.cjs
 ```
 
-The Rust test suite currently has no tests. New Rust code should come with unit tests; do not add code that cannot be tested.
+`dbpinball-core` must not depend on Tauri or a CLI parser; the boundary check fails the build if it does.
+
+Database integration tests are gated and need a disposable stack:
+
+```bash
+docker compose -f docker-compose.test.yml up -d --wait
+DBPINBALL_TEST_PG_URL=postgres://postgres:dbpinball@127.0.0.1:55432/dbpinball_test \
+DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
+  cargo test -p dbpinball-core --features integration
+docker compose -f docker-compose.test.yml down -v
+```
+
+New Rust code should come with unit tests; do not add code that cannot be tested.
 
 ## Formatting and linting
 
@@ -98,7 +112,7 @@ The `pre-commit` hook runs `node scripts/verify-tests.cjs` when that script is p
 Every push and pull request runs `.github/workflows/ci.yml`:
 
 - frontend: `npm ci`, `npm run lint`, `npm test`, `npm run build`
-- Rust: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
+- Rust: `cargo fmt --all -- --check`, `node scripts/check-boundaries.cjs`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
 - dependencies: `npm audit --audit-level=high`, `cargo audit`
 - secrets: gitleaks
 
@@ -106,9 +120,9 @@ Run the same checks locally before pushing:
 
 ```bash
 npm run lint && npm test && npm run build
-cd src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all -- --check && node scripts/check-boundaries.cjs && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 npm audit --audit-level=high
-cd src-tauri && cargo audit
+cargo audit
 ```
 
 `cargo audit` reads `src-tauri/.cargo/audit.toml`. Do not add an ignore entry without a written reachability argument.
