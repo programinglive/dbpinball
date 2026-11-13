@@ -93,20 +93,16 @@ async fn list_databases_mysql(
     };
 
     let pool = connect_mysql(connection, &fallback, credentials).await?;
-    let names: Vec<String> = sqlx::query_scalar("SHOW DATABASES")
-        .fetch_all(&pool)
-        .await
-        .map_err(connection_error)?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT schema_name FROM information_schema.schemata \
+         WHERE schema_name NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys') \
+         ORDER BY schema_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(connection_error)?;
 
-    Ok(names
-        .into_iter()
-        .filter(|name| {
-            !matches!(
-                name.as_str(),
-                "information_schema" | "performance_schema" | "mysql" | "sys"
-            )
-        })
-        .collect())
+    Ok(names)
 }
 
 async fn list_databases_postgres(
@@ -138,10 +134,14 @@ async fn list_tables_mysql(
     let target = resolve_database(connection, database)?;
     let pool = connect_mysql(connection, &target, credentials).await?;
 
-    sqlx::query_scalar::<_, String>("SHOW TABLES")
-        .fetch_all(&pool)
-        .await
-        .map_err(connection_error)
+    sqlx::query_scalar::<_, String>(
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema = ? ORDER BY table_name",
+    )
+    .bind(&target)
+    .fetch_all(&pool)
+    .await
+    .map_err(connection_error)
 }
 
 async fn list_tables_postgres(

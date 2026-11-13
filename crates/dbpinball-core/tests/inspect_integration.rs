@@ -14,7 +14,12 @@ use dbpinball_core::domain::error::ErrorCode;
 use dbpinball_core::ports::credentials::{CredentialProvider, Secret};
 use dbpinball_core::services::inspect;
 
-const PROBE_TABLE: &str = "dbpinball_inspect_probe";
+// Each test owns its probe table so the suite stays correct when cargo runs the
+// tests in parallel.
+const PROBE_PG_LISTING: &str = "dbpinball_probe_pg_listing";
+const PROBE_PG_MUTATE: &str = "dbpinball_probe_pg_mutate";
+const PROBE_MYSQL_LISTING: &str = "dbpinball_probe_mysql_listing";
+const PROBE_MYSQL_MUTATE: &str = "dbpinball_probe_mysql_mutate";
 
 struct FixedCredentialProvider(String);
 
@@ -44,7 +49,7 @@ fn target(variable: &str, engine: DbEngine) -> Option<Target> {
     };
 
     let connection = DbConnection {
-        id: format!("integration-{}", variable),
+        id: format!("integration-{variable}"),
         name: "integration".to_string(),
         engine,
         host: parsed.host_str()?.to_string(),
@@ -83,50 +88,64 @@ async fn mysql_pool(url: &str) -> sqlx::MySqlPool {
         .expect("raw MySQL connection should succeed")
 }
 
-async fn create_probe_pg(pool: &sqlx::PgPool) {
+async fn create_probe_pg(pool: &sqlx::PgPool, table: &str) {
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {PROBE_TABLE} (id INT PRIMARY KEY, note VARCHAR(64))"
+        "CREATE TABLE IF NOT EXISTS {table} (id INT PRIMARY KEY, note VARCHAR(64))"
     ))
     .execute(pool)
     .await
     .expect("probe table should be created");
 
     sqlx::query(&format!(
-        "INSERT INTO {PROBE_TABLE} (id, note) VALUES (1, 'synthetic') ON CONFLICT (id) DO NOTHING"
+        "INSERT INTO {table} (id, note) VALUES (1, 'synthetic') ON CONFLICT (id) DO NOTHING"
     ))
     .execute(pool)
     .await
     .expect("probe row should be inserted");
 }
 
-async fn create_probe_mysql(pool: &sqlx::MySqlPool) {
+async fn create_probe_mysql(pool: &sqlx::MySqlPool, table: &str) {
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {PROBE_TABLE} (id INT PRIMARY KEY, note VARCHAR(64))"
+        "CREATE TABLE IF NOT EXISTS {table} (id INT PRIMARY KEY, note VARCHAR(64))"
     ))
     .execute(pool)
     .await
     .expect("probe table should be created");
 
     sqlx::query(&format!(
-        "INSERT IGNORE INTO {PROBE_TABLE} (id, note) VALUES (1, 'synthetic')"
+        "INSERT IGNORE INTO {table} (id, note) VALUES (1, 'synthetic')"
     ))
     .execute(pool)
     .await
     .expect("probe row should be inserted");
 }
 
-async fn count_probe_pg(pool: &sqlx::PgPool) -> i64 {
-    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {PROBE_TABLE}"))
+async fn count_probe_pg(pool: &sqlx::PgPool, table: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
         .fetch_one(pool)
         .await
         .expect("probe row should be readable")
 }
 
-async fn count_probe_mysql(pool: &sqlx::MySqlPool) -> i64 {
-    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {PROBE_TABLE}"))
+async fn count_probe_mysql(pool: &sqlx::MySqlPool, table: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
         .fetch_one(pool)
         .await
         .expect("probe row should be readable")
+}
+
+async fn drop_probe_pg(pool: &sqlx::PgPool, table: &str) {
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(pool)
+        .await
+        .expect("probe table should be dropped");
+}
+
+async fn drop_probe_mysql(pool: &sqlx::MySqlPool, table: &str) {
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(pool)
+        .await
+        .expect("probe table should be dropped");
 }
 
 #[tokio::test]
@@ -152,7 +171,7 @@ async fn postgres_connection_and_listing() {
     );
 
     let pool = pg_pool(&target.url).await;
-    create_probe_pg(&pool).await;
+    create_probe_pg(&pool, PROBE_PG_LISTING).await;
 
     let tables = inspect::list_tables(
         &target.connection,
@@ -163,14 +182,11 @@ async fn postgres_connection_and_listing() {
     .expect("tables should be listed");
 
     assert!(
-        tables.iter().any(|name| name == PROBE_TABLE),
-        "expected {PROBE_TABLE} in {tables:?}"
+        tables.iter().any(|name| name == PROBE_PG_LISTING),
+        "expected {PROBE_PG_LISTING} in {tables:?}"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {PROBE_TABLE}"))
-        .execute(&pool)
-        .await
-        .expect("probe table should be dropped");
+    drop_probe_pg(&pool, PROBE_PG_LISTING).await;
 }
 
 #[tokio::test]
@@ -196,7 +212,7 @@ async fn mysql_connection_and_listing() {
     );
 
     let pool = mysql_pool(&target.url).await;
-    create_probe_mysql(&pool).await;
+    create_probe_mysql(&pool, PROBE_MYSQL_LISTING).await;
 
     let tables = inspect::list_tables(
         &target.connection,
@@ -207,14 +223,11 @@ async fn mysql_connection_and_listing() {
     .expect("tables should be listed");
 
     assert!(
-        tables.iter().any(|name| name == PROBE_TABLE),
-        "expected {PROBE_TABLE} in {tables:?}"
+        tables.iter().any(|name| name == PROBE_MYSQL_LISTING),
+        "expected {PROBE_MYSQL_LISTING} in {tables:?}"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {PROBE_TABLE}"))
-        .execute(&pool)
-        .await
-        .expect("probe table should be dropped");
+    drop_probe_mysql(&pool, PROBE_MYSQL_LISTING).await;
 }
 
 #[tokio::test]
@@ -293,7 +306,7 @@ async fn postgres_inspection_does_not_mutate_data() {
     };
 
     let pool = pg_pool(&target.url).await;
-    create_probe_pg(&pool).await;
+    create_probe_pg(&pool, PROBE_PG_MUTATE).await;
 
     inspect::test_connection(&target.connection, &target.credentials)
         .await
@@ -310,15 +323,12 @@ async fn postgres_inspection_does_not_mutate_data() {
     .expect("tables should be listed");
 
     assert_eq!(
-        count_probe_pg(&pool).await,
+        count_probe_pg(&pool, PROBE_PG_MUTATE).await,
         1,
         "inspection must not delete rows"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {PROBE_TABLE}"))
-        .execute(&pool)
-        .await
-        .expect("probe table should be dropped");
+    drop_probe_pg(&pool, PROBE_PG_MUTATE).await;
 }
 
 #[tokio::test]
@@ -329,7 +339,7 @@ async fn mysql_inspection_does_not_mutate_data() {
     };
 
     let pool = mysql_pool(&target.url).await;
-    create_probe_mysql(&pool).await;
+    create_probe_mysql(&pool, PROBE_MYSQL_MUTATE).await;
 
     inspect::test_connection(&target.connection, &target.credentials)
         .await
@@ -346,13 +356,10 @@ async fn mysql_inspection_does_not_mutate_data() {
     .expect("tables should be listed");
 
     assert_eq!(
-        count_probe_mysql(&pool).await,
+        count_probe_mysql(&pool, PROBE_MYSQL_MUTATE).await,
         1,
         "inspection must not delete rows"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {PROBE_TABLE}"))
-        .execute(&pool)
-        .await
-        .expect("probe table should be dropped");
+    drop_probe_mysql(&pool, PROBE_MYSQL_MUTATE).await;
 }
