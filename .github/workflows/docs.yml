@@ -54,6 +54,10 @@ jobs:
         working-directory: website
         run: node scripts/check-contrast.mjs
 
+      - name: Check layout wrappers
+        working-directory: website
+        run: node scripts/check-layout.mjs
+
       - name: Upload build output
         uses: actions/upload-artifact@v4
         with:
@@ -75,23 +79,23 @@ jobs:
           name: docs-dist
           path: dist
 
-      # The deploy needs a durable API token. Until the owner adds it, skip the
-      # deploy with a warning instead of failing the main branch. The site stays
-      # on its last successful deployment.
+      # The deploy needs a durable API token. A missing credential is an
+      # actionable failure, not a silent skip: the build job stays green and
+      # independent, while this job reports exactly what is missing.
       - name: Check deploy credentials
-        id: credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::CLOUDFLARE_API_TOKEN is not set; skipping the Pages deploy."
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          missing=""
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then missing="$missing CLOUDFLARE_API_TOKEN"; fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then missing="$missing CLOUDFLARE_ACCOUNT_ID"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::Documentation deployment is blocked: missing repository secret(s):$missing. Add them under Settings -> Secrets and variables -> Actions. The site keeps its last successful deployment."
+            exit 1
           fi
 
       - name: Deploy
-        if: steps.credentials.outputs.enabled == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
