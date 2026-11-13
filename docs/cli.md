@@ -123,7 +123,8 @@ dbpinball schema inspect --connection <id> --database app --json
 | 4 | Policy refusal |
 | 5 | Operation or environment failure |
 | 7 | Unknown connection profile |
-| 6, 8, 9 | Reserved for later milestones |
+| 8 | Store conflict: another writer changed the store since it was read |
+| 9 | Store busy: the cross-process lock was not acquired within the bounded wait |
 
 ## Configuration and credentials
 
@@ -136,6 +137,11 @@ dbpinball schema inspect --connection <id> --database app --json
 
 `connections.json` contains metadata only. The file is written atomically and
 restricted to `0600` on Unix. It has no password field.
+
+The desktop application uses the same file and the same path resolver. A profile
+created in the CLI appears in the desktop and vice versa. Every mutation takes a
+cross-process lock, so the two cannot silently overwrite each other. See
+[connection-store.md](connection-store.md).
 
 ### Credential providers
 
