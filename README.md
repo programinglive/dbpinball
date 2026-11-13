@@ -238,6 +238,7 @@ dbpinball/
 │   ├── src/models.rs         shared data models
 │   ├── src/secrets.rs        OS keyring access
 │   └── src/runners/          MySQL and PostgreSQL implementations
+├── crates/dbpinball-core/    Headless Rust core (no Tauri, no CLI parser)
 ├── docs/                     architecture, audit, and release notes
 └── scripts/                  pre-commit test verification
 └── packages/laravel-adapter/ Laravel adapter package (PHP)
@@ -248,11 +249,23 @@ dbpinball/
 | Suite | Command | Current result |
 | --- | --- | --- |
 | Frontend | `npm test` | 4 files, 11 tests passing |
-| Rust | `cd src-tauri && cargo test` | 0 tests |
+| Rust core | `cargo test -p dbpinball-core` | 12 tests passing |
+| Rust workspace | `cargo test --workspace` | passing |
 | Type check | `npm run lint` | passing |
-| Rust format | `cd src-tauri && cargo fmt --all -- --check` | passing |
-| Rust lint | `cd src-tauri && cargo clippy --all-targets -- -D warnings` | passing |
+| Rust format | `cargo fmt --all -- --check` | passing |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | passing |
+| Dependency boundary | `node scripts/check-boundaries.cjs` | passing |
 | Pre-commit gate | `node scripts/verify-tests.cjs` | passing |
+
+Database integration tests are gated behind `--features integration` and a disposable stack:
+
+```bash
+docker compose -f docker-compose.test.yml up -d --wait
+DBPINBALL_TEST_PG_URL=postgres://postgres:dbpinball@127.0.0.1:55432/dbpinball_test \
+DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
+  cargo test -p dbpinball-core --features integration
+docker compose -f docker-compose.test.yml down -v
+```
 
 CI runs on every push and pull request: frontend lint, tests, and build; Rust format, clippy, and tests; `npm audit`; `cargo audit`; and a secret scan. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
