@@ -23,8 +23,10 @@
   --vp-font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
     "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
-  --vp-code-block-bg: #0f172a;
-  --vp-code-line-highlight-color: rgba(37, 99, 235, 0.16);
+  --vp-code-block-bg: #f6f8fa;
+  --vp-code-line-highlight-color: rgba(37, 99, 235, 0.08);
+  /* The default language label is too faint on a light code block. */
+  --vp-code-lang-color: #4b5563;
 }
 
 .dark {
@@ -41,6 +43,8 @@
   --vp-c-text-2: #9ca3af;
 
   --vp-code-block-bg: #060b16;
+  --vp-code-line-highlight-color: rgba(96, 165, 250, 0.16);
+  --vp-code-lang-color: #9ca3af;
 }
 
 /* Code blocks: readable line height and a subtle border. */

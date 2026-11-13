@@ -50,6 +50,10 @@ jobs:
         working-directory: website
         run: node scripts/check-links.mjs
 
+      - name: Check code-block contrast
+        working-directory: website
+        run: node scripts/check-contrast.mjs
+
       - name: Upload build output
         uses: actions/upload-artifact@v4
         with:
