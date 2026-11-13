@@ -52,6 +52,58 @@ const createConnections = () => [
   },
 ];
 
+type Overrides = Record<string, (payload: unknown) => unknown>;
+
+/**
+ * A stateful mock of the shared connection store.
+ *
+ * The page no longer reads localStorage as its source of truth: it calls
+ * `connections_list` and mutates through `connections_create` / `_update` /
+ * `_delete`. The mock keeps a mutable list so a delete is visible on reload.
+ */
+function mockStore(initial: ReturnType<typeof createConnections>, overrides: Overrides = {}) {
+  let current = [...initial];
+  const invokeMock = vi.mocked(invoke);
+
+  invokeMock.mockImplementation(async (command: string, payload: unknown) => {
+    if (overrides[command]) {
+      return overrides[command](payload);
+    }
+
+    if (command === "connections_list") {
+      return [...current];
+    }
+    if (command === "connections_migration_status") {
+      return { migratedFrom: "localStorage@v1", revision: 1, profiles: current.length };
+    }
+    if (command === "connections_delete") {
+      const id = (payload as { id: string }).id;
+      current = current.filter((connection) => connection.id !== id);
+      return true;
+    }
+    if (command === "connections_create") {
+      const created = { ...(payload as { connection: object }).connection, id: "conn_new" };
+      current.push(created as (typeof current)[number]);
+      return created;
+    }
+    if (command === "connections_update") {
+      const connection = (payload as { connection: { id: string } }).connection;
+      current = current.map((existing) => (existing.id === connection.id ? (connection as (typeof current)[number]) : existing));
+      return undefined;
+    }
+    if (command === "test_conn") {
+      return;
+    }
+    if (command === "list_databases_cmd") {
+      return ["main", "reporting"];
+    }
+
+    return undefined;
+  });
+
+  return invokeMock;
+}
+
 describe("ConnectionsPage", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -66,6 +118,7 @@ describe("ConnectionsPage", () => {
   });
 
   it("shows empty state when no connections exist", async () => {
+    mockStore([]);
     render(<ConnectionsPage />);
 
     expect(await screen.findByText("No connections yet.")).toBeInTheDocument();
@@ -76,18 +129,7 @@ describe("ConnectionsPage", () => {
 
   it("opens workspace overlay and lists databases after connecting", async () => {
     const connections = createConnections();
-    localStorage.setItem("dbpinball_connections", JSON.stringify(connections));
-
-    const invokeMock = vi.mocked(invoke);
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "test_conn") {
-        return;
-      }
-      if (command === "list_databases_cmd") {
-        return ["main", "reporting"];
-      }
-      return;
-    });
+    const invokeMock = mockStore(connections);
 
     render(<ConnectionsPage />);
 
@@ -139,24 +181,11 @@ describe("ConnectionsPage", () => {
     expect(
       screen.getByText("Select a database from the left to explore its tables.")
     ).toBeInTheDocument();
-
   });
 
   it("connects via context menu actions", async () => {
     const connections = createConnections();
-    localStorage.setItem("dbpinball_connections", JSON.stringify(connections));
-
-    const invokeMock = vi.mocked(invoke);
-    invokeMock.mockImplementation(async (command: string, payload: unknown) => {
-      if (command === "test_conn") {
-        expect(payload).toMatchObject({ conn: connections[0] });
-        return;
-      }
-      if (command === "list_databases_cmd") {
-        return ["main", "reporting"];
-      }
-      return;
-    });
+    const invokeMock = mockStore(connections);
 
     render(<ConnectionsPage />);
 
@@ -176,10 +205,7 @@ describe("ConnectionsPage", () => {
 
   it("opens edit dialog from context menu", async () => {
     const connections = createConnections();
-    localStorage.setItem("dbpinball_connections", JSON.stringify(connections));
-
-    const invokeMock = vi.mocked(invoke);
-    invokeMock.mockImplementation(async () => undefined);
+    const invokeMock = mockStore(connections);
 
     render(<ConnectionsPage />);
 
@@ -196,20 +222,14 @@ describe("ConnectionsPage", () => {
     expect(screen.getByDisplayValue("Analytics")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(invokeMock).not.toHaveBeenCalled();
+
+    expect(invokeMock).not.toHaveBeenCalledWith("connections_update", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("connections_create", expect.anything());
   });
 
-  it("deletes connection via context menu when confirmed", async () => {
+  it("deletes connection through the shared store when confirmed", async () => {
     const connections = createConnections();
-    localStorage.setItem("dbpinball_connections", JSON.stringify(connections));
-
-    const invokeMock = vi.mocked(invoke);
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "delete_password") {
-        return;
-      }
-      return;
-    });
+    const invokeMock = mockStore(connections);
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -225,7 +245,10 @@ describe("ConnectionsPage", () => {
     });
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith("delete_password", { id: "conn_1" });
+    expect(invokeMock).toHaveBeenCalledWith("connections_delete", {
+      id: "conn_1",
+      expectedRevision: 1,
+    });
 
     await waitFor(() => {
       expect(screen.queryByText("Analytics")).not.toBeInTheDocument();
@@ -236,14 +259,10 @@ describe("ConnectionsPage", () => {
 
   it("shows friendly error messaging when connection test fails", async () => {
     const connections = createConnections();
-    localStorage.setItem("dbpinball_connections", JSON.stringify(connections));
-
-    const invokeMock = vi.mocked(invoke);
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "test_conn") {
+    const invokeMock = mockStore(connections, {
+      test_conn: () => {
         throw new Error("No such host is known");
-      }
-      return;
+      },
     });
 
     render(<ConnectionsPage />);
@@ -268,5 +287,66 @@ describe("ConnectionsPage", () => {
     await waitFor(() => {
       expect(setFullscreenMock).toHaveBeenCalledWith(true);
     });
+  });
+
+  it("migrates legacy localStorage profiles once and reports the result", async () => {
+    const legacy = createConnections();
+    localStorage.setItem("dbpinball_connections", JSON.stringify(legacy));
+
+    const invokeMock = vi.mocked(invoke);
+    let migrated = false;
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "connections_migration_status") {
+        return { migratedFrom: migrated ? "localStorage@v1" : null, revision: 0, profiles: 0 };
+      }
+      if (command === "connections_migrate_local_storage") {
+        migrated = true;
+        return {
+          imported: 2,
+          skippedInvalid: [],
+          skippedDuplicates: 0,
+          skippedConflicts: [],
+        };
+      }
+      if (command === "connections_list") {
+        return legacy;
+      }
+      return undefined;
+    });
+
+    render(<ConnectionsPage />);
+
+    expect(await screen.findByText(/Imported 2 connection profiles/)).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("connections_migrate_local_storage", {
+      records: legacy,
+    });
+
+    // localStorage is a read-only rollback artifact: it is never deleted.
+    expect(localStorage.getItem("dbpinball_connections")).not.toBeNull();
+  });
+
+  it("shows a recoverable error instead of falling back when migration fails", async () => {
+    const legacy = createConnections();
+    localStorage.setItem("dbpinball_connections", JSON.stringify(legacy));
+
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "connections_migration_status") {
+        return { migratedFrom: null, revision: 0, profiles: 0 };
+      }
+      if (command === "connections_migrate_local_storage") {
+        throw new Error("The connection store could not be updated.");
+      }
+      if (command === "connections_list") {
+        return [];
+      }
+      return undefined;
+    });
+
+    render(<ConnectionsPage />);
+
+    expect(await screen.findByText(/Migration did not complete/)).toBeInTheDocument();
+    expect(localStorage.getItem("dbpinball_connections")).not.toBeNull();
   });
 });

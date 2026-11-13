@@ -1,3 +1,5 @@
+export type TargetClass = "production" | "staging" | "local" | "unknown";
+
 export interface DbConnection {
   id: string;
   name: string;
@@ -7,7 +9,22 @@ export interface DbConnection {
   database: string;
   username: string;
   useSsl: boolean;
+  /** User-provided hint only. Never treated as verified evidence. */
+  target?: TargetClass;
 }
+
+export type MigrationReport = {
+  imported: number;
+  skippedInvalid: { index: number; reason: string }[];
+  skippedDuplicates: number;
+  skippedConflicts: { index: number; id: string; reason: string }[];
+};
+
+export type MigrationStatus = {
+  migratedFrom: string | null;
+  revision: number;
+  profiles: number;
+};
 
 export type QueryResultRow = (string | null)[];
 
