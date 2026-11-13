@@ -51,6 +51,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Verify destinations and evaluate the security policy.
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -124,6 +129,45 @@ pub enum SchemaCommand {
         #[arg(long)]
         database: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecurityCommand {
+    /// Read the destination identity and compare it to any enrollment.
+    Inspect { id: String },
+    /// Verify a destination and enroll its fingerprint.
+    Enroll {
+        id: String,
+        /// The category to enroll. Only verified categories are accepted.
+        #[arg(long, value_enum)]
+        category: CategoryArg,
+    },
+    /// Verify a destination without changing the enrollment.
+    Verify { id: String },
+    /// Evaluate the policy for one operation against one connection.
+    PolicyCheck {
+        id: String,
+        #[arg(long, value_enum)]
+        operation: OperationArg,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CategoryArg {
+    Development,
+    Disposable,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationArg {
+    Inspect,
+    Query,
+    Backup,
+    Import,
+    Restore,
+    Copy,
+    Schema,
+    Data,
 }
 
 #[cfg(test)]

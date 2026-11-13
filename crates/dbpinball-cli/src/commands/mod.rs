@@ -1,6 +1,7 @@
 pub mod connections;
 pub mod doctor;
 pub mod schema;
+pub mod security;
 
 use dbpinball_core::domain::error::CoreError;
 
@@ -22,5 +23,6 @@ async fn run(cli: &Cli) -> Result<i32, CoreError> {
         Command::Doctor => doctor::run(cli).await,
         Command::Connections { command } => connections::run(cli, command).await,
         Command::Schema { command } => schema::run(cli, command).await,
+        Command::Security { command } => security::run(cli, command).await,
     }
 }

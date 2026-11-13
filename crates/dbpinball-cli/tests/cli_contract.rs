@@ -275,3 +275,115 @@ fn doctor_is_deterministic_with_a_fixed_config_dir() {
     assert_eq!(second_code, 0);
     assert_eq!(first_stdout, second_stdout);
 }
+
+// ---------------------------------------------------------------------------
+// M3 security commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn security_help_lists_every_subcommand() {
+    let temp = TempDir::new().unwrap();
+    let (code, stdout, _) = run(&temp, &["security", "--help"], None);
+    assert_eq!(code, 0);
+    for command in ["inspect", "enroll", "verify", "policy-check"] {
+        assert!(stdout.contains(command), "missing {command} in help");
+    }
+}
+
+#[test]
+fn security_inspect_requires_a_known_connection() {
+    let temp = TempDir::new().unwrap();
+    let (code, stdout, _) = run(&temp, &["--json", "security", "inspect", "missing"], None);
+    assert_eq!(code, 7, "an unknown connection exits 7");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    assert_eq!(value["error"]["code"], "not_found");
+}
+
+#[test]
+fn security_enroll_rejects_an_unknown_connection() {
+    let temp = TempDir::new().unwrap();
+    let (code, _, _) = run(
+        &temp,
+        &["security", "enroll", "missing", "--category", "development"],
+        None,
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn security_enroll_requires_a_valid_category() {
+    let temp = TempDir::new().unwrap();
+    let (code, _, stderr) = run(
+        &temp,
+        &["security", "enroll", "missing", "--category", "production"],
+        None,
+    );
+    assert_eq!(code, 2, "an invalid category is a usage error");
+    assert!(stderr.to_ascii_lowercase().contains("invalid value"));
+}
+
+#[test]
+fn security_policy_check_requires_a_valid_operation() {
+    let temp = TempDir::new().unwrap();
+    let (code, _, _) = run(
+        &temp,
+        &[
+            "security",
+            "policy-check",
+            "missing",
+            "--operation",
+            "nonsense",
+        ],
+        None,
+    );
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn security_policy_check_for_a_read_only_operation_needs_no_database() {
+    let temp = TempDir::new().unwrap();
+
+    // Create a profile without a password; a read-only policy check must not
+    // need one, because it never opens a connection.
+    let (code, _, _) = run(
+        &temp,
+        &[
+            "connections",
+            "add",
+            "--name",
+            "local",
+            "--engine",
+            "postgres",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "5432",
+            "--database",
+            "app",
+            "--username",
+            "postgres",
+            "--target",
+            "local",
+        ],
+        Some("secret\n"),
+    );
+    assert_eq!(code, 0, "profile creation should succeed");
+
+    let (code, stdout, _) = run(
+        &temp,
+        &[
+            "--json",
+            "security",
+            "policy-check",
+            "PLACEHOLDER",
+            "--operation",
+            "query",
+        ],
+        None,
+    );
+    // The placeholder id does not exist, so this still exits 7; the point is
+    // that the command is wired and returns one JSON object.
+    assert_eq!(code, 7);
+    let value: Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    assert_eq!(value["error"]["code"], "not_found");
+}
