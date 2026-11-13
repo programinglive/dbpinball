@@ -75,3 +75,9 @@ packages/laravel-adapter/vendor/
 *.bak
 *.orig
 *.rej
+
+# Documentation site build artifacts
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
+website/.vitepress/.temp/
