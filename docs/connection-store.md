@@ -96,7 +96,41 @@ displaced.
 The lock is an operating-system file lock, not an in-process mutex. The
 cross-process tests spawn the real `dbpinball` binary.
 
-## 5. Migration from localStorage
+## 5. Credential lifecycle
+
+A profile and its credential are two persistence systems: the JSON store and the
+OS keyring. They are coordinated as one logical mutation under the store lock.
+
+| Operation | Order under the lock | Failure behaviour |
+|---|---|---|
+| Create | duplicate-id check → credential write → metadata write | A duplicate id or a failed credential write persists nothing |
+| Update | revision check → profile lookup → credential write → metadata write | A stale revision or a failed credential write leaves the profile unchanged |
+| Delete | revision check → profile removal → credential delete → metadata write | A stale revision or a failed credential delete leaves the profile and its credential intact |
+
+Because the revision check and the keyring call happen inside the same critical
+section, a stale revision can never delete the credential of a profile that
+stays active, and a concurrent CLI or desktop mutation cannot slip between the
+check and the keyring call.
+
+### Bounded operation policy
+
+The store lock is held while the keyring is called. The keyring call is
+synchronous and cannot be cancelled, so a hung keyring blocks other writers
+until the process exits. The lock's liveness-based recovery then unblocks them:
+a confirmed-dead owner is recovered, so the wait is bounded by the process
+lifetime, not by an unbounded retry loop.
+
+### Crash recovery
+
+The JSON store and the keyring are separate systems, so this is not
+crash-atomic. A crash between the credential delete and the metadata write
+leaves the profile without a credential. The profile is not lost: the desktop
+reports "password required" and the user re-enters it. A crash between the
+credential write and the metadata write on create leaves an orphan credential
+and no profile; the credential is harmless and can be overwritten by a later
+create with the same id.
+
+## 6. Migration from localStorage
 
 The desktop migrates automatically on first launch.
 
@@ -135,7 +169,7 @@ the user resolves it.
   replacement for desktop keyring credentials. It is per-invocation and cannot
   store or delete.
 
-## 6. Rollback
+## 7. Rollback
 
 | Scenario | Recovery |
 |---|---|
@@ -148,14 +182,14 @@ the user resolves it.
 Rollback never deletes `localStorage`, never deletes CLI profiles, and never
 touches keyring entries.
 
-## 7. Platform support
+## 8. Platform support
 
 The store path and the lock are implemented for Windows, macOS and Linux. The
 cross-process tests run on the platform that executes CI (Linux) and on the
 developer machine. A platform that has not been exercised is not claimed as
 verified.
 
-## 8. What M2.1 does not do
+## 9. What M2.1 does not do
 
 - No security policy or destination verification (M3).
 - No safe sync (M4).

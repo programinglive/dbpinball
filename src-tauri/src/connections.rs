@@ -43,46 +43,21 @@ pub fn list() -> Result<Vec<DbConnection>, String> {
     store()?.load().map_err(safe_error)
 }
 
-pub fn create(
-    mut connection: DbConnection,
-    password: Option<String>,
-) -> Result<DbConnection, String> {
+pub fn create(connection: DbConnection, password: Option<String>) -> Result<DbConnection, String> {
     let store = store()?;
-
-    // Core owns id generation. Assigning here (rather than inside `create`)
-    // means the rollback path knows the id if the profile write fails.
-    if connection.id.trim().is_empty() {
-        connection.id = ConnectionStore::new_id();
-    }
-
-    // Refuse an existing id BEFORE touching the credential. Storing a password
-    // for an id that already exists would overwrite that profile's credential,
-    // and the rollback below would then delete it.
-    if store.get(&connection.id).map_err(safe_error)?.is_some() {
-        return Err("A connection with this id already exists.".to_string());
-    }
-
     let keyring = KeyringCredentialProvider;
-    let id = connection.id.clone();
+    let secret = password.filter(|value| !value.is_empty());
 
-    // Store the credential first so a profile never exists without one.
-    let stored = match password {
-        Some(value) if !value.is_empty() => {
-            keyring.set(&id, &Secret::new(value)).map_err(safe_error)?;
-            true
-        }
-        _ => false,
-    };
-
-    match store.create(connection) {
-        Ok(created) => Ok(created),
-        Err(error) => {
-            if stored {
-                let _ = keyring.delete(&id);
-            }
-            Err(safe_error(error))
-        }
-    }
+    // The duplicate-id check, the credential write and the metadata write are
+    // one logical mutation under the store lock. A concurrent create cannot
+    // slip the same id in between, so this can never overwrite (and then
+    // delete) another profile's credential.
+    store
+        .create_with_credential(connection, |id| match &secret {
+            Some(value) => keyring.set(id, &Secret::new(value.clone())),
+            None => Ok(()),
+        })
+        .map_err(safe_error)
 }
 
 pub fn update(
@@ -91,42 +66,31 @@ pub fn update(
     expected_revision: Option<u64>,
 ) -> Result<(), String> {
     let store = store()?;
+    let keyring = KeyringCredentialProvider;
+    let secret = password.filter(|value| !value.is_empty());
+
+    // The revision check, the credential write and the metadata write are one
+    // logical mutation under the store lock, so a concurrent delete cannot
+    // remove the profile between the check and the credential write.
     store
-        .update(connection.clone(), expected_revision)
-        .map_err(safe_error)?;
-
-    if let Some(value) = password {
-        if !value.is_empty() {
-            KeyringCredentialProvider
-                .set(&connection.id, &Secret::new(value))
-                .map_err(safe_error)?;
-        }
-    }
-
-    Ok(())
+        .update_with_credential(connection, expected_revision, |id| match &secret {
+            Some(value) => keyring.set(id, &Secret::new(value.clone())),
+            None => Ok(()),
+        })
+        .map_err(safe_error)
 }
 
 pub fn delete(id: String, expected_revision: Option<u64>) -> Result<bool, String> {
     let store = store()?;
 
-    // Check the revision BEFORE touching the credential. A stale revision means
-    // the profile stays, so its credential must stay too.
-    if let Some(expected) = expected_revision {
-        let status = store.migration_status().map_err(safe_error)?;
-        if status.revision != expected {
-            return Err(safe_error(CoreError::new(
-                ErrorCode::Conflict,
-                "revision mismatch",
-            )));
-        }
-    }
-
-    // Delete the credential first: a failure keeps the profile so it never
-    // looks removed while a credential is still stored.
-    KeyringCredentialProvider.delete(&id).map_err(safe_error)?;
-
+    // The revision check, the credential cleanup and the metadata write are one
+    // logical mutation under the store lock. A stale revision fails before the
+    // keyring is touched, so it can never delete the credential of a profile
+    // that stays active.
     store
-        .remove_with_revision(&id, expected_revision)
+        .remove_with_revision_and_cleanup(&id, expected_revision, || {
+            KeyringCredentialProvider.delete(&id)
+        })
         .map_err(safe_error)
 }
 
@@ -142,4 +106,32 @@ pub fn migrate_local_storage(records: Vec<DbConnection>) -> Result<ImportReport,
 
 pub fn migration_status() -> Result<MigrationStatus, String> {
     store()?.migration_status().map_err(safe_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_error_never_leaks_a_credential() {
+        let error = CoreError::new(
+            ErrorCode::Connection,
+            "keyring failed for postgres://user:hunter2@host/db",
+        );
+
+        let message = safe_error(error);
+        assert!(!message.contains("hunter2"));
+        assert!(!message.contains("postgres://"));
+    }
+
+    #[test]
+    fn safe_error_does_not_leak_a_filesystem_path() {
+        let error = CoreError::new(
+            ErrorCode::Operation,
+            "connection store could not be created: C:\\Users\\someone\\AppData",
+        );
+
+        let message = safe_error(error);
+        assert!(!message.contains("AppData"));
+    }
 }

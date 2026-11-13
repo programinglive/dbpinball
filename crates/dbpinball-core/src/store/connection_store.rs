@@ -188,6 +188,92 @@ impl ConnectionStore {
         self.write_locked(&mut file)
     }
 
+    /// Create a profile and its credential as one logical mutation.
+    ///
+    /// The store lock is held across the duplicate-id check, the credential
+    /// write and the metadata write, so a concurrent writer cannot create the
+    /// same id between the check and the write. If the credential write fails,
+    /// nothing is persisted. If the metadata write fails after the credential
+    /// was stored, the credential is orphaned; the profile does not exist, so
+    /// no active profile loses its credential.
+    pub fn create_with_credential<F>(
+        &self,
+        mut connection: ConnectionRecord,
+        store_credential: F,
+    ) -> Result<ConnectionRecord, CoreError>
+    where
+        F: FnOnce(&str) -> Result<(), CoreError>,
+    {
+        if connection.id.trim().is_empty() {
+            connection.id = Self::new_id();
+        }
+
+        validate(&connection).map_err(|reason| CoreError::new(ErrorCode::Usage, reason))?;
+
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if file
+            .connections
+            .iter()
+            .any(|existing| existing.id == connection.id)
+        {
+            return Err(CoreError::new(
+                ErrorCode::Usage,
+                "a connection with this id already exists",
+            ));
+        }
+
+        store_credential(&connection.id)?;
+
+        file.connections.push(connection.clone());
+        self.write_locked(&mut file)?;
+
+        Ok(connection)
+    }
+
+    /// Update a profile and its credential as one logical mutation.
+    ///
+    /// The revision check, the credential write and the metadata write happen
+    /// under one lock, so a concurrent delete cannot remove the profile between
+    /// the check and the credential write.
+    pub fn update_with_credential<F>(
+        &self,
+        connection: ConnectionRecord,
+        expected_revision: Option<u64>,
+        store_credential: F,
+    ) -> Result<(), CoreError>
+    where
+        F: FnOnce(&str) -> Result<(), CoreError>,
+    {
+        validate(&connection).map_err(|reason| CoreError::new(ErrorCode::Usage, reason))?;
+
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if let Some(expected) = expected_revision {
+            if file.revision != expected {
+                return Err(revision_conflict(file.revision, expected));
+            }
+        }
+
+        let position = file
+            .connections
+            .iter()
+            .position(|existing| existing.id == connection.id)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::NotFound,
+                    format!("connection '{}' was not found", connection.id),
+                )
+            })?;
+
+        store_credential(&connection.id)?;
+
+        file.connections[position] = connection;
+        self.write_locked(&mut file)
+    }
+
     /// Replace an existing profile, optionally refusing a stale revision.
     pub fn update(
         &self,
@@ -248,6 +334,51 @@ impl ConnectionStore {
 
     pub fn remove(&self, id: &str) -> Result<bool, CoreError> {
         self.remove_with_revision(id, None)
+    }
+
+    /// Remove a profile and its credential as one logical mutation.
+    ///
+    /// The revision check, the credential cleanup and the metadata write happen
+    /// under one lock. A stale revision therefore fails **before** the keyring
+    /// is touched, so it can never delete the credential of a profile that
+    /// stays active. A failed credential cleanup returns before the metadata is
+    /// written, so the profile is not removed.
+    ///
+    /// The JSON store and the OS keyring are separate persistence systems, so
+    /// this is not crash-atomic: a crash after the credential cleanup and
+    /// before the metadata write leaves the profile without a credential. The
+    /// profile is not lost; the desktop reports "password required" and the
+    /// user re-enters it.
+    pub fn remove_with_revision_and_cleanup<F>(
+        &self,
+        id: &str,
+        expected_revision: Option<u64>,
+        cleanup: F,
+    ) -> Result<bool, CoreError>
+    where
+        F: FnOnce() -> Result<(), CoreError>,
+    {
+        let _guard = lock::acquire(&self.root)?;
+        let mut file = self.load_file()?;
+
+        if let Some(expected) = expected_revision {
+            if file.revision != expected {
+                return Err(revision_conflict(file.revision, expected));
+            }
+        }
+
+        let before = file.connections.len();
+        file.connections.retain(|record| record.id != id);
+        let removed = file.connections.len() != before;
+
+        if !removed {
+            return Ok(false);
+        }
+
+        cleanup()?;
+        self.write_locked(&mut file)?;
+
+        Ok(true)
     }
 
     /// Import profiles without changing provenance.
@@ -823,5 +954,174 @@ mod migration_integrity_tests {
             .unwrap();
 
         assert_eq!(store.get("shared").unwrap().unwrap().database, "original");
+    }
+}
+
+#[cfg(test)]
+mod credential_lifecycle_tests {
+    use super::*;
+    use crate::domain::connection::{DbEngine, TargetClass};
+    use std::sync::mpsc;
+
+    fn connection(id: &str, database: &str) -> DbConnection {
+        DbConnection {
+            id: id.to_string(),
+            name: format!("profile-{id}"),
+            engine: DbEngine::Postgres,
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            database: database.to_string(),
+            username: "postgres".to_string(),
+            use_ssl: false,
+            target: TargetClass::Local,
+        }
+    }
+
+    #[test]
+    fn a_stale_revision_does_not_touch_the_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+        let stale = store.load_file().unwrap().revision;
+        store.add(connection("b", "app")).unwrap();
+
+        let mut cleaned = false;
+        let result = store.remove_with_revision_and_cleanup("a", Some(stale), || {
+            cleaned = true;
+            Ok(())
+        });
+
+        assert_eq!(result.unwrap_err().code, ErrorCode::Conflict);
+        assert!(!cleaned, "a stale revision must not reach the keyring");
+        assert!(store.get("a").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_failed_credential_cleanup_keeps_the_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+
+        let result = store.remove_with_revision_and_cleanup("a", None, || {
+            Err(CoreError::new(ErrorCode::Connection, "keyring unavailable"))
+        });
+
+        assert_eq!(result.unwrap_err().code, ErrorCode::Connection);
+        assert!(store.get("a").unwrap().is_some(), "the profile must stay");
+    }
+
+    #[test]
+    fn a_failed_write_after_credential_cleanup_is_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+
+        let mut cleaned = false;
+        let result = store.remove_with_revision_and_cleanup("a", None, || {
+            cleaned = true;
+            // Make the final rename fail: the target path becomes a directory.
+            std::fs::remove_file(store.path()).unwrap();
+            std::fs::create_dir(store.path()).unwrap();
+            Ok(())
+        });
+
+        assert!(cleaned);
+        assert!(result.is_err(), "a failed metadata write must be reported");
+    }
+
+    #[test]
+    fn a_duplicate_create_does_not_touch_the_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("shared", "original")).unwrap();
+
+        let mut stored = false;
+        let result = store.create_with_credential(connection("shared", "different"), |_| {
+            stored = true;
+            Ok(())
+        });
+
+        assert_eq!(result.unwrap_err().code, ErrorCode::Usage);
+        assert!(!stored, "a duplicate id must not reach the keyring");
+        assert_eq!(store.get("shared").unwrap().unwrap().database, "original");
+    }
+
+    #[test]
+    fn a_stale_update_does_not_touch_the_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+        let stale = store.load_file().unwrap().revision;
+        store.add(connection("b", "app")).unwrap();
+
+        let mut stored = false;
+        let result = store.update_with_credential(connection("a", "renamed"), Some(stale), |_| {
+            stored = true;
+            Ok(())
+        });
+
+        assert_eq!(result.unwrap_err().code, ErrorCode::Conflict);
+        assert!(!stored, "a stale revision must not reach the keyring");
+        assert_eq!(store.get("a").unwrap().unwrap().database, "app");
+    }
+
+    #[test]
+    fn create_with_credential_stores_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let created = store
+            .create_with_credential(connection("new", "app"), |id| {
+                assert_eq!(id, "new");
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(created.id, "new");
+        assert!(store.get("new").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_concurrent_writer_is_serialized_against_delete() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("a", "app")).unwrap();
+        store.add(connection("b", "app")).unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let root = directory.path().to_path_buf();
+        let writer = std::thread::spawn(move || {
+            let store = ConnectionStore::new(root);
+            started_rx.recv().unwrap();
+            let result = store.add(connection("c", "app"));
+            done_tx.send(result.is_ok()).unwrap();
+        });
+
+        let removed = store
+            .remove_with_revision_and_cleanup("a", None, || {
+                started_tx.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(removed);
+        assert!(
+            done_rx.recv().unwrap(),
+            "the concurrent writer must succeed"
+        );
+        writer.join().unwrap();
+
+        let ids: Vec<String> = store.load().unwrap().into_iter().map(|c| c.id).collect();
+        assert!(ids.contains(&"b".to_string()));
+        assert!(ids.contains(&"c".to_string()));
+        assert!(!ids.contains(&"a".to_string()));
     }
 }
