@@ -67,10 +67,11 @@
   font-size: 0.85em;
 }
 
-/* Tables: compact and scannable. */
+/* Tables: keep VitePress's `display: block; overflow-x: auto` so a wide table
+   scrolls inside its own box instead of overflowing the page on mobile.
+   Forcing `display: table` here makes the table expand to its content width
+   and pushes the whole document sideways at 390px. */
 .vp-doc table {
-  display: table;
-  width: 100%;
   font-size: 0.9rem;
 }
 

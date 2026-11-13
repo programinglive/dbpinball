@@ -54,6 +54,10 @@ jobs:
         working-directory: website
         run: node scripts/check-contrast.mjs
 
+      - name: Check layout wrappers
+        working-directory: website
+        run: node scripts/check-layout.mjs
+
       - name: Upload build output
         uses: actions/upload-artifact@v4
         with:
