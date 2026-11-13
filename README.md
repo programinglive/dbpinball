@@ -267,7 +267,7 @@ DBPINBALL_TEST_MYSQL_URL=mysql://root:dbpinball@127.0.0.1:53306/dbpinball_test \
 docker compose -f docker-compose.test.yml down -v
 ```
 
-CI runs on every push and pull request: frontend lint, tests, and build; Rust format, clippy, and tests; `npm audit`; `cargo audit`; and a secret scan. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI runs on every push and pull request: frontend lint, tests, and build; Rust format, clippy, and workspace tests; a dependency-boundary check; the Laravel adapter PHP suite; a dedicated `database-integration` job against disposable PostgreSQL 16 and MySQL 8 services; `npm audit`; `cargo audit`; and a secret scan. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 Dependency status is tracked in [`docs/security/DEPENDENCY_VULNERABILITY_REPORT.md`](docs/security/DEPENDENCY_VULNERABILITY_REPORT.md). Release readiness is tracked in [`docs/RELEASE_READINESS.md`](docs/RELEASE_READINESS.md).
 
