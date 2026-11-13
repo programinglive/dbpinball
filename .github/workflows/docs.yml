@@ -100,4 +100,8 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # The action's default wrangler (3.90.0) fails to publish to current
+          # Cloudflare Pages with "Failed to publish your Function". Pin the
+          # version that is verified to work for this project.
+          wranglerVersion: "4.161.0"
           command: pages deploy dist --project-name=dbpinball-docs --branch=main
