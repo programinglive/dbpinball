@@ -1,1 +1,12 @@
-npm test
+#!/usr/bin/env sh
+
+# Pre-commit gate.
+#
+# Prefer the commiter test-verification script when it is present, and fall back
+# to the project test suite otherwise. The fallback keeps a fresh clone working
+# even if scripts/verify-tests.cjs has not been committed yet.
+if [ -f scripts/verify-tests.cjs ]; then
+  node scripts/verify-tests.cjs
+else
+  npm test
+fi

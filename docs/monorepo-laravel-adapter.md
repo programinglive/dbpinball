@@ -16,9 +16,9 @@ flowchart LR
     end
     
     subgraph Adapter["packages/laravel-adapter"]
-        Artisan["Artisan Commands: backup:run"]
+        Artisan["Artisan Command: backup:database"]
         Manager["BackupManager Engine"]
-        Storage["Cloud / Local Storage Writers"]
+        Storage["Local storage: storage/backups"]
     end
     
     GUI -.->|Orchestrates remote / scheduled jobs| Artisan
@@ -26,7 +26,7 @@ flowchart LR
 ```
 
 1. **Desktop Client (`src-tauri` + `src/`)**: Provides the interactive TablePlus-style GUI for developers to inspect databases, test queries, and execute ad-hoc local backups using native Rust runners.
-2. **Laravel Adapter (`packages/laravel-adapter/`)**: Provides the PHP package for Laravel applications (`illuminate/support`, `illuminate/console`) to automate database dumps, gzip compression, and retention pruning on server environments.
+2. **Laravel Adapter (`packages/laravel-adapter/`)**: Provides the PHP package for Laravel applications (`illuminate/support`, `illuminate/console`) to automate database dumps to local storage on server environments.
 
 ---
 
@@ -51,5 +51,9 @@ The adapter package can be referenced directly from this monorepo or installed a
 Or published to Packagist/GitHub Packages under `@programinglive/dbpinball-laravel-adapter`.
 
 ### Available Artisan Commands
-- `php artisan backup:run`: Runs database dump according to `config/backup.php`.
-- `php artisan backup:clean`: Cleans old database archives exceeding retention policies.
+- `php artisan backup:database`: Runs a database dump to `storage/backups`, optionally for a specific connection with `--connection`.
+
+### Not implemented yet
+- Retention pruning (`keep_backups` is present in `config/backup.php` but is not applied).
+- Cloud storage drivers.
+- Compression.

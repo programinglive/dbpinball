@@ -7,7 +7,7 @@ use sqlx::types::Decimal;
 use sqlx::{Column, Row};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tauri::{Window, Emitter};
+use tauri::{Emitter, Window};
 use tokio::io::AsyncWriteExt;
 use which::which;
 
@@ -46,11 +46,7 @@ pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
     Ok(names)
 }
 
-pub async fn backup(
-    window: &Window,
-    conn: DbConnection,
-    opts: BackupOptions,
-) -> Result<String> {
+pub async fn backup(window: &Window, conn: DbConnection, opts: BackupOptions) -> Result<String> {
     // Try pg_dump first
     if let Ok(bin) = which("pg_dump") {
         emit(window, "Using pg_dump…");
@@ -105,7 +101,10 @@ pub async fn run_query(
         data.push(record);
     }
 
-    Ok(QueryResult { columns, rows: data })
+    Ok(QueryResult {
+        columns,
+        rows: data,
+    })
 }
 
 async fn dump_with_pg_dump(
@@ -150,8 +149,11 @@ async fn dump_with_pg_dump(
     let stdout = child.stdout.take().context("get stdout")?;
     let output_file = tokio::fs::File::create(&out).await?;
 
-    tokio::io::copy(&mut tokio::io::BufReader::new(stdout), &mut Box::new(output_file))
-        .await?;
+    tokio::io::copy(
+        &mut tokio::io::BufReader::new(stdout),
+        &mut Box::new(output_file),
+    )
+    .await?;
 
     let status = child.wait().await?;
     if !status.success() {
@@ -162,11 +164,7 @@ async fn dump_with_pg_dump(
     Ok(out.to_string_lossy().to_string())
 }
 
-async fn internal_dump(
-    window: &Window,
-    conn: DbConnection,
-    opts: BackupOptions,
-) -> Result<String> {
+async fn internal_dump(window: &Window, conn: DbConnection, opts: BackupOptions) -> Result<String> {
     let password = secrets::get_password(&conn.id)?;
     let url = format!(
         "postgresql://{}:{}@{}:{}/{}",
@@ -181,11 +179,10 @@ async fn internal_dump(
 
     if opts.structure {
         // Dump tables
-        let tables: Vec<(String,)> = sqlx::query_as(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
-        )
-        .fetch_all(&pool)
-        .await?;
+        let tables: Vec<(String,)> =
+            sqlx::query_as("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                .fetch_all(&pool)
+                .await?;
 
         for (table_name,) in tables {
             emit(window, &format!("Dumping table: {}", table_name));
@@ -213,11 +210,20 @@ pub async fn restore(
         let password = secrets::get_password(&conn.id)?;
 
         let mut cmd = tokio::process::Command::new(&bin);
-        cmd.args(["-h", &conn.host, "-p", &conn.port.to_string(), "-U", &conn.username, "-d", &conn.database])
-            .env("PGPASSWORD", &password)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "-h",
+            &conn.host,
+            "-p",
+            &conn.port.to_string(),
+            "-U",
+            &conn.username,
+            "-d",
+            &conn.database,
+        ])
+        .env("PGPASSWORD", &password)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().context("spawn psql")?;
         let stdin = child.stdin.take().context("get stdin")?;
@@ -349,5 +355,8 @@ fn pg_value_to_string(row: &PgRow, index: usize) -> Result<Option<String>> {
         return Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()));
     }
 
-    Err(anyhow!("Unsupported Postgres value type at column {}", index))
+    Err(anyhow!(
+        "Unsupported Postgres value type at column {}",
+        index
+    ))
 }

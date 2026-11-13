@@ -11,9 +11,6 @@ npm run build
 
 # Type check
 npm run lint
-
-# Format code
-npm run format
 ```
 
 ## Git & Commits
@@ -106,17 +103,17 @@ git reset --hard HEAD~1
 
 ```bash
 # Clean build
-cargo clean
+cd src-tauri && cargo clean
 rm -rf node_modules dist
 
 # Reinstall dependencies
 npm install
 
 # Check Rust compilation
-cargo check
+cd src-tauri && cargo check
 
 # Run Rust tests
-cargo test
+cd src-tauri && cargo test
 
 # Kill port 1420 (dev server)
 # Windows:

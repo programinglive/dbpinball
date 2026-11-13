@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a capability or improvement
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the README first. The CLI, Safe Sync, and masking are planned but not implemented.
+        Proposals that conflict with the documented architecture will be discussed before implementation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Desktop UI
+        - Connection management
+        - Query workspace
+        - Backup / restore / copy
+        - CLI
+        - Safe Sync
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have read the README capability states.
+          required: true
+        - label: This request does not require real production data to demonstrate.
+          required: true

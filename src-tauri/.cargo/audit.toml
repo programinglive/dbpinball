@@ -1,0 +1,46 @@
+# cargo-audit configuration for DBPinball.
+#
+# Every ignored advisory must have a written reason, a reachability argument,
+# and a reassessment date. Do not add an entry without all three.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0459 — libsqlite3-sys via C SQLite CVE-2026-119375.
+  #
+  # Reachability: libsqlite3-sys is an optional dependency of sqlx. Cargo
+  # records optional dependencies in Cargo.lock even when their feature is
+  # disabled, so the lockfile-based audit sees it. It is not in the build
+  # graph and is never compiled:
+  #
+  #   cargo tree --target all | grep libsqlite3-sys   -> no output
+  #   target/**/*sqlite*                              -> no artifacts
+  #
+  # DBPinball enables only the postgres and mysql sqlx backends. The bundled
+  # SQLite C library is therefore not linked into any release artifact.
+  #
+  # Reassess: 2027-05-12, or immediately if any sqlx feature change activates
+  # the sqlite backend.
+  "RUSTSEC-2026-0459",
+
+  # RUSTSEC-2023-0071 — rsa 0.9.x Marvin attack (timing side channel).
+  #
+  # Path: dbpinball -> sqlx 0.8.6 -> sqlx-mysql 0.8.6 -> rsa 0.9.10.
+  #
+  # Reachability: the Marvin attack targets RSA *decryption* with a private
+  # key. sqlx-mysql uses rsa only to *encrypt* the password with the server's
+  # public key for sha256_password / caching_sha2_password:
+  #
+  #   sqlx-mysql-0.8.6/src/auth.rs:6   use rsa::{..., Oaep, RsaPublicKey};
+  #   sqlx-mysql-0.8.6/src/auth.rs:166 pkey.encrypt(&mut thread_rng(), padding, &pass[..])
+  #
+  # There is no RsaPrivateKey and no decrypt call in sqlx-mysql. The client
+  # never performs the operation the advisory describes.
+  #
+  # Compensating controls: prefer TLS (ssl-mode) for MySQL connections; the
+  # RSA path is only used when the server requests public-key password
+  # exchange. No client private key exists in this flow.
+  #
+  # Reassess: 2027-05-12, or when sqlx 0.9 (rsa 0.10) is adopted, whichever
+  # comes first.
+  "RUSTSEC-2023-0071",
+]

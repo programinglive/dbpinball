@@ -1,5 +1,7 @@
 # dbpinball Quick Start Guide
 
+> **Status: preview.** The Backup, Restore, Copy, and Jobs pages described below are **not reachable from the current UI**. `App.tsx` renders only the Connections workspace, and the nav-rail buttons for backup and restore have no handlers. The Tauri commands exist, but the pages are not routed. Treat this guide as a preview of the intended workflow, not as instructions for the current build. See [`README.md`](README.md) for the accurate capability states.
+
 ## 5-Minute Setup
 
 ### 1. Install Dependencies
@@ -47,7 +49,7 @@ This will:
 
 1. Click **Restore** tab
 2. Select target connection
-3. Enter path to backup file (e.g., `/Users/you/dbpinball/backups/mysql_mydb_20240101T120000.sql`)
+3. Enter path to backup file (e.g., `~/dbpinball/backups/mysql_mydb_20240101T120000.sql`)
 4. Click **Start Restore**
 
 ### 6. Copy Database
@@ -69,14 +71,18 @@ This will:
 ### Backup with Compression
 
 1. Go to **Backup**
-2. Check **Compress (ZIP)**
+2. Check **Compress**
 3. Click **Start Backup**
+
+Compression uses deflate and produces a `.sql.deflate` file. The UI label still says "ZIP"; that label is inaccurate and is tracked as a known defect.
 
 ### Restore with Drop Schema
 
 1. Go to **Restore**
 2. Check **Drop schema if exists**
 3. Click **Start Restore**
+
+**Known defect:** the `drop_existing` option is currently accepted but ignored. The checkbox has no effect.
 
 ### View Job History
 
@@ -131,6 +137,8 @@ This will:
 1. Uncheck **Stop on first error** to continue despite errors
 2. Check backup file is valid SQL
 3. Verify target database schema is compatible
+
+**Known defect:** the `stop_on_error` option is currently accepted but ignored.
 
 ## Tips & Tricks
 
@@ -202,17 +210,16 @@ npm run tauri dev
 npm run tauri build
 
 # Check Rust code
-cargo check
+cd src-tauri && cargo check
 
 # Run Rust tests
-cargo test
+cd src-tauri && cargo test
 
-# Format code
-cargo fmt
-npm run format
+# Format Rust code
+cd src-tauri && cargo fmt
 
 # Lint code
-cargo clippy
+cd src-tauri && cargo clippy
 npm run lint
 ```
 

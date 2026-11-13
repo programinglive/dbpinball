@@ -1,5 +1,7 @@
 # dbpinball Implementation Summary
 
+> **Historical record.** This document describes an earlier implementation state and overstates what is available. Several features listed here are not reachable from the current UI, and the internal dumper is incomplete. See [`README.md`](README.md) for the accurate capability states and [`docs/security/OPEN_SOURCE_READINESS_AUDIT.md`](docs/security/OPEN_SOURCE_READINESS_AUDIT.md) for confirmed defects.
+
 ## Project Overview
 
 **dbpinball** is a complete, production-ready database backup/restore/copy tool built with Tauri, React, and Rust. It provides a modern desktop UI for managing MySQL and PostgreSQL databases with one-click operations.

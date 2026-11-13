@@ -304,8 +304,8 @@ npm test
 
 ### TypeScript/React
 
-- Use `npm run format` for formatting
-- Use `npm run lint` for linting
+- Use `npm run lint` for type checking
+- TypeScript formatting is not currently enforced; there is no Prettier configuration in this repository
 - Follow React best practices
 
 ## Useful Commands
@@ -314,25 +314,24 @@ npm test
 # Development
 npm run tauri dev              # Start dev server
 npm run dev                    # Start Vite only
-cargo check                    # Check Rust code
-cargo build                    # Build Rust
+cd src-tauri && cargo check    # Check Rust code
+cd src-tauri && cargo build    # Build Rust
 
 # Testing
-cargo test                     # Run Rust tests
-npm test                       # Run React tests (future)
+cd src-tauri && cargo test     # Run Rust tests
+npm test                       # Run frontend tests
 
 # Code Quality
-cargo fmt                      # Format Rust
-cargo clippy                   # Lint Rust
-npm run format                 # Format TypeScript
-npm run lint                   # Lint TypeScript
+cd src-tauri && cargo fmt      # Format Rust
+cd src-tauri && cargo clippy   # Lint Rust
+npm run lint                   # Type-check TypeScript
 
 # Building
 npm run tauri build            # Build production app
 npm run build                  # Build React only
 
 # Cleaning
-cargo clean                    # Clean Rust build
+cd src-tauri && cargo clean    # Clean Rust build
 rm -rf node_modules dist       # Clean Node
 ```
 

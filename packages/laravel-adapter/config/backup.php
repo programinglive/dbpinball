@@ -17,4 +17,6 @@ return [
     'backup_path' => storage_path('backups'),
 
     'keep_backups' => env('BACKUP_KEEP_DAYS', 30),
+
+    'timeout' => env('BACKUP_TIMEOUT', 3600),
 ];

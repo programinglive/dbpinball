@@ -25,17 +25,7 @@ function App() {
               <div className="nav-rail__text">
                 <h1 className="nav-rail__title">DB Pinball</h1>
                 <p className="nav-rail__subtitle">Version 0.1.4 (preview)</p>
-                <p className="nav-rail__notice">You are using the free trial</p>
               </div>
-            </div>
-
-            <div className="nav-rail__actions">
-              <button type="button" className="nav-rail__action nav-rail__action--primary" data-tauri-drag-region="false">
-                Purchase
-              </button>
-              <button type="button" className="nav-rail__action" data-tauri-drag-region="false">
-                Activate
-              </button>
             </div>
 
             <div className="nav-rail__cta-stack">

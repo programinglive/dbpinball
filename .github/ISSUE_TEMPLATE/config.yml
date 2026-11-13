@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/programinglive/dbpinball/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
+  - name: Documentation and capability states
+    url: https://github.com/programinglive/dbpinball/blob/main/README.md
+    about: Check what is available, in development, and planned before filing.

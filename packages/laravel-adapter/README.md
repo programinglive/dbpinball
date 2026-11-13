@@ -90,8 +90,10 @@ $backups = Backup::getBackups();
 ## Requirements
 
 - PHP 8.1 or higher
-- Laravel 9.0, 10.0, 11.0, or 12.0
+- Laravel 9.0 through 13.0
 - MySQL or PostgreSQL with command-line tools installed
+
+> The package runtime supports PHP 8.1+. The test suite resolves PHPUnit 12 and Testbench 11, which require PHP 8.3; CI runs the suite on PHP 8.3.
 
 ### System Requirements
 
@@ -170,16 +172,29 @@ To test this package in a real Laravel project:
 
 ## Contributing
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Please see the repository [CONTRIBUTING.md](../../CONTRIBUTING.md) for details.
 
 ## Security
 
-If you discover any security-related issues, please email mahatma.mahardhika@programinglive.com instead of using the issue tracker.
+Please see the repository [SECURITY.md](../../SECURITY.md) for the disclosure process. Do not open a public issue for a vulnerability.
+
+### Credential handling
+
+Database dumps run through Symfony Process with an argument array, so no shell interprets connection values. Passwords are never placed in the argument list or the environment:
+
+- **MySQL**: credentials are written to a private `--defaults-extra-file` (mode `0600`) and removed after the run.
+- **PostgreSQL**: the password is written to a private `.pgpass` file (mode `0600`) referenced by `PGPASSFILE` and removed after the run.
+
+Backup output is written to a temporary file and renamed into place only on success, so a failed or timed-out dump never leaves a partial backup. Error messages redact the password, and backup filenames are sanitized so a database name cannot escape the backup directory.
+
+Credential fields are rejected if they contain a carriage return or line feed. A newline would end the quoted MySQL value or start a second `.pgpass` record, so such values fail closed. The error names the field but never includes the value.
+
+Backup downloads and deletions reject symbolic links, non-regular files, and paths that resolve outside the backup directory. These checks are not atomic with the caller's subsequent open, so the backup directory must be a trusted location that other users cannot write to.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) file for details.
+MIT License. See the repository [LICENSE](../../LICENSE) file for details.
 
 ## Support
 
-For issues and feature requests, please visit the [GitHub repository](https://github.com/programinglive/laravel-simple-backup).
+For issues and feature requests, please use the [dbpinball GitHub repository](https://github.com/programinglive/dbpinball).

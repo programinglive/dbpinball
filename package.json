@@ -2,6 +2,7 @@
   "name": "dbpinball",
   "private": true,
   "version": "0.1.6",
+  "license": "MIT",
   "type": "module",
   "license": "MIT",
   "workspaces": [
@@ -17,11 +18,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "husky",
-    "release": "node scripts/release.cjs",
-    "release:major": "node scripts/release.cjs major",
-    "release:minor": "node scripts/release.cjs minor",
-    "release:patch": "node scripts/release.cjs patch",
-    "format": "prettier --write .",
+    "release": "commiter release",
+    "release:major": "commiter release major",
+    "release:minor": "commiter release minor",
+    "release:patch": "commiter release patch",
+    "release:first": "commiter release --first-release",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -52,9 +53,10 @@
   "devDependencies": {
     "@commitlint/cli": "^20.1.0",
     "@commitlint/config-conventional": "^20.0.0",
-    "@programinglive/commiter": "^1.1.7",
+    "@programinglive/commiter": "^1.5.1",
     "@tailwindcss/postcss": "^4.1.17",
     "@tauri-apps/cli": "^2",
+    "@testing-library/dom": "^10.4.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
