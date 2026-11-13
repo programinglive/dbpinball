@@ -30,6 +30,33 @@ impl CredentialProvider for KeyringCredentialProvider {
             )
         })
     }
+
+    fn set(&self, connection_id: &str, secret: &Secret) -> Result<(), CoreError> {
+        let entry = Self::entry(connection_id)?;
+
+        entry
+            .set_password(secret.expose())
+            .map_err(|error| credential_write_error(&error))
+    }
+
+    fn delete(&self, connection_id: &str) -> Result<(), CoreError> {
+        let entry = Self::entry(connection_id)?;
+
+        match entry.delete_password() {
+            Ok(()) => Ok(()),
+            // A missing entry is not a failure: the caller is deleting the
+            // profile and the desired end state is "no credential stored".
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(credential_write_error(&error)),
+        }
+    }
+}
+
+fn credential_write_error(error: &keyring::Error) -> CoreError {
+    CoreError::new(
+        ErrorCode::Operation,
+        format!("credential could not be stored: {error}"),
+    )
 }
 
 #[cfg(test)]

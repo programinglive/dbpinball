@@ -30,6 +30,18 @@ impl CredentialProvider for FixedCredentialProvider {
     ) -> Result<Secret, dbpinball_core::domain::error::CoreError> {
         Ok(Secret::new(self.0.clone()))
     }
+
+    fn set(
+        &self,
+        _connection_id: &str,
+        _secret: &Secret,
+    ) -> Result<(), dbpinball_core::domain::error::CoreError> {
+        Ok(())
+    }
+
+    fn delete(&self, _connection_id: &str) -> Result<(), dbpinball_core::domain::error::CoreError> {
+        Ok(())
+    }
 }
 
 struct Target {
@@ -57,6 +69,7 @@ fn target(variable: &str, engine: DbEngine) -> Option<Target> {
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),
         use_ssl: false,
+        target: dbpinball_core::domain::connection::TargetClass::Unknown,
     };
 
     let credentials = FixedCredentialProvider(parsed.password().unwrap_or_default().to_string());

@@ -9,6 +9,7 @@ pub enum ErrorCode {
     Connection,
     Operation,
     NotFound,
+    PolicyRefusal,
     Unsupported,
 }
 
