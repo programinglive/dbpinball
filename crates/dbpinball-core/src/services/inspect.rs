@@ -171,7 +171,7 @@ async fn list_tables_postgres(
     .map_err(connection_error)
 }
 
-async fn connect_mysql(
+pub async fn connect_mysql(
     connection: &DbConnection,
     database: &str,
     credentials: &dyn CredentialProvider,
@@ -187,7 +187,7 @@ async fn connect_mysql(
         .map_err(connection_error)
 }
 
-async fn connect_postgres(
+pub async fn connect_postgres(
     connection: &DbConnection,
     database: &str,
     credentials: &dyn CredentialProvider,
