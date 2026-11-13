@@ -1,24 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct DbConnection {
-    pub id: String,
-    pub name: String,
-    pub engine: DbEngine,
-    pub host: String,
-    pub port: u16,
-    pub database: String,
-    pub username: String,
-    pub use_ssl: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum DbEngine {
-    Mysql,
-    Postgres,
-}
+pub use dbpinball_core::domain::connection::{DbConnection, DbEngine};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]

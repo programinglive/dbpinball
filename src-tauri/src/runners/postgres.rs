@@ -15,37 +15,6 @@ fn emit(window: &Window, msg: &str) {
     let _ = window.emit("job-progress", msg);
 }
 
-pub async fn test(conn: DbConnection) -> Result<()> {
-    let password = secrets::get_password(&conn.id)?;
-    let url = format!(
-        "postgresql://{}:{}@{}:{}/{}",
-        conn.username, password, conn.host, conn.port, conn.database
-    );
-    let pool = PgPool::connect(&url).await?;
-    sqlx::query("SELECT 1").execute(&pool).await?;
-    Ok(())
-}
-
-pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
-    let password = secrets::get_password(&conn.id)?;
-    let fallback = if conn.database.trim().is_empty() {
-        "postgres".to_string()
-    } else {
-        conn.database.clone()
-    };
-    let url = format!(
-        "postgresql://{}:{}@{}:{}/{}",
-        conn.username, password, conn.host, conn.port, fallback
-    );
-    let pool = sqlx::PgPool::connect(&url).await?;
-    let names: Vec<String> = sqlx::query_scalar(
-        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
-    )
-    .fetch_all(&pool)
-    .await?;
-    Ok(names)
-}
-
 pub async fn backup(window: &Window, conn: DbConnection, opts: BackupOptions) -> Result<String> {
     // Try pg_dump first
     if let Ok(bin) = which("pg_dump") {
@@ -56,19 +25,6 @@ pub async fn backup(window: &Window, conn: DbConnection, opts: BackupOptions) ->
     // Fallback to internal dumper
     emit(window, "Using internal dumper…");
     internal_dump(window, conn, opts).await
-}
-
-pub async fn list_tables(conn: DbConnection, database: String) -> Result<Vec<String>> {
-    let target_db = resolve_database(&conn, &database)?;
-    let pool = connect_to_postgres(&conn, &target_db).await?;
-
-    let tables = sqlx::query_scalar::<_, String>(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
-    )
-    .fetch_all(&pool)
-    .await?;
-
-    Ok(tables)
 }
 
 pub async fn run_query(

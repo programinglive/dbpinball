@@ -16,53 +16,6 @@ fn emit(window: &Window, msg: &str) {
     let _ = window.emit("job-progress", msg);
 }
 
-pub async fn test(conn: DbConnection) -> Result<()> {
-    let password = secrets::get_password(&conn.id)?;
-    let url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        conn.username, password, conn.host, conn.port, conn.database
-    );
-    let pool = MySqlPool::connect(&url).await?;
-    sqlx::query("SELECT 1").execute(&pool).await?;
-    Ok(())
-}
-
-pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
-    let password = secrets::get_password(&conn.id)?;
-    let fallback = if conn.database.trim().is_empty() {
-        "information_schema".to_string()
-    } else {
-        conn.database.clone()
-    };
-    let url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        conn.username, password, conn.host, conn.port, fallback
-    );
-    let pool = sqlx::MySqlPool::connect(&url).await?;
-    let names: Vec<String> = sqlx::query_scalar("SHOW DATABASES")
-        .fetch_all(&pool)
-        .await?;
-    let filtered = names
-        .into_iter()
-        .filter(|name| {
-            !matches!(
-                name.as_str(),
-                "information_schema" | "performance_schema" | "mysql" | "sys"
-            )
-        })
-        .collect();
-    Ok(filtered)
-}
-
-pub async fn list_tables(conn: DbConnection, database: String) -> Result<Vec<String>> {
-    let target_db = resolve_database(&conn, &database)?;
-    let pool = connect_to_mysql(&conn, &target_db).await?;
-    let tables = sqlx::query_scalar::<_, String>("SHOW TABLES")
-        .fetch_all(&pool)
-        .await?;
-    Ok(tables)
-}
-
 pub async fn run_query(
     conn: DbConnection,
     database: String,

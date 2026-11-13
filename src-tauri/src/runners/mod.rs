@@ -3,26 +3,26 @@ pub mod postgres;
 
 use crate::models::*;
 use anyhow::Result;
+use dbpinball_core::adapters::keyring::KeyringCredentialProvider;
+use dbpinball_core::services::inspect;
 use tauri::Window;
+
 pub async fn test_connection(conn: DbConnection) -> Result<()> {
-    match conn.engine {
-        DbEngine::Mysql => mysql::test(conn).await,
-        DbEngine::Postgres => postgres::test(conn).await,
-    }
+    inspect::test_connection(&conn, &KeyringCredentialProvider)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))
 }
 
 pub async fn list_databases(conn: DbConnection) -> Result<Vec<String>> {
-    match conn.engine {
-        DbEngine::Mysql => mysql::list_databases(conn).await,
-        DbEngine::Postgres => postgres::list_databases(conn).await,
-    }
+    inspect::list_databases(&conn, &KeyringCredentialProvider)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))
 }
 
 pub async fn list_tables(conn: DbConnection, database: String) -> Result<Vec<String>> {
-    match conn.engine {
-        DbEngine::Mysql => mysql::list_tables(conn, database).await,
-        DbEngine::Postgres => postgres::list_tables(conn, database).await,
-    }
+    inspect::list_tables(&conn, &database, &KeyringCredentialProvider)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))
 }
 
 pub async fn run_query(
