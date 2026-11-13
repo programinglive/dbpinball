@@ -31,6 +31,16 @@ pub async fn run_query(
     sql: String,
     limit: Option<i64>,
 ) -> Result<QueryResult> {
+    // The query editor can run arbitrary SQL. Classify it first: a statement
+    // that can write must pass the Core security policy before it reaches the
+    // database. Read-only statements skip the extra round-trip.
+    let class = dbpinball_core::security::classify_sql(&sql);
+    if class != dbpinball_core::security::SqlClass::ReadOnly {
+        crate::security::authorize_write(&conn, class.operation())
+            .await
+            .map_err(|message| anyhow::anyhow!(message))?;
+    }
+
     match conn.engine {
         DbEngine::Mysql => mysql::run_query(conn, database, sql, limit).await,
         DbEngine::Postgres => postgres::run_query(conn, database, sql, limit).await,
