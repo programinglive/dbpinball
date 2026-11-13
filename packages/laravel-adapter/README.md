@@ -187,6 +187,10 @@ Database dumps run through Symfony Process with an argument array, so no shell i
 
 Backup output is written to a temporary file and renamed into place only on success, so a failed or timed-out dump never leaves a partial backup. Error messages redact the password, and backup filenames are sanitized so a database name cannot escape the backup directory.
 
+Credential fields are rejected if they contain a carriage return or line feed. A newline would end the quoted MySQL value or start a second `.pgpass` record, so such values fail closed. The error names the field but never includes the value.
+
+Backup downloads and deletions reject symbolic links, non-regular files, and paths that resolve outside the backup directory. These checks are not atomic with the caller's subsequent open, so the backup directory must be a trusted location that other users cannot write to.
+
 ## License
 
 MIT License. See the repository [LICENSE](../../LICENSE) file for details.

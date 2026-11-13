@@ -94,14 +94,25 @@ class BackupManager
 
     /**
      * Build the MySQL option file contents.
+     *
+     * CR and LF are rejected before writing: a line break inside a quoted value
+     * would end the value and let the remainder be parsed as a new directive.
      */
     protected static function buildMysqlCredentials(array $config): string
     {
+        $username = (string) ($config['username'] ?? 'root');
+        $password = (string) ($config['password'] ?? '');
+        $host = (string) ($config['host'] ?? 'localhost');
+
+        static::assertSingleLine('username', $username);
+        static::assertSingleLine('password', $password);
+        static::assertSingleLine('host', $host);
+
         $lines = [
             '[client]',
-            'user="'.static::escapeOptionFileValue((string) ($config['username'] ?? 'root')).'"',
-            'password="'.static::escapeOptionFileValue((string) ($config['password'] ?? '')).'"',
-            'host="'.static::escapeOptionFileValue((string) ($config['host'] ?? 'localhost')).'"',
+            'user="'.static::escapeOptionFileValue($username).'"',
+            'password="'.static::escapeOptionFileValue($password).'"',
+            'host="'.static::escapeOptionFileValue($host).'"',
             'port='.(int) ($config['port'] ?? 3306),
         ];
 
@@ -129,20 +140,28 @@ class BackupManager
 
     /**
      * Build the .pgpass entry.
+     *
+     * CR and LF are rejected in every field: the file is line based, so a line
+     * break would terminate the record and let the remainder become a second
+     * entry.
      */
     protected static function buildPgPassEntry(array $config): string
     {
         $fields = [
-            (string) ($config['host'] ?? 'localhost'),
-            (string) ($config['port'] ?? 5432),
-            (string) ($config['database'] ?? ''),
-            (string) ($config['username'] ?? 'postgres'),
-            (string) ($config['password'] ?? ''),
+            'host' => (string) ($config['host'] ?? 'localhost'),
+            'port' => (string) ($config['port'] ?? 5432),
+            'database' => (string) ($config['database'] ?? ''),
+            'username' => (string) ($config['username'] ?? 'postgres'),
+            'password' => (string) ($config['password'] ?? ''),
         ];
+
+        foreach ($fields as $field => $value) {
+            static::assertSingleLine($field, $value);
+        }
 
         $escaped = array_map(static function (string $value): string {
             return str_replace(['\\', ':'], ['\\\\', '\\:'], $value);
-        }, $fields);
+        }, array_values($fields));
 
         return implode(':', $escaped)."\n";
     }
@@ -368,6 +387,16 @@ class BackupManager
 
     /**
      * Resolve an existing backup file inside the backup directory.
+     *
+     * Rejects path traversal, symbolic links, non-regular files, and paths that
+     * resolve outside the backup directory.
+     *
+     * Residual risk: these checks are not atomic with the caller's subsequent
+     * open. An attacker who can write to the backup directory could still
+     * replace the file between this call and the read (a time-of-check /
+     * time-of-use race). Closing that window would require returning an open
+     * file descriptor, which would change the public API. The backup directory
+     * is therefore treated as a trusted, non-shared location.
      */
     protected static function resolveBackupFile(string $filename): string
     {
@@ -382,13 +411,61 @@ class BackupManager
             throw new Exception('Invalid backup filename.');
         }
 
-        $filepath = static::resolveBackupDirectory().'/'.$filename;
+        $directory = static::resolveBackupDirectory();
+        $filepath = $directory.'/'.$filename;
 
-        if (! file_exists($filepath)) {
+        // lstat does not follow symlinks, so a link is detected before is_file.
+        if (@lstat($filepath) === false) {
             throw new Exception("Backup file not found: {$filename}");
         }
 
+        if (is_link($filepath)) {
+            throw new Exception('Backup file must not be a symbolic link.');
+        }
+
+        if (! is_file($filepath)) {
+            throw new Exception('Backup path is not a regular file.');
+        }
+
+        $realFile = realpath($filepath);
+        $realDirectory = realpath($directory);
+
+        if ($realFile === false || $realDirectory === false) {
+            throw new Exception('Backup file could not be resolved.');
+        }
+
+        if (! static::isPathInside($realFile, $realDirectory)) {
+            throw new Exception('Backup file is outside the backup directory.');
+        }
+
         return $filepath;
+    }
+
+    /**
+     * Determine whether a resolved path is inside a resolved directory.
+     */
+    protected static function isPathInside(string $path, string $directory): bool
+    {
+        $prefix = rtrim($directory, '/\\').DIRECTORY_SEPARATOR;
+
+        if (DIRECTORY_SEPARATOR === '\\') {
+            return str_starts_with(strtolower($path), strtolower($prefix));
+        }
+
+        return str_starts_with($path, $prefix);
+    }
+
+    /**
+     * Reject line breaks in a value written to a credential file.
+     *
+     * The message names only the field, never the value, so a rejected secret
+     * cannot leak through an exception or a log.
+     */
+    protected static function assertSingleLine(string $field, string $value): void
+    {
+        if (str_contains($value, "\n") || str_contains($value, "\r")) {
+            throw new Exception("The database {$field} contains a line break and cannot be written to a credential file.");
+        }
     }
 
     /**

@@ -293,6 +293,191 @@ class SecurityTest extends TestCase
 
         CapturingBackupManager::backup('option_like');
     }
+
+    public function test_mysql_rejects_lf_in_password(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('password contains a line break');
+
+        ExposedBackupManager::exposeBuildMysqlCredentials([
+            'username' => 'root',
+            'password' => "line1\nline2",
+            'host' => 'localhost',
+            'port' => 3306,
+        ]);
+    }
+
+    public function test_mysql_rejects_cr_in_password(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('password contains a line break');
+
+        ExposedBackupManager::exposeBuildMysqlCredentials([
+            'username' => 'root',
+            'password' => "line1\rline2",
+            'host' => 'localhost',
+            'port' => 3306,
+        ]);
+    }
+
+    public function test_mysql_rejects_injected_option_directive(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('contains a line break');
+
+        ExposedBackupManager::exposeBuildMysqlCredentials([
+            'username' => 'root',
+            'password' => "normal\"\nquick=false\nsafe-updates=FALSE\n#",
+            'host' => 'localhost',
+            'port' => 3306,
+        ]);
+    }
+
+    public function test_pgpass_rejects_lf_in_password(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('password contains a line break');
+
+        ExposedBackupManager::exposeBuildPgPassEntry([
+            'host' => 'localhost',
+            'port' => 5432,
+            'database' => 'app',
+            'username' => 'postgres',
+            'password' => "line1\nline2",
+        ]);
+    }
+
+    public function test_pgpass_rejects_cr_in_field(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('host contains a line break');
+
+        ExposedBackupManager::exposeBuildPgPassEntry([
+            'host' => "local\rhost",
+            'port' => 5432,
+            'database' => 'app',
+            'username' => 'postgres',
+            'password' => 'secret',
+        ]);
+    }
+
+    public function test_pgpass_rejects_wildcard_entry_injection(): void
+    {
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('contains a line break');
+
+        ExposedBackupManager::exposeBuildPgPassEntry([
+            'host' => 'localhost',
+            'port' => 5432,
+            'database' => 'app',
+            'username' => 'postgres',
+            'password' => "x\n*:*:*:*:evil",
+        ]);
+    }
+
+    public function test_validation_error_does_not_leak_secret(): void
+    {
+        try {
+            ExposedBackupManager::exposeBuildMysqlCredentials([
+                'username' => 'root',
+                'password' => "super-secret\nvalue",
+                'host' => 'localhost',
+                'port' => 3306,
+            ]);
+
+            $this->fail('Expected the credential builder to reject the line break.');
+        } catch (Exception $exception) {
+            $this->assertStringNotContainsString('super-secret', $exception->getMessage());
+            $this->assertStringNotContainsString('value', $exception->getMessage());
+            $this->assertStringContainsString('password', $exception->getMessage());
+        }
+    }
+
+    public function test_download_backup_returns_valid_file(): void
+    {
+        $file = $this->backupDirectory.'/valid.sql';
+        file_put_contents($file, '-- valid');
+
+        $this->assertSame($file, BackupManager::downloadBackup('valid.sql'));
+    }
+
+    public function test_download_backup_rejects_external_symlink(): void
+    {
+        if (! $this->canCreateSymlinks()) {
+            $this->markTestSkipped('Symlink creation is not available in this environment.');
+        }
+
+        $outside = $this->backupDirectory.DIRECTORY_SEPARATOR.'outside.txt';
+        file_put_contents($outside, 'outside');
+
+        $link = $this->backupDirectory.DIRECTORY_SEPARATOR.'external.sql';
+        symlink($outside, $link);
+
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('Backup file must not be a symbolic link.');
+
+        BackupManager::downloadBackup('external.sql');
+    }
+
+    public function test_download_backup_rejects_internal_symlink(): void
+    {
+        if (! $this->canCreateSymlinks()) {
+            $this->markTestSkipped('Symlink creation is not available in this environment.');
+        }
+
+        $target = $this->backupDirectory.DIRECTORY_SEPARATOR.'actual.sql';
+        file_put_contents($target, '-- actual');
+
+        $link = $this->backupDirectory.DIRECTORY_SEPARATOR.'internal.sql';
+        symlink($target, $link);
+
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage('Backup file must not be a symbolic link.');
+
+        BackupManager::downloadBackup('internal.sql');
+    }
+
+    public function test_temporary_credentials_removed_after_failure(): void
+    {
+        config(['database.connections.failing_mysql' => [
+            'driver' => 'mysql',
+            'host' => 'localhost',
+            'port' => 3306,
+            'database' => 'app',
+            'username' => 'root',
+            'password' => 'secret',
+        ]]);
+
+        FailingBackupManager::$captured = [];
+
+        try {
+            FailingBackupManager::backup('failing_mysql');
+            $this->fail('Expected the simulated dump failure.');
+        } catch (Exception $exception) {
+            $this->assertSame('simulated failure', $exception->getMessage());
+        }
+
+        $this->assertArrayHasKey('credentials_path', FailingBackupManager::$captured);
+        $this->assertFileDoesNotExist(FailingBackupManager::$captured['credentials_path']);
+    }
+
+    private function canCreateSymlinks(): bool
+    {
+        $target = $this->backupDirectory.DIRECTORY_SEPARATOR.'symlink_probe_target';
+        $link = $this->backupDirectory.DIRECTORY_SEPARATOR.'symlink_probe_link';
+
+        file_put_contents($target, 'probe');
+
+        $created = @symlink($target, $link);
+
+        if ($created) {
+            @unlink($link);
+        }
+
+        @unlink($target);
+
+        return $created;
+    }
 }
 
 class CapturingBackupManager extends BackupManager
@@ -379,5 +564,36 @@ class ExposedBackupManager extends BackupManager
     public static function exposeRedact(string $text, array $secrets): string
     {
         return parent::redact($text, $secrets);
+    }
+}
+
+class FailingBackupManager extends BackupManager
+{
+    /** @var array<string, mixed> */
+    public static array $captured = [];
+
+    protected static function findExecutable(string $name): string
+    {
+        return PHP_BINARY;
+    }
+
+    protected static function runDump(
+        string $binary,
+        array $arguments,
+        array $environment,
+        string $destination,
+        array $secrets = []
+    ): void {
+        foreach ($arguments as $argument) {
+            if (str_starts_with($argument, '--defaults-extra-file=')) {
+                self::$captured['credentials_path'] = substr($argument, strlen('--defaults-extra-file='));
+            }
+        }
+
+        if (isset($environment['PGPASSFILE'])) {
+            self::$captured['pgpass_path'] = $environment['PGPASSFILE'];
+        }
+
+        throw new Exception('simulated failure');
     }
 }
