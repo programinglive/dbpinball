@@ -68,7 +68,7 @@ The CLI and Safe Sync are **not available**. No command in this README should be
 ## Monorepo Packages
 
 - **Desktop Workspace (`apps/desktop` / root)**: Tauri + React interactive database manager and local dump runners.
-- **Laravel Adapter ([`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md))**: Server-side Laravel package (formerly `laravel-simple-backup`) providing Artisan backup automation, retention policies, and cloud storage drivers.
+- **Laravel Adapter ([`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md))**: Server-side Laravel package (formerly `laravel-simple-backup`) providing the `backup:database` Artisan command and a `BackupManager` for MySQL and PostgreSQL dumps.
 
 ## Architecture
 
@@ -125,7 +125,7 @@ Backup and restore additionally require the vendor client tools (`mysqldump`, `m
 
 DBPinball is framework-agnostic at its core. It connects to database engines, not to application frameworks, so any project using MySQL or PostgreSQL is compatible.
 
-A **Laravel adapter** ships in this repository at [`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md). It provides Artisan backup automation, retention policies, and cloud storage drivers for Laravel applications. It is a separate package with its own `composer.json` and PHP test suite.
+A **Laravel adapter** ships in this repository at [`packages/laravel-adapter`](docs/monorepo-laravel-adapter.md). It provides the `backup:database` Artisan command and a `BackupManager` for MySQL and PostgreSQL dumps. It is a separate package with its own `composer.json` and PHP test suite. Retention pruning and cloud storage drivers are **not implemented**.
 
 No other framework-specific adapter ships here. There is no Rails, Django, or Prisma integration, and none is claimed.
 

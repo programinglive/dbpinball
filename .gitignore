@@ -65,6 +65,11 @@ connections.json
 *.snapshot
 *.snapshot.gz
 
+# PHP / Composer
+packages/laravel-adapter/vendor/
+.phpunit.result.cache
+.phpunit.cache/
+
 # Temporary and backup files
 *.tmp
 *.bak

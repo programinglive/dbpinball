@@ -90,8 +90,10 @@ $backups = Backup::getBackups();
 ## Requirements
 
 - PHP 8.1 or higher
-- Laravel 9.0, 10.0, 11.0, or 12.0
+- Laravel 9.0 through 13.0
 - MySQL or PostgreSQL with command-line tools installed
+
+> The package runtime supports PHP 8.1+. The test suite resolves PHPUnit 12 and Testbench 11, which require PHP 8.3; CI runs the suite on PHP 8.3.
 
 ### System Requirements
 
@@ -170,16 +172,16 @@ To test this package in a real Laravel project:
 
 ## Contributing
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Please see the repository [CONTRIBUTING.md](../../CONTRIBUTING.md) for details.
 
 ## Security
 
-If you discover any security-related issues, please email mahatma.mahardhika@programinglive.com instead of using the issue tracker.
+Please see the repository [SECURITY.md](../../SECURITY.md) for the disclosure process. Do not open a public issue for a vulnerability.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) file for details.
+MIT License. See the repository [LICENSE](../../LICENSE) file for details.
 
 ## Support
 
-For issues and feature requests, please visit the [GitHub repository](https://github.com/programinglive/laravel-simple-backup).
+For issues and feature requests, please use the [dbpinball GitHub repository](https://github.com/programinglive/dbpinball).
