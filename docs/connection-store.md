@@ -84,9 +84,14 @@ cross-process lock at `<config>/dbpinball/connections.lock`.
 | Stale recovery | Only a **confirmed-dead** owner is recovered |
 | Live owner | Never displaced, regardless of how old the record looks |
 | Unknown liveness | Treated as live (fail closed) |
-| Concurrent recovery | Requires winning an atomic rename of the lock file |
+| Concurrent recovery | A recovery mutex makes "re-check, then remove" one critical section, so two processes cannot both recover the same stale lock |
 | Atomic write | temp file + `fs::rename`, `0600` on Unix |
 | Optimistic revision | A stale `expectedRevision` returns `ErrorCode::Conflict` (CLI exit 8) |
+
+Liveness is checked with `ps -p <pid>` on Unix and `tasklist` on Windows. `kill
+-0` is deliberately not used: it exits non-zero for both "no such process" and
+"not permitted", so it cannot prove death and would let a live owner be
+displaced.
 
 The lock is an operating-system file lock, not an in-process mutex. The
 cross-process tests spawn the real `dbpinball` binary.
@@ -114,6 +119,11 @@ NOT_STARTED → VALIDATING → IMPORTING → VERIFYING → COMPLETED
 | localStorage | **Never deleted and never written again** |
 
 The migration report shows imported, duplicate, invalid and conflicting counts.
+The report is **persisted in the store** (`migrationReport`), so unresolved
+conflicts and skipped records survive a restart instead of disappearing with the
+UI banner. `connections_migration_status` returns `complete: false` when any
+record was skipped or conflicted, and the desktop keeps a warning visible until
+the user resolves it.
 
 ### Credentials
 

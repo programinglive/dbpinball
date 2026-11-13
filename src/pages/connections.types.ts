@@ -24,6 +24,8 @@ export type MigrationStatus = {
   migratedFrom: string | null;
   revision: number;
   profiles: number;
+  complete: boolean;
+  report: MigrationReport | null;
 };
 
 export type QueryResultRow = (string | null)[];

@@ -30,6 +30,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
   const [revision, setRevision] = useState(0);
   const [storeError, setStoreError] = useState<string | null>(null);
   const [migrationReport, setMigrationReport] = useState<MigrationReport | null>(null);
+  const [migrationStatus, setMigrationStatus] = useState<MigrationStatus | null>(null);
   const [migrationError, setMigrationError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [testResult, setTestResult] = useState<Record<string, boolean>>({});
@@ -158,6 +159,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
 
       const status = await invoke<MigrationStatus>("connections_migration_status");
       setRevision(status.revision);
+      setMigrationStatus(status);
     } catch (e) {
       setStoreError(formatError(e));
     }
@@ -647,6 +649,18 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
           className="mx-4 mt-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200"
         >
           Migration did not complete: {migrationError} Your previous profiles were left untouched.
+        </div>
+      )}
+
+      {migrationStatus && !migrationStatus.complete && migrationStatus.report && (
+        <div
+          role="alert"
+          className="mx-4 mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+        >
+          Migration completed with unresolved items:{" "}
+          {migrationStatus.report.skippedInvalid.length} unreadable and{" "}
+          {migrationStatus.report.skippedConflicts.length} conflicting. Your previous profiles
+          were kept and nothing was overwritten.
         </div>
       )}
 

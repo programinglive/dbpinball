@@ -33,6 +33,9 @@ pub struct MigrationStatus {
     pub migrated_from: Option<String>,
     pub revision: u64,
     pub profiles: usize,
+    /// False when the last migration skipped or conflicted on any record.
+    pub complete: bool,
+    pub report: Option<ImportReport>,
 }
 
 impl ConnectionStore {
@@ -96,10 +99,18 @@ impl ConnectionStore {
 
     pub fn migration_status(&self) -> Result<MigrationStatus, CoreError> {
         let file = self.load_file()?;
+        let complete = file
+            .migration_report
+            .as_ref()
+            .map(ImportReport::is_complete)
+            .unwrap_or(true);
+
         Ok(MigrationStatus {
             migrated_from: file.migrated_from,
             revision: file.revision,
             profiles: file.connections.len(),
+            complete,
+            report: file.migration_report,
         })
     }
 
@@ -311,6 +322,9 @@ impl ConnectionStore {
                 if file.migrated_from.is_none() {
                     file.migrated_from = Some(source.to_string());
                 }
+                // Keep the report so unresolved conflicts and skipped records
+                // survive a restart instead of disappearing with the UI banner.
+                file.migration_report = Some(report.clone());
             }
             self.write_locked(&mut file)?;
         }
@@ -698,6 +712,7 @@ mod tests {
                 &StoreFile {
                     version: STORE_VERSION,
                     migrated_from: Some("localStorage@v1".to_string()),
+                    migration_report: None,
                     revision: 0,
                     connections: vec![connection("a", "app")],
                 },
@@ -709,5 +724,104 @@ mod tests {
 
         let file = store.load_file().unwrap();
         assert_eq!(file.migrated_from.as_deref(), Some("localStorage@v1"));
+    }
+}
+
+#[cfg(test)]
+mod migration_integrity_tests {
+    use super::*;
+    use crate::domain::connection::{DbEngine, TargetClass};
+
+    fn connection(id: &str, database: &str) -> DbConnection {
+        DbConnection {
+            id: id.to_string(),
+            name: format!("profile-{id}"),
+            engine: DbEngine::Postgres,
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            database: database.to_string(),
+            username: "postgres".to_string(),
+            use_ssl: false,
+            target: TargetClass::Local,
+        }
+    }
+
+    #[test]
+    fn a_conflicting_migration_is_not_reported_as_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("shared", "original")).unwrap();
+        store
+            .import_with_provenance(vec![connection("shared", "different")], "localStorage@v1")
+            .unwrap();
+
+        let status = store.migration_status().unwrap();
+        assert!(!status.complete);
+        let report = status.report.expect("report must be retained");
+        assert_eq!(report.skipped_conflicts.len(), 1);
+        assert_eq!(report.skipped_conflicts[0].id, "shared");
+    }
+
+    #[test]
+    fn an_invalid_record_is_not_reported_as_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        let mut broken = connection("broken", "app");
+        broken.host = String::new();
+
+        store
+            .import_with_provenance(vec![broken], "localStorage@v1")
+            .unwrap();
+
+        let status = store.migration_status().unwrap();
+        assert!(!status.complete);
+        assert_eq!(status.report.unwrap().skipped_invalid.len(), 1);
+    }
+
+    #[test]
+    fn a_clean_migration_is_reported_as_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store
+            .import_with_provenance(vec![connection("legacy", "app")], "localStorage@v1")
+            .unwrap();
+
+        let status = store.migration_status().unwrap();
+        assert!(status.complete);
+        assert_eq!(status.report.unwrap().imported, 1);
+    }
+
+    #[test]
+    fn the_migration_report_survives_a_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        {
+            let store = ConnectionStore::new(directory.path());
+            store.add(connection("shared", "original")).unwrap();
+            store
+                .import_with_provenance(vec![connection("shared", "different")], "localStorage@v1")
+                .unwrap();
+        }
+
+        // A fresh store instance is what a restarted desktop sees.
+        let reloaded = ConnectionStore::new(directory.path());
+        let status = reloaded.migration_status().unwrap();
+        assert!(!status.complete);
+        assert_eq!(status.report.unwrap().skipped_conflicts.len(), 1);
+    }
+
+    #[test]
+    fn a_conflicting_import_never_overwrites_the_shared_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(directory.path());
+
+        store.add(connection("shared", "original")).unwrap();
+        store
+            .import_with_provenance(vec![connection("shared", "different")], "localStorage@v1")
+            .unwrap();
+
+        assert_eq!(store.get("shared").unwrap().unwrap().database, "original");
     }
 }

@@ -55,6 +55,13 @@ pub fn create(
         connection.id = ConnectionStore::new_id();
     }
 
+    // Refuse an existing id BEFORE touching the credential. Storing a password
+    // for an id that already exists would overwrite that profile's credential,
+    // and the rollback below would then delete it.
+    if store.get(&connection.id).map_err(safe_error)?.is_some() {
+        return Err("A connection with this id already exists.".to_string());
+    }
+
     let keyring = KeyringCredentialProvider;
     let id = connection.id.clone();
 
@@ -101,6 +108,18 @@ pub fn update(
 
 pub fn delete(id: String, expected_revision: Option<u64>) -> Result<bool, String> {
     let store = store()?;
+
+    // Check the revision BEFORE touching the credential. A stale revision means
+    // the profile stays, so its credential must stay too.
+    if let Some(expected) = expected_revision {
+        let status = store.migration_status().map_err(safe_error)?;
+        if status.revision != expected {
+            return Err(safe_error(CoreError::new(
+                ErrorCode::Conflict,
+                "revision mismatch",
+            )));
+        }
+    }
 
     // Delete the credential first: a failure keeps the profile so it never
     // looks removed while a credential is still stored.

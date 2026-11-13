@@ -326,6 +326,36 @@ describe("ConnectionsPage", () => {
     expect(localStorage.getItem("dbpinball_connections")).not.toBeNull();
   });
 
+  it("keeps unresolved migration items visible after a restart", async () => {
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "connections_migration_status") {
+        return {
+          migratedFrom: "localStorage@v1",
+          revision: 3,
+          profiles: 1,
+          complete: false,
+          report: {
+            imported: 1,
+            skippedInvalid: [],
+            skippedDuplicates: 0,
+            skippedConflicts: [{ index: 0, id: "shared", reason: "conflict" }],
+          },
+        };
+      }
+      if (command === "connections_list") {
+        return createConnections();
+      }
+      return undefined;
+    });
+
+    render(<ConnectionsPage />);
+
+    expect(
+      await screen.findByText(/Migration completed with unresolved items/)
+    ).toBeInTheDocument();
+  });
+
   it("shows a recoverable error instead of falling back when migration fails", async () => {
     const legacy = createConnections();
     localStorage.setItem("dbpinball_connections", JSON.stringify(legacy));

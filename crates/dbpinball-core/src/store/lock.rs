@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::error::{CoreError, ErrorCode};
 
 const LOCK_FILE: &str = "connections.lock";
+const RECOVERY_LOCK: &str = "connections.lock.recover";
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
@@ -78,10 +79,10 @@ pub fn acquire(root: &Path) -> Result<StoreLock, CoreError> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale(&path) {
-                    // Only the process that wins the atomic rename may recover
-                    // the lock; the loser retries the create and finds the
+                    // Only the process that wins the recovery mutex may remove
+                    // the stale lock; the loser retries the create and finds the
                     // winner's lock.
-                    recover(&path);
+                    try_recover(&path);
                     continue;
                 }
 
@@ -127,11 +128,64 @@ fn is_stale(path: &Path) -> bool {
     matches!(pid_liveness(record.pid), Some(false))
 }
 
-fn recover(path: &Path) {
-    let tombstone = path.with_extension(format!("stale.{}.{}", std::process::id(), now_millis()));
-    if fs::rename(path, &tombstone).is_ok() {
-        let _ = fs::remove_file(&tombstone);
+/// Recover a stale lock under a recovery mutex.
+///
+/// WHY THE MUTEX
+/// -------------
+/// Two processes can both observe the same stale lock. Without a mutex, this
+/// interleaving is possible:
+///
+///   A sees stale, renames the old lock away, creates a new lock
+///   B (which decided "stale" before A acted) renames the path
+///     -> B renames A's LIVE lock away and both think they own the store
+///
+/// The recovery mutex makes "re-check staleness, then remove" one critical
+/// section, so B re-checks after A and sees A's live lock.
+fn try_recover(path: &Path) -> bool {
+    let recovery = path.with_file_name(RECOVERY_LOCK);
+
+    // A recovery mutex left by a dead process must not block recovery forever.
+    if recovery.exists() && is_stale(&recovery) {
+        let _ = fs::remove_file(&recovery);
     }
+
+    let mut handle = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&recovery)
+    {
+        Ok(handle) => handle,
+        // Another process is recovering; let the caller retry the main lock.
+        Err(_) => return false,
+    };
+
+    let record = LockRecord {
+        pid: std::process::id(),
+        host: hostname(),
+        started_at: now_millis(),
+    };
+    let _ = handle.write_all(
+        serde_json::to_string(&record)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let _ = handle.flush();
+
+    // Re-check under the mutex: the lock may have been replaced by a live owner
+    // between the caller's first check and this point.
+    let still_stale = is_stale(path);
+    if still_stale {
+        let tombstone =
+            path.with_extension(format!("stale.{}.{}", std::process::id(), now_millis()));
+        if fs::rename(path, &tombstone).is_ok() {
+            let _ = fs::remove_file(&tombstone);
+        }
+    }
+
+    drop(handle);
+    let _ = fs::remove_file(&recovery);
+
+    still_stale
 }
 
 fn now_millis() -> u64 {
@@ -151,18 +205,21 @@ fn hostname() -> String {
 fn pid_liveness(pid: u32) -> Option<bool> {
     #[cfg(unix)]
     {
-        let status = std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
+        // `kill -0` exits non-zero for both ESRCH (no such process) and EPERM
+        // (exists, not ours), so it cannot prove death. `ps -p` reports whether
+        // the process exists regardless of ownership, which is what the lock
+        // needs: a live owner must never be displaced.
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
             .ok()?;
-        if status.success() {
-            return Some(true);
+
+        if !output.status.success() {
+            return Some(false);
         }
-        // `kill -0` exits 1 for ESRCH (no such process) and for EPERM (exists,
-        // not ours). Only ESRCH proves the owner is gone, so treat a generic
-        // failure as unknown rather than dead.
-        Some(false)
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        Some(!text.trim().is_empty())
     }
 
     #[cfg(windows)]
@@ -234,5 +291,52 @@ mod tests {
         fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 
         assert!(!is_stale(&path));
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn the_current_process_is_alive() {
+        assert_eq!(pid_liveness(std::process::id()), Some(true));
+    }
+
+    #[test]
+    fn an_impossible_pid_is_confirmed_dead() {
+        // The maximum PID is far below this on every supported platform.
+        assert_eq!(pid_liveness(2147483646), Some(false));
+    }
+
+    #[test]
+    fn recovery_cleans_up_its_mutex() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(LOCK_FILE);
+        let record = LockRecord {
+            pid: 2147483646,
+            host: hostname(),
+            started_at: 0,
+        };
+        fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        assert!(try_recover(&path));
+        assert!(!path.exists());
+        assert!(!directory.path().join(RECOVERY_LOCK).exists());
+    }
+
+    #[test]
+    fn recovery_does_not_remove_a_live_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(LOCK_FILE);
+        let record = LockRecord {
+            pid: std::process::id(),
+            host: hostname(),
+            started_at: 0,
+        };
+        fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        assert!(!try_recover(&path));
+        assert!(path.exists());
     }
 }

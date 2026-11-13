@@ -18,6 +18,11 @@ pub struct StoreFile {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrated_from: Option<String>,
+    /// The report from the last migration, kept so unresolved conflicts and
+    /// skipped records survive a restart instead of disappearing with the UI
+    /// banner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_report: Option<ImportReport>,
     /// Monotonic counter bumped on every successful write.
     ///
     /// A writer that read revision N and finds N+1 refuses with a conflict
@@ -34,6 +39,7 @@ impl Default for StoreFile {
         Self {
             version: STORE_VERSION,
             migrated_from: None,
+            migration_report: None,
             revision: 0,
             connections: Vec::new(),
         }
@@ -41,7 +47,7 @@ impl Default for StoreFile {
 }
 
 /// Result of importing a JSON profile list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     pub imported: usize,
@@ -63,10 +69,15 @@ impl ImportReport {
             skipped_conflicts: Vec::new(),
         }
     }
+
+    /// True when every record was either imported or already present.
+    pub fn is_complete(&self) -> bool {
+        self.skipped_invalid.is_empty() && self.skipped_conflicts.is_empty()
+    }
 }
 
 /// A record the importer refused to persist, with the reason only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvalidRecord {
     pub index: usize,
@@ -74,7 +85,7 @@ pub struct InvalidRecord {
 }
 
 /// A record whose id collides with a different existing profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictRecord {
     pub index: usize,
