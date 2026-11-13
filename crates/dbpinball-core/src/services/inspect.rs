@@ -43,6 +43,14 @@ fn connection_error(error: sqlx::Error) -> CoreError {
     )
 }
 
+fn decode_mysql_text(row: &sqlx::mysql::MySqlRow, index: usize) -> Result<String, CoreError> {
+    // MySQL reports `information_schema` text columns as VARBINARY when the
+    // connection negotiates a binary result charset. Decoding the raw bytes
+    // works for both VARCHAR and VARBINARY.
+    let bytes: Vec<u8> = sqlx::Row::try_get(row, index).map_err(connection_error)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn resolve_database(connection: &DbConnection, requested: &str) -> Result<String, CoreError> {
     if !requested.trim().is_empty() {
         return Ok(requested.to_string());
@@ -93,7 +101,7 @@ async fn list_databases_mysql(
     };
 
     let pool = connect_mysql(connection, &fallback, credentials).await?;
-    let names: Vec<String> = sqlx::query_scalar(
+    let rows = sqlx::query(
         "SELECT schema_name FROM information_schema.schemata \
          WHERE schema_name NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys') \
          ORDER BY schema_name",
@@ -102,7 +110,7 @@ async fn list_databases_mysql(
     .await
     .map_err(connection_error)?;
 
-    Ok(names)
+    rows.iter().map(|row| decode_mysql_text(row, 0)).collect()
 }
 
 async fn list_databases_postgres(
@@ -134,14 +142,16 @@ async fn list_tables_mysql(
     let target = resolve_database(connection, database)?;
     let pool = connect_mysql(connection, &target, credentials).await?;
 
-    sqlx::query_scalar::<_, String>(
+    let rows = sqlx::query(
         "SELECT table_name FROM information_schema.tables \
          WHERE table_schema = ? ORDER BY table_name",
     )
     .bind(&target)
     .fetch_all(&pool)
     .await
-    .map_err(connection_error)
+    .map_err(connection_error)?;
+
+    rows.iter().map(|row| decode_mysql_text(row, 0)).collect()
 }
 
 async fn list_tables_postgres(
