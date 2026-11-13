@@ -69,16 +69,19 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Check formatting
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        run: cargo fmt --all -- --check
+
+      - name: Check dependency boundaries
+        run: node scripts/check-boundaries.cjs
 
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --workspace
 
   php:
     name: PHP / Laravel Adapter
@@ -135,10 +138,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.23.0
 
-      # Runs in src-tauri so cargo-audit reads src-tauri/.cargo/audit.toml,
+      # Runs from the workspace root so cargo-audit reads .cargo/audit.toml,
       # which is the single source of truth for accepted advisories.
       - name: Rust advisory audit
-        working-directory: src-tauri
         run: cargo audit
 
   secrets:
