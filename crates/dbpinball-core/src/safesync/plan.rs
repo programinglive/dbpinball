@@ -14,7 +14,10 @@ use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
 use crate::security::DestinationCategory;
 
 /// The plan format version.
-pub const PLAN_VERSION: u32 = 1;
+pub const PLAN_VERSION: u32 = 2;
+
+/// A plan may not be valid for longer than this, whatever the spec asks for.
+pub const MAX_PLAN_TTL_MS: u64 = 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanIdentity {
@@ -140,7 +143,8 @@ impl DryRunPlan {
             plan_version: PLAN_VERSION,
             run_id: uuid::Uuid::new_v4().to_string(),
             created_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(spec.execution.acknowledgement_ttl_ms),
+            expires_at_ms: now_ms
+                .saturating_add(spec.execution.acknowledgement_ttl_ms.min(MAX_PLAN_TTL_MS)),
             spec_hash: String::new(),
             plan_fingerprint: String::new(),
             source: PlanIdentity::from_session(source),
@@ -239,7 +243,17 @@ impl DryRunPlan {
         Ok(plan)
     }
 
-    /// Canonical SHA-256 over everything except per-execution metadata.
+    /// Canonical SHA-256 over the plan content.
+    ///
+    /// The content hash covers the graph, selection, limits, policy, key and
+    /// import mode, so an acknowledgement cannot be reused for changed plan
+    /// content, and a repeated identical plan keeps the same fingerprint for
+    /// idempotency. `created_at_ms`, `expires_at_ms` and `run_id` are execution
+    /// metadata; the expiry is bounded separately by `check_expiry_contract`.
+    ///
+    /// This is an integrity check, not a MAC. The operator owns the file, so an
+    /// adversary with write access can recompute it; the real authorization is
+    /// the live re-validation of identity, policy, graph and spec at execute.
     pub fn fingerprint(&self) -> String {
         let mut value = serde_json::to_value(self).expect("the plan always serializes");
         if let Some(object) = value.as_object_mut() {
@@ -259,6 +273,40 @@ impl DryRunPlan {
 
     pub fn is_expired(&self, now_ms: u64) -> bool {
         now_ms >= self.expires_at_ms
+    }
+
+    /// Refuse a plan from a different format version.
+    pub fn check_version(&self) -> Result<(), CoreError> {
+        if self.plan_version != PLAN_VERSION {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                format!(
+                    "plan version {} is not supported; regenerate the plan",
+                    self.plan_version
+                ),
+                "unsupported_plan_version",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse an expiry that is malformed or longer than the maximum window.
+    ///
+    /// The expiry is not part of the content hash, so it is validated instead:
+    /// a plan may not live longer than `MAX_PLAN_TTL_MS`, and an expiry before
+    /// its creation is invalid. This bounds any edit of the field without
+    /// breaking idempotency for repeated identical plans.
+    pub fn check_expiry_contract(&self) -> Result<(), CoreError> {
+        if self.expires_at_ms <= self.created_at_ms
+            || self.expires_at_ms.saturating_sub(self.created_at_ms) > MAX_PLAN_TTL_MS
+        {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                "the plan expiry is outside the permitted window; regenerate the plan",
+                "plan_expiry_invalid",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -426,6 +474,9 @@ mod tests {
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
             rls_active: false,
+            generated: vec![false],
+            identity: vec![false],
+            identity_always: vec![false],
             rows: vec![vec![crate::safesync::mask::MaskedValue::Text("x".into())]],
             total_bytes: 1,
         }
@@ -566,6 +617,25 @@ mod tests {
         second.created_at_ms += 5_000;
         second.expires_at_ms += 5_000;
         assert_eq!(first.plan_fingerprint, second.plan_fingerprint);
+    }
+
+    #[test]
+    fn an_overlong_expiry_is_refused() {
+        let mut plan = plan();
+        plan.expires_at_ms = plan.created_at_ms + MAX_PLAN_TTL_MS + 1;
+        let error = plan.check_expiry_contract().unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_expiry_invalid"));
+
+        plan.expires_at_ms = plan.created_at_ms + MAX_PLAN_TTL_MS;
+        plan.check_expiry_contract().unwrap();
+    }
+
+    #[test]
+    fn an_old_plan_version_is_refused() {
+        let mut old = plan();
+        old.plan_version = 1;
+        let error = old.check_version().unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("unsupported_plan_version"));
     }
 
     #[test]

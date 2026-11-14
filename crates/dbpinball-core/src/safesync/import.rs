@@ -326,6 +326,93 @@ async fn run_inner(
     })
 }
 
+/// Reconcile identity sequences after the row transaction has committed.
+///
+/// `setval` is not rolled back with the rows, so it runs after the commit and is
+/// idempotent: it raises a sequence to `GREATEST(max(column), last_value)` and
+/// never lowers it. A failure leaves the run marker `pending`; a retry re-runs
+/// this reconciliation.
+pub async fn reconcile_sequences(
+    session: &mut BoundSession,
+    tables: &[TableRows],
+    run_id: &str,
+) -> Result<String, CoreError> {
+    let mut required = false;
+
+    for table in tables {
+        for (index, column) in table.columns.iter().enumerate() {
+            if !table.identity.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            required = true;
+
+            let qualified = format!("{}.{}", table.table.schema, table.table.table);
+            let sequence: Option<String> =
+                sqlx::query_scalar("SELECT pg_get_serial_sequence($1, $2)")
+                    .bind(&qualified)
+                    .bind(column)
+                    .fetch_one(&mut *session.connection())
+                    .await
+                    .map_err(connection_error)?;
+            let Some(sequence) = sequence else {
+                continue;
+            };
+
+            let max: Option<i64> = sqlx::query_scalar(&format!(
+                "SELECT MAX({})::bigint FROM {}.{}",
+                quote_ident(column),
+                quote_ident(&table.table.schema),
+                quote_ident(&table.table.table)
+            ))
+            .fetch_one(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+
+            let (sequence_schema, sequence_name): (String, String) = sqlx::query_as(
+                "SELECT n.nspname::text, c.relname::text
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE c.oid = to_regclass($1)",
+            )
+            .bind(&sequence)
+            .fetch_one(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+
+            let last: Option<i64> = sqlx::query_scalar(
+                "SELECT last_value FROM pg_sequences
+                 WHERE schemaname = $1 AND sequencename = $2",
+            )
+            .bind(&sequence_schema)
+            .bind(&sequence_name)
+            .fetch_optional(&mut *session.connection())
+            .await
+            .map_err(connection_error)?
+            .flatten();
+
+            let target = max.unwrap_or(0).max(last.unwrap_or(0));
+            sqlx::query("SELECT setval($1::regclass, $2, true)")
+                .bind(&sequence)
+                .bind(target)
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+        }
+    }
+
+    if required {
+        sqlx::query(&format!(
+            "UPDATE {RUN_TABLE} SET sequence_status = 'completed' WHERE run_id = $1::uuid"
+        ))
+        .bind(run_id)
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+        Ok("completed".to_string())
+    } else {
+        Ok("not_required".to_string())
+    }
+}
+
 async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {RUN_TABLE} (
@@ -342,6 +429,7 @@ async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
            destination_digest text NOT NULL,
            rows_written bigint NOT NULL,
            status text NOT NULL,
+           sequence_status text NOT NULL DEFAULT 'pending',
            finished_at timestamptz NOT NULL DEFAULT now()
          )"
     ))
@@ -381,30 +469,52 @@ async fn insert_row(
     table: &TableRows,
     row: &[MaskedValue],
 ) -> Result<(), CoreError> {
-    let columns = table
-        .columns
-        .iter()
-        .map(|column| quote_ident(column))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut columns = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut values = Vec::new();
+    let mut overriding = false;
 
-    let mut placeholders = Vec::with_capacity(table.types.len());
-    for (index, type_name) in table.types.iter().enumerate() {
-        let cast = cast_for(type_name)?;
-        placeholders.push(format!("CAST(${} AS {})", index + 1, cast));
+    for (index, column) in table.columns.iter().enumerate() {
+        if table.generated.get(index).copied().unwrap_or(false) {
+            // A generated column is recomputed by the destination.
+            continue;
+        }
+        if table.identity_always.get(index).copied().unwrap_or(false) {
+            overriding = true;
+        }
+
+        let cast = cast_for(&table.types[index])?;
+        columns.push(quote_ident(column));
+        placeholders.push(format!("CAST(${} AS {})", placeholders.len() + 1, cast));
+        values.push(
+            row.get(index)
+                .and_then(MaskedValue::as_text)
+                .map(str::to_string),
+        );
     }
 
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let overriding = if overriding {
+        "OVERRIDING SYSTEM VALUE "
+    } else {
+        ""
+    };
+
     let sql = format!(
-        "INSERT INTO {}.{} ({}) VALUES ({})",
+        "INSERT INTO {}.{} ({}) {}VALUES ({})",
         quote_ident(&table.table.schema),
         quote_ident(&table.table.table),
-        columns,
+        columns.join(", "),
+        overriding,
         placeholders.join(", ")
     );
 
     let mut query = sqlx::query(&sql);
-    for value in row {
-        query = query.bind(value.as_text().map(str::to_string));
+    for value in values {
+        query = query.bind(value);
     }
 
     query
@@ -502,6 +612,9 @@ fn cast_for(type_name: &str) -> Result<&'static str, CoreError> {
     match type_name {
         "uuid" => Ok("uuid"),
         "text" | "character varying" | "character" | "varchar" | "citext" | "name" => Ok("text"),
+        "bigint" => Ok("bigint"),
+        "integer" => Ok("integer"),
+        "smallint" => Ok("smallint"),
         other => Err(CoreError::with_detail(
             ErrorCode::Unsupported,
             format!("column type '{other}' is not supported in this slice"),
@@ -515,9 +628,16 @@ fn cancelled() -> CoreError {
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
+    // A server error may echo a bound value, an identifier, or a constraint
+    // detail. Only the SQLSTATE is propagated; the message is withheld.
+    let code = error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     CoreError::with_detail(
         ErrorCode::Operation,
-        format!("destination import failed: {error}"),
+        format!("destination import failed (SQLSTATE {code}); the server message is withheld"),
         "destination_import_failed",
     )
 }

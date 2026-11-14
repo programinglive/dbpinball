@@ -151,6 +151,9 @@ pub async fn validate(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
+    plan.check_version()?;
+    plan.check_expiry_contract()?;
+
     if plan.fingerprint() != plan.plan_fingerprint {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -331,6 +334,8 @@ pub struct RunReport {
     pub rows_written: u64,
     pub destination_digest: String,
     pub tables: Vec<TableImport>,
+    /// completed | not_required | pending (post-commit sequence reconciliation).
+    pub sequence_status: String,
     pub status: String,
 }
 
@@ -343,6 +348,7 @@ pub struct RunStatus {
     pub status: String,
     pub rows_written: u64,
     pub destination_digest: String,
+    pub sequence_status: String,
     pub finished_at: String,
 }
 
@@ -358,6 +364,8 @@ pub async fn execute(
     cancel: Arc<AtomicBool>,
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
+    request.plan.check_version()?;
+    request.plan.check_expiry_contract()?;
 
     // The plan file is the reviewed contract. Recompute its fingerprint so a
     // hand-edited plan cannot silently change the schema hash, key id or
@@ -544,6 +552,13 @@ pub async fn execute(
     )
     .await?;
 
+    // Sequence adjustment is not part of the row transaction. It runs here,
+    // after the commit, and is idempotent. A failure leaves the marker pending.
+    let sequence_status =
+        import::reconcile_sequences(&mut destination_session, &extracted, &report.run_id)
+            .await
+            .unwrap_or_else(|_| "pending".to_string());
+
     if let Some(directory) = audit_dir {
         let record = AuditRecord {
             run_id: report.run_id.clone(),
@@ -595,6 +610,7 @@ pub async fn execute(
         } else {
             "completed".to_string()
         },
+        sequence_status,
     })
 }
 
@@ -609,7 +625,7 @@ pub async fn status(
         BoundSession::open(SessionRole::Destination, destination, credentials, limits).await?;
 
     let statement = format!(
-        "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, finished_at::text
+        "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, sequence_status, finished_at::text
          FROM {}
          WHERE run_id = $1::uuid",
         crate::safesync::import::RUN_TABLE
@@ -641,7 +657,8 @@ pub async fn status(
         status: row.try_get(2).unwrap_or_default(),
         rows_written: row.try_get::<i64, _>(3).unwrap_or(0) as u64,
         destination_digest: row.try_get(4).unwrap_or_default(),
-        finished_at: row.try_get(5).unwrap_or_default(),
+        sequence_status: row.try_get(5).unwrap_or_else(|_| "pending".to_string()),
+        finished_at: row.try_get(6).unwrap_or_default(),
     })
 }
 

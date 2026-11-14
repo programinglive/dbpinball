@@ -127,6 +127,22 @@ Within S2-a:
   table locks; the second refuses with a deterministic conflict instead of
   duplicating or overwriting rows.
 
+Within S2-b:
+
+- Generated columns are omitted from the insert and recomputed by the
+  destination.
+- A restricted identity-preserve mode keeps single-column integer identity keys
+  with `OVERRIDING SYSTEM VALUE`; regenerating and remapping identities is not
+  supported.
+- After the row transaction commits, identity sequences are raised to
+  `GREATEST(max(key), last_value)` and never lowered. The run records
+  `sequence_status` as `completed`, `not_required` or `pending`; a retry
+  reconciles a pending run.
+- Plans are format version 2. An expiry outside the 60-minute window is refused,
+  and an unsupported plan version is refused.
+- Database driver errors expose only the SQLSTATE; the server message is
+  withheld.
+
 The plan carries the foreign-key graph, the requested depth, the import order,
 the canonical masking domains and the bounds, and all of them are bound to the
 plan fingerprint. A closure that a depth or a limit cannot complete is marked

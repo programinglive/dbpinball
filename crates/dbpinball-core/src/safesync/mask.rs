@@ -303,6 +303,27 @@ impl MaskingPolicy {
                 &["id"],
                 0,
             ),
+            // Identity and generated column fixture.
+            rule("public", "identity_parents", "id", MaskStrategy::Keep),
+            rule(
+                "public",
+                "identity_parents",
+                "code",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            rule(
+                "public",
+                "identity_parents",
+                "full_label",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            rule("public", "identity_children", "id", MaskStrategy::Keep),
+            rule(
+                "public",
+                "identity_children",
+                "parent_id",
+                MaskStrategy::Keep,
+            ),
         ];
 
         let mut policy = Self {
@@ -775,7 +796,9 @@ pub fn is_uuid_type(type_name: &str) -> bool {
 }
 
 pub fn is_keepable_type(type_name: &str) -> bool {
-    is_text_type(type_name) || is_uuid_type(type_name)
+    is_text_type(type_name)
+        || is_uuid_type(type_name)
+        || matches!(type_name, "bigint" | "integer" | "smallint")
 }
 
 pub fn is_risky_type(type_name: &str) -> bool {

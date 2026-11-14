@@ -37,7 +37,9 @@ pub use mask::{
     MaskingPolicy, EMAIL_DOMAIN, FILTER_DOMAIN, MASK_DOMAIN,
 };
 pub use plan::{DryRunPlan, PlanIdentity, PLAN_VERSION};
-pub use planner::{extract_table, quote_ident, LimitCheck, RootPlan, SelectionResult, TableRows};
+#[cfg(any(test, feature = "integration"))]
+pub use planner::extract_table;
+pub use planner::{quote_ident, LimitCheck, RootPlan, SelectionResult, TableRows};
 pub use service::{
     execute, inspect, masker_for, plan as build_plan, resolve_policy, status, validate,
     ExecuteRequest, RunReport, RunStatus, ValidationReport,

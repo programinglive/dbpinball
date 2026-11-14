@@ -320,6 +320,21 @@ jobs:
           GRANT SELECT ON public.rls_parents, public.rls_children TO m4src;
           ALTER TABLE public.rls_parents ENABLE ROW LEVEL SECURITY;
           CREATE POLICY rls_visible ON public.rls_parents FOR SELECT TO m4src USING (id = 'R1');
+          -- Identity and generated column fixture.
+          CREATE TABLE public.identity_parents (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            code text NOT NULL,
+            full_label text GENERATED ALWAYS AS (code || ':' || id) STORED
+          );
+          CREATE TABLE public.identity_children (
+            id uuid PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES public.identity_parents(id)
+          );
+          INSERT INTO public.identity_parents (code) VALUES ('A'), ('B');
+          INSERT INTO public.identity_children VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000c1', 1),
+            ('0b9f4c3e-0000-0000-0000-0000000000c2', 2);
+          GRANT SELECT ON public.identity_parents, public.identity_children TO m4src;
           SQL
 
       - name: Create the destination fixture
@@ -370,6 +385,15 @@ jobs:
           CREATE TABLE public.rls_children (
             id text PRIMARY KEY,
             parent_id text NOT NULL REFERENCES public.rls_parents(id)
+          );
+          CREATE TABLE public.identity_parents (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            code text NOT NULL,
+            full_label text GENERATED ALWAYS AS (code || ':' || id) STORED
+          );
+          CREATE TABLE public.identity_children (
+            id uuid PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES public.identity_parents(id)
           );
           SQL
 

@@ -163,6 +163,8 @@ async fn reset(destination: &Target) {
         "cycle_y",
         "rls_children",
         "rls_parents",
+        "identity_children",
+        "identity_parents",
     ] {
         let _ = sqlx::query(&format!("DELETE FROM public.{table}"))
             .execute(&mut connection)
@@ -1247,4 +1249,166 @@ async fn a_cancelled_run_writes_nothing() {
     assert_eq!(count(&destination, "orders").await, 0);
     assert_eq!(count(&destination, "customers").await, 0);
     assert_eq!(run_marker_count(&destination).await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Identity and generated columns
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn identity_values_are_preserved_and_the_sequence_is_reconciled() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let yaml = r#"
+version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: in
+          value:
+            - 0b9f4c3e-0000-0000-0000-0000000000c1
+            - 0b9f4c3e-0000-0000-0000-0000000000c2
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 100
+  max_total_rows: 100
+  max_depth: 3
+  max_bytes: 1048576
+  timeout_ms: 15000
+masking:
+  policy: development-default@2
+"#;
+    let first = SafeSyncSpec::parse_yaml(yaml).unwrap();
+    plan_and_execute(&first, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the identity parents should import");
+
+    assert_eq!(count(&destination, "identity_children").await, 2);
+    assert_eq!(count(&destination, "identity_parents").await, 2);
+
+    let mut connection = connect(&destination).await;
+    let parents: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, code, full_label FROM public.identity_parents ORDER BY id")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    // The identity values are preserved, not regenerated.
+    assert_eq!(
+        parents.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    for (id, code, label) in &parents {
+        // The generated column is recomputed by the destination from masked values.
+        assert_eq!(label, &format!("{code}:{id}"));
+        assert_ne!(code, "A");
+        assert_ne!(code, "B");
+    }
+
+    let broken: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM public.identity_children c
+         LEFT JOIN public.identity_parents p ON p.id = c.parent_id
+         WHERE p.id IS NULL",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(broken.0, 0);
+
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(last >= 2, "the sequence must cover the imported identities");
+
+    // Force the sequence behind the data, then replay the completed plan. The
+    // reconciliation must raise it without duplicating rows.
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let replay = plan_and_execute(&first, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the repeat should reconcile and not duplicate");
+    assert!(replay.complete);
+    assert_eq!(count(&destination, "identity_parents").await, 2);
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        last >= 2,
+        "reconciliation must raise a sequence that is behind"
+    );
+}
+
+#[tokio::test]
+async fn the_unguarded_extraction_helper_is_refused_for_a_table_with_fks() {
+    use dbpinball_core::safesync::{
+        extract_table, graph::inspect_table, BoundSession, Limits, Masker, MaskingPolicy,
+        QualifiedName, RootSelection, SessionRole,
+    };
+
+    let _guard = serial().lock().await;
+    let Some(source) = target("DBPINBALL_TEST_PG_SOURCE_URL", "source") else {
+        eprintln!("skipped: DBPINBALL_TEST_PG_SOURCE_URL is not set");
+        return;
+    };
+    let provider = MapProvider::new(&[("source", &source.password)]);
+    let mut session = BoundSession::open(
+        SessionRole::Source,
+        &source.connection,
+        &provider,
+        &Limits::default(),
+    )
+    .await
+    .expect("open");
+
+    let info = inspect_table(
+        &mut session,
+        &QualifiedName::parse("public.orders").unwrap(),
+    )
+    .await
+    .expect("inspect");
+    let masker = Masker::new(
+        MaskingPolicy::builtin_v2(),
+        MaskKey::from_bytes("k-test", [7u8; 32]),
+    )
+    .unwrap();
+    let root = RootSelection {
+        table: "public.orders".into(),
+        filter: vec![dbpinball_core::safesync::FilterPredicate {
+            column: "id".into(),
+            op: dbpinball_core::safesync::FilterOp::Eq,
+            value: dbpinball_core::safesync::FilterValue::Text(
+                "0b9f4c3e-0000-0000-0000-000000000001".into(),
+            ),
+        }],
+    };
+
+    let error = extract_table(&mut session, &info, &root, &masker, &Limits::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.detail.as_deref(),
+        Some("unguarded_extraction_refused")
+    );
 }
