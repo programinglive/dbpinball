@@ -203,10 +203,16 @@ impl BoundSession {
         Ok(())
     }
 
-    /// Open the destination transaction. `REPEATABLE READ` gives the integrity
-    /// check and the write one stable snapshot.
+    /// Open the destination transaction.
+    ///
+    /// `READ COMMITTED` is deliberate. The destination is protected by a
+    /// transaction-scoped advisory lock per plan and by `SHARE ROW EXCLUSIVE`
+    /// table locks, so every statement sees the state left by whoever held the
+    /// lock before. `REPEATABLE READ` would take its snapshot before the
+    /// advisory lock is granted, so a waiting run could miss the run that just
+    /// committed and then collide on the primary key.
     pub async fn begin_destination_transaction(&mut self) -> Result<(), CoreError> {
-        sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
             .execute(&mut self.connection)
             .await
             .map_err(connection_error)?;

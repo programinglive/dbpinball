@@ -89,8 +89,9 @@ fn config_with(directory: &Path, profiles: &[&Target]) -> PathBuf {
     directory.to_path_buf()
 }
 
-fn cli(config: &Path, args: &[&str], source: &Target, destination: &Target) -> Output {
-    Command::new(binary())
+fn cli_command(config: &Path, args: &[&str], source: &Target, destination: &Target) -> Command {
+    let mut command = Command::new(binary());
+    command
         .args(["--config-dir", &config.to_string_lossy()])
         .args(["--credential-source", "env", "--mask-key-source", "env"])
         .arg("--json")
@@ -99,7 +100,12 @@ fn cli(config: &Path, args: &[&str], source: &Target, destination: &Target) -> O
         .env("DBPINBALL_PASSWORD_DESTINATION", &destination.password)
         .env("DBPINBALL_PASSWORD_SUPER", &source.password)
         .env("DBPINBALL_PASSWORD_MYSQL", "x")
-        .env("DBPINBALL_SAFE_SYNC_KEY", KEY_HEX)
+        .env("DBPINBALL_SAFE_SYNC_KEY", KEY_HEX);
+    command
+}
+
+fn cli(config: &Path, args: &[&str], source: &Target, destination: &Target) -> Output {
+    cli_command(config, args, source, destination)
         .stdin(Stdio::null())
         .output()
         .expect("cli")
@@ -989,4 +995,227 @@ async fn cli_outputs_contain_no_secrets_or_source_values() {
     let plan_body = std::fs::read_to_string(&plan_path).unwrap();
     assert!(!plan_body.contains("alice@example.com"));
     assert!(!plan_body.contains("0b9f4c3e-0000-0000-0000-000000000001"));
+}
+
+#[tokio::test]
+async fn a_rotated_key_invalidates_the_plan() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    // A different synthetic key must not be able to run a plan produced under
+    // the old key: the pseudonyms would change.
+    let rotated = "0808080808080808080808080808080808080808080808080808080808080808";
+    let output = cli_command(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    )
+    .env("DBPINBALL_SAFE_SYNC_KEY", rotated)
+    .stdin(Stdio::null())
+    .output()
+    .expect("cli");
+
+    assert_eq!(code(&output), 8);
+    assert_eq!(envelope(&output)["error"]["detail"], "mask_key_changed");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+}
+
+#[tokio::test]
+async fn concurrent_executions_do_not_duplicate() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    let args = [
+        "safe-sync",
+        "execute",
+        "--plan",
+        &plan_path.to_string_lossy(),
+        "--spec",
+        &spec.to_string_lossy(),
+        "--ack",
+        &fingerprint,
+        "--yes",
+    ];
+
+    // Two independent processes, same plan, same destination.
+    let mut first = cli_command(&config, &args, &source, &destination);
+    let mut second = cli_command(&config, &args, &source, &destination);
+    let child_a = first
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let child_b = second
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    let a = child_a.wait_with_output().unwrap();
+    let b = child_b.wait_with_output().unwrap();
+
+    assert_eq!(
+        code(&a),
+        0,
+        "first run failed: {}",
+        String::from_utf8_lossy(&a.stdout)
+    );
+    assert_eq!(
+        code(&b),
+        0,
+        "second run failed: {}",
+        String::from_utf8_lossy(&b.stdout)
+    );
+    // Exactly one row: the second run is a no-op, not a duplicate.
+    assert_eq!(destination_rows(&destination).await.len(), 1);
+}
+
+#[tokio::test]
+async fn replace_does_not_touch_unrelated_tables() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+
+    let mut connection = connect(&destination).await;
+    sqlx::query("CREATE TABLE IF NOT EXISTS public.unrelated (id int PRIMARY KEY, note text)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO public.unrelated VALUES (1, 'keep me') ON CONFLICT (id) DO UPDATE SET note = 'keep me'",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--replace",
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(destination_rows(&destination).await.len(), 1);
+
+    let unrelated: (i64,) = sqlx::query_as("SELECT count(*) FROM public.unrelated")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let note: (String,) = sqlx::query_as("SELECT note FROM public.unrelated WHERE id = 1")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(unrelated.0, 1);
+    assert_eq!(note.0, "keep me");
+}
+
+#[tokio::test]
+async fn the_environment_key_source_cannot_rotate() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+
+    let output = cli(&config, &["safe-sync", "key-rotate"], &source, &destination);
+    assert_eq!(code(&output), 5);
+    assert_eq!(envelope(&output)["error"]["detail"], "mask_key_read_only");
 }

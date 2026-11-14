@@ -368,6 +368,17 @@ pub async fn execute(
     }
 
     let masker = masker_for(request.spec, keys)?;
+
+    // A plan is bound to one mask key. Running it with a rotated key would
+    // produce different pseudonyms for the same rows, so refuse instead.
+    if masker.key_id() != request.plan.masking.key_id {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking key changed since the plan was made",
+            "mask_key_changed",
+        ));
+    }
+
     let root_tables = root_tables(request.spec)?;
 
     let mut source_session = BoundSession::open(

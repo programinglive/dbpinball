@@ -291,7 +291,7 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
 fn key_rotate(cli: &Cli) -> Result<i32, CoreError> {
     match cli.mask_key_source {
         MaskKeySource::Env => Err(CoreError::with_detail(
-            ErrorCode::Usage,
+            ErrorCode::Unsupported,
             "the environment mask key source cannot store a rotated key",
             "mask_key_read_only",
         )),

@@ -84,6 +84,21 @@ pub async fn run(
     }
 }
 
+/// A session-scoped advisory lock used only to serialise the run-table DDL.
+const RUN_TABLE_LOCK_KEY: i64 = 0x6470_6269_6e62_6c31; // "dpbinbl1"
+
+/// A 64-bit lock key derived from the plan fingerprint.
+///
+/// Scope: the destination database, for this plan. Taken as a transaction-scoped
+/// advisory lock, so PostgreSQL releases it on commit or rollback and a dropped
+/// connection cannot leave it behind.
+fn plan_lock_key(fingerprint: &str) -> i64 {
+    let digest = crate::safesync::mask::digest(fingerprint.as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
 async fn run_inner(
     session: &mut BoundSession,
     plan: &DryRunPlan,
@@ -91,7 +106,38 @@ async fn run_inner(
     policy: ConflictPolicy,
     cancel: &Arc<AtomicBool>,
 ) -> Result<ImportReport, CoreError> {
-    ensure_run_table(session).await?;
+    // Two concurrent first-time runs could race on `CREATE TABLE IF NOT EXISTS`.
+    // A short session lock makes that setup single-writer; the connection drop
+    // path releases it even if this process dies.
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(RUN_TABLE_LOCK_KEY)
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+    let setup = ensure_run_table(session).await;
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(RUN_TABLE_LOCK_KEY)
+        .execute(&mut *session.connection())
+        .await;
+    setup?;
+
+    // Serialize concurrent runs of the same plan. The lock is transaction-scoped,
+    // so it is released by the commit or rollback at the end of `run`.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(plan_lock_key(&plan.plan_fingerprint))
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+
+    // Re-assert the destination on the execution session, inside the transaction
+    // that will write.
+    if session.identity().identity_key != plan.destination.identity_key {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the destination identity changed since the plan was made",
+            "destination_changed",
+        ));
+    }
 
     // Lock the selected tables so the integrity check and the write see one
     // stable state. `SHARE ROW EXCLUSIVE` blocks other writers, not readers.
@@ -434,5 +480,19 @@ mod tests {
     #[test]
     fn a_cancelled_run_is_a_typed_error() {
         assert_eq!(cancelled().detail.as_deref(), Some("cancelled"));
+    }
+
+    #[test]
+    fn the_plan_lock_key_is_stable_and_fingerprint_scoped() {
+        let first = plan_lock_key("fingerprint-a");
+        assert_eq!(first, plan_lock_key("fingerprint-a"));
+        assert_ne!(first, plan_lock_key("fingerprint-b"));
+    }
+
+    #[test]
+    fn the_plan_lock_key_differs_from_the_ddl_lock_key() {
+        // A collision would serialise unrelated work or, worse, share a lock
+        // between a plan and the run-table setup.
+        assert_ne!(plan_lock_key("fingerprint-a"), RUN_TABLE_LOCK_KEY);
     }
 }
