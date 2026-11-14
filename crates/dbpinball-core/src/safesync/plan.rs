@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::mask::{digest, hex_lower, Masker};
-use crate::safesync::planner::SelectionPlan;
+use crate::safesync::planner::SelectionResult;
 use crate::safesync::session::SessionIdentity;
 use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
 use crate::security::DestinationCategory;
@@ -67,6 +67,8 @@ pub struct PlanGraph {
     pub cycles: u64,
     pub max_depth_used: u8,
     pub direction: String,
+    /// Structural fingerprint of the foreign-key definitions.
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,9 +131,9 @@ impl DryRunPlan {
         source: &SessionIdentity,
         destination: &SessionIdentity,
         _destination_category: DestinationCategory,
-        selection: &SelectionPlan,
+        selection: &SelectionResult,
         masker: &Masker,
-        estimates: &[(QualifiedName, u64)],
+        _estimates: &[(QualifiedName, u64)],
         now_ms: u64,
     ) -> Result<Self, CoreError> {
         let mut plan = Self {
@@ -157,35 +159,39 @@ impl DryRunPlan {
                     })
                     .collect(),
                 direction: selection.direction.clone(),
-                depth: selection.max_depth_used,
+                // The requested depth, not just the depth the closure used, so a
+                // changed traversal limit invalidates the plan.
+                depth: spec.selection.relationships.depth,
             },
             tables: selection
-                .tables
+                .rows
                 .iter()
                 .map(|table| PlanTable {
-                    schema: table.schema.clone(),
-                    table: table.table.clone(),
+                    schema: table.table.schema.clone(),
+                    table: table.table.table.clone(),
                     schema_hash: table.schema_hash.clone(),
                     row_identity: table.row_identity.clone(),
-                    rows_estimated: estimates
-                        .iter()
-                        .find(|(name, _)| *name == table.name())
-                        .map(|(_, rows)| *rows),
+                    rows_estimated: if selection.read_rows {
+                        Some(table.row_count())
+                    } else {
+                        None
+                    },
                     rls_active: table.rls_active,
                 })
                 .collect(),
             graph: PlanGraph {
-                edges: 0,
-                cycles: 0,
+                edges: selection.edges as u64,
+                cycles: selection.deferred.len() as u64,
                 max_depth_used: selection.max_depth_used,
                 direction: selection.direction.clone(),
+                fingerprint: crate::safesync::graph::graph_fingerprint(&selection.graph),
             },
             masking: PlanMasking {
                 policy: masker.policy().identifier(),
                 policy_hash: masker.policy().hash.clone(),
                 key_id: masker.key_id().to_string(),
                 columns: selection
-                    .tables
+                    .rows
                     .iter()
                     .map(|table| table.columns.len() as u64)
                     .sum(),
@@ -198,11 +204,21 @@ impl DryRunPlan {
             },
             constraints: PlanConstraints {
                 order: selection
-                    .tables
+                    .order
                     .iter()
-                    .map(|table| format!("{}.{}", table.schema, table.table))
+                    .map(|name| name.to_string())
                     .collect(),
-                deferred: Vec::new(),
+                deferred: selection
+                    .deferred
+                    .iter()
+                    .map(|group| {
+                        group
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect(),
                 cyclic_refused: Vec::new(),
             },
             limits: spec.limits.clone(),
@@ -247,13 +263,13 @@ impl DryRunPlan {
 }
 
 /// A hash of the selection shape that never includes a raw filter value.
-pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionPlan) -> String {
+pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionResult) -> String {
     let document = serde_json::json!({
         "version": spec.version,
         "source": spec.source,
         "destination": spec.destination,
         "roots": selection.roots,
-        "depth": selection.max_depth_used,
+        "depth": spec.selection.relationships.depth,
         "direction": selection.direction,
         "limits": spec.limits,
         "policy": spec.masking.policy,
@@ -263,13 +279,11 @@ pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionPlan) -> String {
 }
 
 /// Refuse a plan whose schema has drifted from the live catalogue.
-pub fn check_schema_drift(plan: &DryRunPlan, selection: &SelectionPlan) -> Result<(), CoreError> {
+pub fn check_schema_drift(plan: &DryRunPlan, selection: &SelectionResult) -> Result<(), CoreError> {
     for planned in &plan.tables {
-        let Some(live) = selection
-            .tables
-            .iter()
-            .find(|table| table.schema == planned.schema && table.table == planned.table)
-        else {
+        let Some(live) = selection.rows.iter().find(|table| {
+            table.table.schema == planned.schema && table.table.table == planned.table
+        }) else {
             return Err(schema_drift(&planned.table));
         };
 
@@ -288,13 +302,67 @@ fn schema_drift(table: &str) -> CoreError {
     )
 }
 
+/// Refuse a plan when the live graph, table set, order or deferred groups differ
+/// from what the operator reviewed.
+pub fn assert_graph_matches(
+    plan: &DryRunPlan,
+    selection: &SelectionResult,
+) -> Result<(), CoreError> {
+    let live_order: Vec<String> = selection
+        .order
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    let live_deferred: Vec<String> = selection
+        .deferred
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+
+    let mut planned_tables: Vec<String> = plan
+        .tables
+        .iter()
+        .map(|table| format!("{}.{}", table.schema, table.table))
+        .collect();
+    let mut live_tables: Vec<String> = selection
+        .rows
+        .iter()
+        .map(|rows| rows.table.to_string())
+        .collect();
+    planned_tables.sort();
+    live_tables.sort();
+
+    let changed = live_order != plan.constraints.order
+        || live_deferred != plan.constraints.deferred
+        || planned_tables != live_tables
+        || selection.edges as u64 != plan.graph.edges
+        || selection.deferred.len() as u64 != plan.graph.cycles
+        || crate::safesync::graph::graph_fingerprint(&selection.graph) != plan.graph.fingerprint;
+
+    if changed {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the foreign-key graph or selection changed since the plan was made",
+            "graph_changed",
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::connection::{DbEngine, TargetClass};
-    use crate::safesync::graph::{ColumnInfo, TableInfo};
     use crate::safesync::key::MaskKey;
     use crate::safesync::mask::Masker;
+    use crate::safesync::planner::TableRows;
     use crate::safesync::planner::{LimitCheck, RootPlan};
     use crate::safesync::spec::{
         ExecutionOptions, FilterOp, FilterPredicate, FilterValue, MaskingSelection,
@@ -350,30 +418,28 @@ mod tests {
         }
     }
 
-    fn table() -> TableInfo {
-        TableInfo {
-            schema: "public".into(),
-            table: "accounts".into(),
-            relkind: "r".into(),
-            rls_active: false,
-            columns: vec![ColumnInfo {
-                name: "id".into(),
-                type_name: "uuid".into(),
-                nullable: false,
-                is_primary_key: true,
-                is_generated: false,
-                is_identity: false,
-                max_len: None,
-            }],
-            primary_key: vec!["id".into()],
+    fn table_rows() -> TableRows {
+        TableRows {
+            table: QualifiedName::parse("public.accounts").unwrap(),
+            columns: vec!["id".into()],
+            types: vec!["uuid".into()],
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
+            rls_active: false,
+            rows: vec![vec![crate::safesync::mask::MaskedValue::Text("x".into())]],
+            total_bytes: 1,
         }
     }
 
-    fn selection() -> SelectionPlan {
-        SelectionPlan {
-            tables: vec![table()],
+    fn selection() -> SelectionResult {
+        let rows = vec![table_rows()];
+        let order = vec![QualifiedName::parse("public.accounts").unwrap()];
+        SelectionResult {
+            graph: crate::safesync::graph::SchemaGraph {
+                tables: Vec::new(),
+                edges: Vec::new(),
+            },
+            rows,
             roots: vec![RootPlan {
                 schema: "public".into(),
                 table: "accounts".into(),
@@ -381,6 +447,8 @@ mod tests {
                 filter_ops: vec!["eq".into()],
                 filter_digest: "hmac-sha256:abc".into(),
             }],
+            order,
+            deferred: Vec::new(),
             checks: vec![LimitCheck {
                 limit: "max_depth".into(),
                 observed: 0,
@@ -388,7 +456,9 @@ mod tests {
             }],
             max_depth_used: 0,
             direction: "parents".into(),
+            edges: 0,
             complete: true,
+            read_rows: true,
         }
     }
 
@@ -408,6 +478,26 @@ mod tests {
             1_000,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_changed_graph_is_refused() {
+        let plan = plan();
+        let mut drifted = selection();
+        drifted.edges = 1;
+        let error = assert_graph_matches(&plan, &drifted).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("graph_changed"));
+
+        let mut table_drifted = selection();
+        table_drifted.rows.clear();
+        let error = assert_graph_matches(&plan, &table_drifted).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("graph_changed"));
+    }
+
+    #[test]
+    fn an_unchanged_graph_matches() {
+        let plan = plan();
+        assert_graph_matches(&plan, &selection()).unwrap();
     }
 
     #[test]
@@ -489,7 +579,7 @@ mod tests {
     fn schema_drift_is_detected() {
         let plan = plan();
         let mut drifted = selection();
-        drifted.tables[0].schema_hash = "other".into();
+        drifted.rows[0].schema_hash = "other".into();
         let error = check_schema_drift(&plan, &drifted).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("schema_drift"));
     }

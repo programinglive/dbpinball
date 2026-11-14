@@ -40,6 +40,7 @@ pub enum MaskStrategy {
     DeterministicPseudonym,
     DeterministicEmail,
     DeterministicPhone,
+    DeterministicKey,
     DateShift,
     AmountJitter,
     Fixed,
@@ -54,6 +55,7 @@ impl MaskStrategy {
             MaskStrategy::DeterministicPseudonym => "deterministic_pseudonym",
             MaskStrategy::DeterministicEmail => "deterministic_email",
             MaskStrategy::DeterministicPhone => "deterministic_phone",
+            MaskStrategy::DeterministicKey => "deterministic_key",
             MaskStrategy::DateShift => "date_shift",
             MaskStrategy::AmountJitter => "amount_jitter",
             MaskStrategy::Fixed => "fixed",
@@ -88,6 +90,20 @@ pub struct ColumnShape {
     pub max_len: Option<usize>,
 }
 
+/// The referenced key a `deterministic_key` column belongs to.
+///
+/// The domain is the referenced table and its ordered key columns, so a parent
+/// primary key and every child foreign key that references it derive the same
+/// masked value from the same tuple.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyDomain {
+    /// The referenced table, as `schema.table`.
+    pub table: String,
+    /// The ordered key columns on the referenced table.
+    pub columns: Vec<String>,
+}
+
 /// One explicit policy rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +114,12 @@ pub struct ColumnRule {
     pub strategy: MaskStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_len: Option<usize>,
+    /// Set for `deterministic_key`; names the referenced key domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_domain: Option<KeyDomain>,
+    /// The column's zero-based position within the key domain tuple.
+    #[serde(default)]
+    pub key_position: usize,
 }
 
 /// A versioned set of rules.
@@ -122,6 +144,8 @@ impl MaskingPolicy {
             column: column.to_string(),
             strategy,
             max_len: None,
+            key_domain: None,
+            key_position: 0,
         };
 
         let mut policy = Self {
@@ -132,6 +156,159 @@ impl MaskingPolicy {
                 rule("email", MaskStrategy::DeterministicEmail),
                 rule("full_name", MaskStrategy::DeterministicPseudonym),
             ],
+            hash: String::new(),
+        };
+        policy.hash = policy.compute_hash();
+        policy
+    }
+
+    /// `development-default@2`. Adds referential key masking for the S2 demo
+    /// schema. Every table it does not name is still refused.
+    pub fn builtin_v2() -> Self {
+        let rule = |schema: &str, table: &str, column: &str, strategy: MaskStrategy| ColumnRule {
+            schema: schema.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+            strategy,
+            max_len: None,
+            key_domain: None,
+            key_position: 0,
+        };
+        let key =
+            |table: &str, column: &str, domain_table: &str, columns: &[&str], position: usize| {
+                ColumnRule {
+                    schema: "public".to_string(),
+                    table: table.to_string(),
+                    column: column.to_string(),
+                    strategy: MaskStrategy::DeterministicKey,
+                    max_len: None,
+                    key_domain: Some(KeyDomain {
+                        table: domain_table.to_string(),
+                        columns: columns.iter().map(|value| value.to_string()).collect(),
+                    }),
+                    key_position: position,
+                }
+            };
+
+        let rules = vec![
+            // Slice 1 fixture.
+            rule("public", "accounts", "id", MaskStrategy::Keep),
+            rule(
+                "public",
+                "accounts",
+                "email",
+                MaskStrategy::DeterministicEmail,
+            ),
+            rule(
+                "public",
+                "accounts",
+                "full_name",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            // Single-column natural key referenced by orders.
+            key("customers", "code", "public.customers", &["code"], 0),
+            rule(
+                "public",
+                "customers",
+                "email",
+                MaskStrategy::DeterministicEmail,
+            ),
+            rule(
+                "public",
+                "customers",
+                "name",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            rule("public", "orders", "id", MaskStrategy::Keep),
+            key("orders", "customer_code", "public.customers", &["code"], 0),
+            rule(
+                "public",
+                "orders",
+                "note",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            // Composite key referenced by shipment_events.
+            key(
+                "shipments",
+                "region",
+                "public.shipments",
+                &["region", "code"],
+                0,
+            ),
+            key(
+                "shipments",
+                "code",
+                "public.shipments",
+                &["region", "code"],
+                1,
+            ),
+            rule(
+                "public",
+                "shipments",
+                "label",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            key(
+                "shipment_events",
+                "region",
+                "public.shipments",
+                &["region", "code"],
+                0,
+            ),
+            key(
+                "shipment_events",
+                "code",
+                "public.shipments",
+                &["region", "code"],
+                1,
+            ),
+            rule(
+                "public",
+                "shipment_events",
+                "detail",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            // Self-reference.
+            key("employees", "id", "public.employees", &["id"], 0),
+            key("employees", "manager_id", "public.employees", &["id"], 0),
+            rule(
+                "public",
+                "employees",
+                "name",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            // Deferrable cycle fixture.
+            key("cycle_a", "id", "public.cycle_a", &["id"], 0),
+            key("cycle_a", "b_id", "public.cycle_b", &["id"], 0),
+            key("cycle_b", "id", "public.cycle_b", &["id"], 0),
+            key("cycle_b", "a_id", "public.cycle_a", &["id"], 0),
+            // Non-deferrable cycle fixture.
+            key("cycle_x", "id", "public.cycle_x", &["id"], 0),
+            key("cycle_x", "y_id", "public.cycle_y", &["id"], 0),
+            key("cycle_y", "id", "public.cycle_y", &["id"], 0),
+            key("cycle_y", "x_id", "public.cycle_x", &["id"], 0),
+            // Row-level-security fixture.
+            key("rls_parents", "id", "public.rls_parents", &["id"], 0),
+            rule(
+                "public",
+                "rls_parents",
+                "name",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            key("rls_children", "id", "public.rls_children", &["id"], 0),
+            key(
+                "rls_children",
+                "parent_id",
+                "public.rls_parents",
+                &["id"],
+                0,
+            ),
+        ];
+
+        let mut policy = Self {
+            name: "development-default".to_string(),
+            version: 2,
+            rules,
             hash: String::new(),
         };
         policy.hash = policy.compute_hash();
@@ -360,6 +537,13 @@ impl Masker {
                 let output = format!("Anon {}", &token[..10]);
                 fit_text(&output, rule.max_len, "deterministic_pseudonym")?
             }
+            MaskStrategy::DeterministicKey => {
+                return Err(CoreError::with_detail(
+                    ErrorCode::Unsupported,
+                    "a key column must be masked through mask_key, not mask_value",
+                    "unsupported_strategy",
+                ))
+            }
             MaskStrategy::DeterministicPhone
             | MaskStrategy::DateShift
             | MaskStrategy::AmountJitter
@@ -376,6 +560,91 @@ impl Masker {
         };
 
         Ok(output)
+    }
+
+    /// Mask one component of a key tuple.
+    ///
+    /// The tuple is the whole referenced key, not just this column. A parent
+    /// primary key and a child foreign key that carry the same tuple therefore
+    /// produce the same per-column output, so the join survives masking.
+    ///
+    /// PostgreSQL treats a composite foreign key with any NULL component as not
+    /// present, so a nullable tuple is masked to NULL rather than to a value
+    /// that could accidentally match a real parent.
+    pub fn mask_key(
+        &self,
+        rule: &ColumnRule,
+        tuple: &[Option<String>],
+    ) -> Result<MaskedValue, CoreError> {
+        let Some(domain) = &rule.key_domain else {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!("key column {} has no key domain", rule.column),
+                "unmapped_key_domain",
+            ));
+        };
+
+        if tuple.len() != domain.columns.len() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "key column {} expects {} tuple components",
+                    rule.column,
+                    domain.columns.len()
+                ),
+                "invalid_key_tuple",
+            ));
+        }
+
+        if rule.key_position >= domain.columns.len() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "key column {} has position {} outside a {}-column domain",
+                    rule.column,
+                    rule.key_position,
+                    domain.columns.len()
+                ),
+                "invalid_key_position",
+            ));
+        }
+
+        // Preserve PostgreSQL NULL semantics per component: a NULL component
+        // stays NULL, and the non-NULL components are hashed with a NULL marker
+        // so they cannot match a real parent key.
+        if tuple
+            .get(rule.key_position)
+            .and_then(|value| value.as_ref())
+            .is_none()
+        {
+            return Ok(MaskedValue::Null);
+        }
+
+        // Versioned canonical key domain: the referenced table, the ordered
+        // referenced columns and the position are all bound, so two different
+        // key spaces with the same raw values cannot correlate.
+        let mut material = String::new();
+        material.push_str("key-domain:v2");
+        material.push('\u{1f}');
+        material.push_str(&domain.table);
+        material.push('\u{1f}');
+        material.push_str(&domain.columns.join("\u{1e}"));
+        material.push('\u{1f}');
+        material.push_str(&rule.key_position.to_string());
+        for value in tuple {
+            material.push('\u{1f}');
+            match value {
+                Some(value) => {
+                    let value = normalize_identity(value);
+                    material.push_str(&format!("v{}:{}", value.len(), value));
+                }
+                None => material.push('n'),
+            }
+        }
+
+        let bytes = self.key.hmac(MASK_DOMAIN, material.as_bytes());
+        let token = base32_lower(&bytes);
+        fit_text(&token, rule.max_len, "deterministic_key")
     }
 
     /// The keyed filter digest, so a plan can bind a filter without storing it.
@@ -437,6 +706,7 @@ fn validate_rule_for_type(rule: &ColumnRule, column: &ColumnShape) -> Result<(),
         }
         MaskStrategy::DeterministicEmail
         | MaskStrategy::DeterministicPseudonym
+        | MaskStrategy::DeterministicKey
         | MaskStrategy::Redact => {
             if !is_text_type(&type_name) {
                 return Err(unsupported_type(format!(
@@ -476,8 +746,11 @@ fn fit_text(value: &str, max_len: Option<usize>, strategy: &str) -> Result<Maske
         None => Ok(MaskedValue::Text(value.to_string())),
         Some(limit) if limit >= value.chars().count() => Ok(MaskedValue::Text(value.to_string())),
         Some(limit) => {
-            // Only a pseudonym may be truncated; an email must keep its domain.
-            if strategy == "deterministic_pseudonym" && limit > 0 {
+            // A pseudonym or a key may be truncated deterministically; an email
+            // must keep its domain.
+            if (strategy == "deterministic_pseudonym" || strategy == "deterministic_key")
+                && limit > 0
+            {
                 Ok(MaskedValue::Text(value.chars().take(limit).collect()))
             } else {
                 Err(CoreError::with_detail(
@@ -654,6 +927,8 @@ mod tests {
             column: "email".into(),
             strategy,
             max_len: None,
+            key_domain: None,
+            key_position: 0,
         }
     }
 
@@ -807,6 +1082,8 @@ mod tests {
             column: "meta".into(),
             strategy: MaskStrategy::Keep,
             max_len: None,
+            key_domain: None,
+            key_position: 0,
         });
         let masker = Masker::new(policy, key()).unwrap();
         let columns = vec![ColumnShape {
@@ -831,6 +1108,8 @@ mod tests {
                 column: "password_hash".into(),
                 strategy: MaskStrategy::Keep,
                 max_len: None,
+                key_domain: None,
+                key_position: 0,
             }],
             hash: String::new(),
         };
@@ -887,6 +1166,196 @@ mod tests {
     fn an_invalid_policy_is_refused() {
         let error = MaskingPolicy::parse_yaml("name: x\nversion: 1\nrules: [oops").unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("mask_policy_invalid"));
+    }
+
+    #[test]
+    fn a_key_and_its_reference_mask_to_the_same_value() {
+        let masker = masker();
+        let domain = KeyDomain {
+            table: "public.customers".into(),
+            columns: vec!["code".into()],
+        };
+        let parent = ColumnRule {
+            schema: "public".into(),
+            table: "customers".into(),
+            column: "code".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(domain.clone()),
+            key_position: 0,
+        };
+        let child = ColumnRule {
+            schema: "public".into(),
+            table: "orders".into(),
+            column: "customer_code".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(domain),
+            key_position: 0,
+        };
+
+        let left = masker.mask_key(&parent, &[Some("C-1".into())]).unwrap();
+        let right = masker.mask_key(&child, &[Some("C-1".into())]).unwrap();
+        assert_eq!(left, right);
+        assert_ne!(left.as_text().unwrap(), "C-1");
+    }
+
+    #[test]
+    fn unrelated_key_domains_stay_separated() {
+        let masker = masker();
+        let rule = |domain_table: &str| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: domain_table.into(),
+                columns: vec!["c".into()],
+            }),
+            key_position: 0,
+        };
+
+        let left = masker
+            .mask_key(&rule("public.a"), &[Some("1".into())])
+            .unwrap();
+        let right = masker
+            .mask_key(&rule("public.b"), &[Some("1".into())])
+            .unwrap();
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn a_composite_key_tuple_is_position_separated() {
+        let masker = masker();
+        let rule = |position: usize| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into(), "b".into()],
+            }),
+            key_position: position,
+        };
+
+        let tuple = [Some("x".into()), Some("y".into())];
+        let first = masker.mask_key(&rule(0), &tuple).unwrap();
+        let second = masker.mask_key(&rule(1), &tuple).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first, masker.mask_key(&rule(0), &tuple).unwrap());
+    }
+
+    #[test]
+    fn a_fully_null_key_masks_to_null() {
+        let masker = masker();
+        let rule = ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into(), "b".into()],
+            }),
+            key_position: 0,
+        };
+        let value = masker.mask_key(&rule, &[None, None]).unwrap();
+        assert_eq!(value, MaskedValue::Null);
+    }
+
+    #[test]
+    fn a_partially_null_key_component_stays_distinct() {
+        let masker = masker();
+        let rule = |position: usize| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into(), "b".into()],
+            }),
+            key_position: position,
+        };
+        let tuple = [Some("x".into()), None];
+        // The non-NULL component stays non-NULL.
+        let first = masker.mask_key(&rule(0), &tuple).unwrap();
+        assert!(first.as_text().is_some());
+        // The NULL component stays NULL.
+        assert_eq!(
+            masker.mask_key(&rule(1), &tuple).unwrap(),
+            MaskedValue::Null
+        );
+        // The partial tuple cannot match the real (x, "") tuple.
+        let empty = masker
+            .mask_key(&rule(0), &[Some("x".into()), Some("".into())])
+            .unwrap();
+        assert_ne!(first, empty);
+    }
+
+    #[test]
+    fn different_column_orders_are_separated() {
+        let masker = masker();
+        let rule = |columns: &[&str]| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: columns.iter().map(|value| value.to_string()).collect(),
+            }),
+            key_position: 0,
+        };
+
+        let left = masker
+            .mask_key(&rule(&["a", "b"]), &[Some("x".into()), Some("y".into())])
+            .unwrap();
+        let right = masker
+            .mask_key(&rule(&["b", "a"]), &[Some("x".into()), Some("y".into())])
+            .unwrap();
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn an_out_of_range_key_position_is_refused() {
+        let masker = masker();
+        let rule = ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into()],
+            }),
+            key_position: 3,
+        };
+        let error = masker.mask_key(&rule, &[Some("x".into())]).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("invalid_key_position"));
+    }
+
+    #[test]
+    fn a_missing_key_domain_is_refused() {
+        let masker = masker();
+        let rule = ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: None,
+            key_position: 0,
+        };
+        let error = masker.mask_key(&rule, &[Some("x".into())]).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("unmapped_key_domain"));
     }
 
     #[test]

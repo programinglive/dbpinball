@@ -230,7 +230,15 @@ async fn run_inner(
     }
 
     if policy == ConflictPolicy::Replace {
-        for table in tables {
+        // Defer before deleting, and delete children before parents, so a
+        // deferrable cycle and a parent closure can both be replaced.
+        if !plan.constraints.deferred.is_empty() {
+            sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+        }
+        for table in tables.iter().rev() {
             let statement = format!(
                 "DELETE FROM {}.{}",
                 quote_ident(&table.table.schema),
@@ -241,6 +249,14 @@ async fn run_inner(
                 .await
                 .map_err(connection_error)?;
         }
+    }
+
+    // Defer only when the plan proved every edge in the cycle is deferrable.
+    if !plan.constraints.deferred.is_empty() {
+        sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
     }
 
     let mut written = Vec::new();
@@ -258,6 +274,15 @@ async fn run_inner(
             table: table.table.table.clone(),
             rows,
         });
+    }
+
+    // Force every deferred constraint to be checked before the run row is
+    // written, so an inconsistent graph aborts the whole transaction.
+    if !plan.constraints.deferred.is_empty() {
+        sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
     }
 
     let (digest, total) = destination_digest(session, tables).await?;

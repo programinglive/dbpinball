@@ -255,6 +255,71 @@ jobs:
             ('0b9f4c3e-0000-0000-0000-000000000002', 'bob@example.com', 'Bob Example'),
             ('0b9f4c3e-0000-0000-0000-000000000003', 'carol@example.com', 'Carol Example');
           GRANT SELECT ON public.accounts TO m4src;
+          -- S2-a graph fixtures.
+          CREATE TABLE public.customers (
+            code text PRIMARY KEY, email text NOT NULL, name text NOT NULL
+          );
+          CREATE TABLE public.orders (
+            id uuid PRIMARY KEY,
+            customer_code text REFERENCES public.customers(code),
+            note text NOT NULL
+          );
+          CREATE TABLE public.shipments (
+            region text NOT NULL, code text NOT NULL, label text NOT NULL,
+            PRIMARY KEY (region, code)
+          );
+          CREATE TABLE public.shipment_events (
+            region text NOT NULL, code text NOT NULL, detail text NOT NULL,
+            PRIMARY KEY (region, code),
+            FOREIGN KEY (region, code) REFERENCES public.shipments(region, code)
+          );
+          CREATE TABLE public.employees (
+            id text PRIMARY KEY,
+            manager_id text REFERENCES public.employees(id) DEFERRABLE INITIALLY DEFERRED,
+            name text NOT NULL
+          );
+          CREATE TABLE public.cycle_a (id text PRIMARY KEY, b_id text);
+          CREATE TABLE public.cycle_b (id text PRIMARY KEY, a_id text);
+          ALTER TABLE public.cycle_a ADD CONSTRAINT cycle_a_b
+            FOREIGN KEY (b_id) REFERENCES public.cycle_b(id) DEFERRABLE INITIALLY DEFERRED;
+          ALTER TABLE public.cycle_b ADD CONSTRAINT cycle_b_a
+            FOREIGN KEY (a_id) REFERENCES public.cycle_a(id) DEFERRABLE INITIALLY DEFERRED;
+          CREATE TABLE public.cycle_x (id text PRIMARY KEY, y_id text);
+          CREATE TABLE public.cycle_y (id text PRIMARY KEY, x_id text);
+          ALTER TABLE public.cycle_x ADD CONSTRAINT cycle_x_y
+            FOREIGN KEY (y_id) REFERENCES public.cycle_y(id);
+          ALTER TABLE public.cycle_y ADD CONSTRAINT cycle_y_x
+            FOREIGN KEY (x_id) REFERENCES public.cycle_x(id);
+          INSERT INTO public.customers VALUES
+            ('C1', 'alice@example.com', 'Alice Example'),
+            ('C2', 'bob@example.com', 'Bob Example');
+          INSERT INTO public.orders VALUES
+            ('0b9f4c3e-0000-0000-0000-000000000001', 'C1', 'note one'),
+            ('0b9f4c3e-0000-0000-0000-000000000002', 'C2', 'note two'),
+            ('0b9f4c3e-0000-0000-0000-000000000003', 'C1', 'note three'),
+            ('0b9f4c3e-0000-0000-0000-000000000004', NULL, 'note four');
+          INSERT INTO public.shipments VALUES ('EU', 'S1', 'eu one'), ('US', 'S2', 'us one');
+          INSERT INTO public.shipment_events VALUES ('EU', 'S1', 'event one');
+          INSERT INTO public.employees VALUES ('E1', NULL, 'Boss Example'), ('E2', 'E1', 'Worker Example');
+          BEGIN;
+          SET CONSTRAINTS ALL DEFERRED;
+          INSERT INTO public.cycle_a VALUES ('A1', 'B1');
+          INSERT INTO public.cycle_b VALUES ('B1', 'A1');
+          COMMIT;
+          INSERT INTO public.cycle_y VALUES ('Y1', NULL);
+          INSERT INTO public.cycle_x VALUES ('X1', 'Y1');
+          GRANT SELECT ON ALL TABLES IN SCHEMA public TO m4src;
+          -- RLS-hidden parent fixture.
+          CREATE TABLE public.rls_parents (id text PRIMARY KEY, name text NOT NULL);
+          CREATE TABLE public.rls_children (
+            id text PRIMARY KEY,
+            parent_id text NOT NULL REFERENCES public.rls_parents(id)
+          );
+          INSERT INTO public.rls_parents VALUES ('R1', 'Visible Parent'), ('R2', 'Hidden Parent');
+          INSERT INTO public.rls_children VALUES ('C1', 'R1'), ('C2', 'R2');
+          GRANT SELECT ON public.rls_parents, public.rls_children TO m4src;
+          ALTER TABLE public.rls_parents ENABLE ROW LEVEL SECURITY;
+          CREATE POLICY rls_visible ON public.rls_parents FOR SELECT TO m4src USING (id = 'R1');
           SQL
 
       - name: Create the destination fixture
@@ -266,6 +331,45 @@ jobs:
             id uuid PRIMARY KEY,
             email text NOT NULL,
             full_name text NOT NULL
+          );
+          CREATE TABLE public.customers (
+            code text PRIMARY KEY, email text NOT NULL, name text NOT NULL
+          );
+          CREATE TABLE public.orders (
+            id uuid PRIMARY KEY,
+            customer_code text REFERENCES public.customers(code),
+            note text NOT NULL
+          );
+          CREATE TABLE public.shipments (
+            region text NOT NULL, code text NOT NULL, label text NOT NULL,
+            PRIMARY KEY (region, code)
+          );
+          CREATE TABLE public.shipment_events (
+            region text NOT NULL, code text NOT NULL, detail text NOT NULL,
+            PRIMARY KEY (region, code),
+            FOREIGN KEY (region, code) REFERENCES public.shipments(region, code)
+          );
+          CREATE TABLE public.employees (
+            id text PRIMARY KEY,
+            manager_id text REFERENCES public.employees(id) DEFERRABLE INITIALLY DEFERRED,
+            name text NOT NULL
+          );
+          CREATE TABLE public.cycle_a (id text PRIMARY KEY, b_id text);
+          CREATE TABLE public.cycle_b (id text PRIMARY KEY, a_id text);
+          ALTER TABLE public.cycle_a ADD CONSTRAINT cycle_a_b
+            FOREIGN KEY (b_id) REFERENCES public.cycle_b(id) DEFERRABLE INITIALLY DEFERRED;
+          ALTER TABLE public.cycle_b ADD CONSTRAINT cycle_b_a
+            FOREIGN KEY (a_id) REFERENCES public.cycle_a(id) DEFERRABLE INITIALLY DEFERRED;
+          CREATE TABLE public.cycle_x (id text PRIMARY KEY, y_id text);
+          CREATE TABLE public.cycle_y (id text PRIMARY KEY, x_id text);
+          ALTER TABLE public.cycle_x ADD CONSTRAINT cycle_x_y
+            FOREIGN KEY (y_id) REFERENCES public.cycle_y(id);
+          ALTER TABLE public.cycle_y ADD CONSTRAINT cycle_y_x
+            FOREIGN KEY (x_id) REFERENCES public.cycle_x(id);
+          CREATE TABLE public.rls_parents (id text PRIMARY KEY, name text NOT NULL);
+          CREATE TABLE public.rls_children (
+            id text PRIMARY KEY,
+            parent_id text NOT NULL REFERENCES public.rls_parents(id)
           );
           SQL
 
@@ -287,6 +391,16 @@ jobs:
           cargo test -p dbpinball-core --features integration --test safesync_integration -- --nocapture | tee /tmp/safesync-core.log
           # A skipped suite reports zero tests; that is not acceptance.
           ! grep -q "test result: ok. 0 passed" /tmp/safesync-core.log
+
+      - name: Run FK graph Safe Sync integration tests
+        env:
+          DBPINBALL_TEST_PG_SOURCE_URL: postgres://m4src:m4src@127.0.0.1:55433/srcdb
+          DBPINBALL_TEST_PG_DEST_URL: postgres://m4dst:m4dst@127.0.0.1:55434/dstdb
+          DBPINBALL_TEST_PG_SUPER_URL: postgres://m4owner:m4owner@127.0.0.1:55433/srcdb
+        run: |
+          set -euo pipefail
+          cargo test -p dbpinball-core --features integration --test safesync_graph_integration -- --nocapture | tee /tmp/safesync-graph.log
+          ! grep -q "test result: ok. 0 passed" /tmp/safesync-graph.log
 
       - name: Run CLI Safe Sync acceptance tests
         env:

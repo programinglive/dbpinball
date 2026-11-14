@@ -15,8 +15,8 @@ use crate::safesync::graph::TableInfo;
 use crate::safesync::import::{self, ConflictPolicy, TableImport};
 use crate::safesync::key::MaskKeyStore;
 use crate::safesync::mask::{MaskStrategy, Masker, MaskingPolicy};
-use crate::safesync::plan::{check_schema_drift, DryRunPlan, PlanIdentity};
-use crate::safesync::planner::{self, SelectionPlan};
+use crate::safesync::plan::{assert_graph_matches, check_schema_drift, DryRunPlan, PlanIdentity};
+use crate::safesync::planner::{self};
 use crate::safesync::session::{BoundSession, SessionIdentity, SessionRole};
 use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
 use crate::security::{
@@ -51,6 +51,7 @@ pub async fn inspect(
 pub fn resolve_policy(name: &str) -> Result<MaskingPolicy, CoreError> {
     match name {
         "development-default@1" | "development-default" => Ok(MaskingPolicy::builtin_default()),
+        "development-default@2" => Ok(MaskingPolicy::builtin_v2()),
         other => Err(CoreError::with_detail(
             ErrorCode::Usage,
             format!("masking policy '{other}' is not installed"),
@@ -89,13 +90,9 @@ pub async fn plan(
     source_session.assert_source_role(&root_tables).await?;
 
     // Metadata discovery and (optionally) row counts run on the source session.
-    let selection = planner::build(&mut source_session, spec, &masker).await?;
+    let selection = planner::build(&mut source_session, spec, &masker, estimate).await?;
 
-    let estimates = if estimate {
-        estimate_rows(&mut source_session, spec, &selection, &masker).await?
-    } else {
-        Vec::new()
-    };
+    let estimates: Vec<(QualifiedName, u64)> = Vec::new();
 
     let _ = source_session.rollback().await;
 
@@ -218,8 +215,16 @@ pub async fn validate(
         now_ms,
     )?;
 
-    let selection = planner::build(&mut source_session, spec, &masker).await?;
+    let selection = planner::build(&mut source_session, spec, &masker, true).await?;
     check_schema_drift(plan, &selection)?;
+    assert_graph_matches(plan, &selection)?;
+    if !selection.complete {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection is incomplete and cannot be imported",
+            "limit_exceeded",
+        ));
+    }
     let _ = source_session.rollback().await;
 
     check_filter_digests(plan, spec, &masker)?;
@@ -228,7 +233,7 @@ pub async fn validate(
         plan_fingerprint: plan.plan_fingerprint.clone(),
         source_identity_key: plan.source.identity_key.clone(),
         destination_identity_key: plan.destination.identity_key.clone(),
-        tables_checked: selection.tables.len(),
+        tables_checked: selection.rows.len(),
         valid: true,
     })
 }
@@ -244,12 +249,7 @@ pub fn check_filter_digests(
     }
 
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let canonical = root
-            .filter
-            .iter()
-            .map(crate::safesync::spec::FilterPredicate::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
@@ -305,24 +305,6 @@ fn root_tables(spec: &SafeSyncSpec) -> Result<Vec<QualifiedName>, CoreError> {
         .iter()
         .map(|root| QualifiedName::parse(&root.table))
         .collect()
-}
-
-async fn estimate_rows(
-    session: &mut BoundSession,
-    spec: &SafeSyncSpec,
-    selection: &SelectionPlan,
-    masker: &Masker,
-) -> Result<Vec<(QualifiedName, u64)>, CoreError> {
-    let mut estimates = Vec::new();
-    for root in &spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
-        let Some(table) = selection.tables.iter().find(|table| table.name() == name) else {
-            continue;
-        };
-        let rows = planner::extract_table(session, table, root, masker, &spec.limits).await?;
-        estimates.push((name, rows.row_count()));
-    }
-    Ok(estimates)
 }
 
 fn filter_mismatch(message: &str) -> CoreError {
@@ -396,6 +378,14 @@ pub async fn execute(
         ));
     }
 
+    if !request.plan.complete {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the plan is incomplete and cannot be executed",
+            "limit_exceeded",
+        ));
+    }
+
     if request.acknowledgement != request.plan.plan_fingerprint {
         return Err(CoreError::with_detail(
             ErrorCode::Usage,
@@ -454,79 +444,64 @@ pub async fn execute(
     // The specification is not trusted on its own. `planner::build` refuses a
     // non-zero depth or child traversal, and the resulting contract must match
     // the reviewed plan byte for byte.
-    let selection = planner::build(&mut source_session, request.spec, &masker).await?;
+    let selection = planner::build(&mut source_session, request.spec, &masker, true).await?;
     if crate::safesync::plan::spec_hash(request.spec, &selection) != request.plan.spec_hash {
         return Err(filter_mismatch("the specification does not match the plan"));
     }
     check_filter_digests(request.plan, request.spec, &masker)?;
+    assert_graph_matches(request.plan, &selection)?;
 
-    let mut total_rows = 0u64;
-    let mut total_bytes = 0u64;
-    let mut extracted = Vec::new();
+    if !selection.complete {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection is incomplete and cannot be imported",
+            "limit_exceeded",
+        ));
+    }
 
-    for root in &request.spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
-        let Some(planned) = request
-            .plan
-            .tables
+    // The selection is already masked and ordered. Compare its schema hashes to
+    // the reviewed plan before any destination work.
+    for planned in &request.plan.tables {
+        let Some(live) = selection
+            .rows
             .iter()
-            .find(|planned| planned.schema == name.schema && planned.table == name.table)
+            .find(|rows| rows.table.schema == planned.schema && rows.table.table == planned.table)
         else {
             return Err(filter_mismatch(
-                "the plan does not contain a selected table",
+                "the selection changed since the plan was made",
             ));
         };
-
-        let Some(info) = selection
-            .tables
-            .iter()
-            .find(|table| table.schema == name.schema && table.table == name.table)
-        else {
-            return Err(filter_mismatch("the specification does not match the plan"));
-        };
-
-        // The plan's schema hash is the contract; refuse a source that changed.
-        if info.schema_hash != planned.schema_hash {
+        if live.schema_hash != planned.schema_hash {
             return Err(CoreError::with_detail(
                 ErrorCode::Conflict,
-                format!("the schema of {name} changed since the plan was made"),
+                format!(
+                    "the schema of {}.{} changed since the plan was made",
+                    planned.schema, planned.table
+                ),
                 "schema_drift",
             ));
         }
+    }
 
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CoreError::with_detail(
-                ErrorCode::Operation,
-                "the run was cancelled",
-                "cancelled",
-            ));
-        }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the run was cancelled",
+            "cancelled",
+        ));
+    }
 
-        let rows = planner::extract_table(
-            &mut source_session,
-            info,
-            root,
-            &masker,
-            &request.plan.limits,
-        )
-        .await?;
-        total_rows = total_rows.saturating_add(rows.row_count());
-        total_bytes = total_bytes.saturating_add(rows.total_bytes);
-        if total_rows > request.plan.limits.max_total_rows {
-            return Err(CoreError::with_detail(
-                ErrorCode::Operation,
-                "the selection exceeded max_total_rows",
-                "limit_exceeded",
-            ));
-        }
-        if total_bytes > request.plan.limits.max_bytes {
-            return Err(CoreError::with_detail(
-                ErrorCode::Operation,
-                "the selection exceeded max_bytes",
-                "limit_exceeded",
-            ));
-        }
-        extracted.push(rows);
+    let extracted = selection.rows.clone();
+    let total_rows: u64 = extracted.iter().map(|rows| rows.row_count()).sum();
+    let total_bytes: u64 = extracted.iter().map(|rows| rows.total_bytes).sum();
+    if total_rows > request.plan.limits.max_total_rows
+        || total_bytes > request.plan.limits.max_bytes
+    {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection exceeded a bound",
+            "limit_exceeded",
+        ));
     }
 
     let _ = source_session.rollback().await;
