@@ -1581,6 +1581,17 @@ async fn the_run_table_is_migrated_from_s2a() {
     .await
     .unwrap();
     assert_eq!(historical, 1, "the migration must preserve existing runs");
+
+    // A pre-S2-b run did not import identity columns, so it needs no sequence
+    // movement; it must not surface as pending.
+    let historical_status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         WHERE plan_fingerprint = 'historical'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(historical_status, "not_required");
 }
 
 #[tokio::test]

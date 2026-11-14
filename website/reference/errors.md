@@ -12,6 +12,7 @@
 | `not_found` | 7 | Unknown connection profile |
 | `conflict` | 8 | The store changed since it was read |
 | `busy` | 9 | The store lock was not acquired in time |
+| `sequence_reconciliation_required` | 6 | Safe Sync committed the rows but the identity sequence needs reconciliation; re-run execute |
 
 ## Common messages
 

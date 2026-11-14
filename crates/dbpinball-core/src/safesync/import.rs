@@ -606,10 +606,17 @@ async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     .map_err(connection_error)?;
 
     if !existing.iter().any(|column| column == "sequence_status") {
-        // Additive migration for an S1 or S2-a run table. Existing rows keep
-        // their history and default to `pending`, which a replay reconciles.
+        // Additive migration for an S1 or S2-a run table. Those milestones did
+        // not import identity columns, so their historical runs need no
+        // sequence movement; new runs still start `pending`.
         sqlx::query(&format!(
-            "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'pending'"
+            "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'not_required'"
+        ))
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+        sqlx::query(&format!(
+            "ALTER TABLE {RUN_TABLE} ALTER COLUMN sequence_status SET DEFAULT 'pending'"
         ))
         .execute(&mut *session.connection())
         .await

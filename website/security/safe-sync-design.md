@@ -151,7 +151,10 @@ Within S2-b:
   held, an external `nextval`, `setval` or `ALTER SEQUENCE` blocks, so the
   observed `last_value` cannot move between the read and the write. The raise is
   `setval(seq, GREATEST(max, last_value), true)`, so it never lowers the value it
-  observed. If the lock cannot be taken, the mode fails closed instead of
+  observed. The lock requires **ownership** of the identity sequence; a role that
+  can insert but does not own the sequence still imports the rows, but the run
+  reports `reconciliation_required`, the sequence is left untouched, and the CLI
+  exits 6. If the lock cannot be taken, the mode fails closed instead of
   guessing.
 - The run table is migrated additively: an S1 or S2-a table gains
   `sequence_status` under the DDL advisory lock, existing runs are preserved,

@@ -1228,11 +1228,12 @@ Exit codes reuse the documented map:
 
 | Code | Meaning | Typical Safe Sync cause |
 | --- | --- | --- |
-| 0 | success | plan produced, execute committed, already completed |
+| 0 | success | plan produced, execute committed with sequence reconciliation complete or not required, already completed |
 | 2 | usage | invalid spec, missing argument |
 | 3 | connection | source/destination unreachable, auth expired |
 | 4 | policy refusal | destination not enrolled or not writable |
 | 5 | operation | incomplete plan, limit exceeded, mask collision, schema drift, cyclic FK, source privileged |
+| 6 | committed, sequence reconciliation required | rows committed but the identity sequence could not be raised (non-owner, lock timeout, missing privilege); re-run execute to retry |
 | 7 | not found | unknown run id or connection id |
 | 8 | conflict | destination not empty, schema drift, plan expired or already used differently |
 | 9 | busy | concurrent run lock |

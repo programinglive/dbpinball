@@ -276,11 +276,20 @@ async fn execute(
     });
 
     // A committed row import with an unreconciled sequence is not full success.
-    if report.sequence_status == "reconciliation_required" || report.sequence_status == "pending" {
-        return Ok(9);
-    }
+    Ok(sequence_exit_code(&report.sequence_status))
+}
 
-    Ok(0)
+/// Exit code for a committed row import whose sequence reconciliation is
+/// incomplete. It is distinct from the documented "busy" code (9) so a script
+/// can tell "nothing happened" from "rows committed, sequence not reconciled".
+const EXIT_SEQUENCE_RECONCILIATION_REQUIRED: i32 = 6;
+
+fn sequence_exit_code(status: &str) -> i32 {
+    if status == "reconciliation_required" || status == "pending" {
+        EXIT_SEQUENCE_RECONCILIATION_REQUIRED
+    } else {
+        0
+    }
 }
 
 async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i32, CoreError> {
@@ -303,7 +312,7 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
     });
 
     if report.sequence_status == "reconciliation_required" || report.sequence_status == "pending" {
-        return Ok(9);
+        return Ok(EXIT_SEQUENCE_RECONCILIATION_REQUIRED);
     }
 
     Ok(0)
@@ -433,5 +442,21 @@ mod tests {
         let path = directory.path().join("plan.json");
         write_private(&path, "{}").unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn an_unreconciled_sequence_is_not_full_success() {
+        assert_eq!(sequence_exit_code("completed"), 0);
+        assert_eq!(sequence_exit_code("not_required"), 0);
+        assert_eq!(
+            sequence_exit_code("reconciliation_required"),
+            EXIT_SEQUENCE_RECONCILIATION_REQUIRED
+        );
+        assert_eq!(
+            sequence_exit_code("pending"),
+            EXIT_SEQUENCE_RECONCILIATION_REQUIRED
+        );
+        // The code must not collide with the documented "busy" code.
+        assert_ne!(EXIT_SEQUENCE_RECONCILIATION_REQUIRED, 9);
     }
 }

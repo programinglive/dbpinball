@@ -122,6 +122,7 @@ dbpinball schema inspect --connection <id> --database app --json
 | 3 | Connection or credential failure |
 | 4 | Policy refusal |
 | 5 | Operation or environment failure |
+| 6 | Safe Sync committed the rows but the identity sequence needs reconciliation; re-run execute |
 | 7 | Unknown connection profile |
 | 8 | Store conflict: another writer changed the store since it was read |
 | 9 | Store busy: the cross-process lock was not acquired within the bounded wait |
