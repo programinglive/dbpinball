@@ -84,8 +84,8 @@ website/roadmap.md, website/security/safe-sync-design.md, website/.vitepress/con
 **Interfaces:**
 - Consumes: `security::{DatabaseOperation, OperationContext, PolicyDecision, PolicyCode}`, `domain::connection::{DbConnection, DbEngine, TargetClass}`, `domain::error::{CoreError, ErrorCode}`.
 - Produces:
-  - `PolicyCode::MissingSource` (`"missing_source"`).
-  - `evaluate` arm: `SafeSyncPrepare` allows when `source` is present and identified and denies `MissingSource` / `SameSourceAndDestination` / `UnverifiableDestination`; `SafeSyncExecute` requires `destination` identified + enrollment matching + category allowing write.
+  - `PolicyCode::{MissingSource, SourceAuthorized, SourceNotReadOnly, UnverifiableSource}` (`"missing_source"`, `"source_authorized"`, `"source_not_read_only"`, `"unverifiable_source"`).
+  - `evaluate` arm: `SafeSyncPrepare` allows when `source` is present and identified, returning `SourceAuthorized`; denies `MissingSource` when absent, `UnverifiableSource` when unidentified, `SourceNotReadOnly` when the session is not read-only, and `SameSourceAndDestination` when a destination is supplied with the same key. `SafeSyncExecute` requires both a source identity (else `MissingSource`) and the unchanged M3 destination checks.
   - `spec::{SafeSyncSpec, Selection, RootSelection, FilterPredicate, FilterOp, FilterValue, Limits, MaskingSelection, ExecutionOptions}`.
   - `spec::SafeSyncSpec::parse_yaml(&str) -> Result<SafeSyncSpec, CoreError>` and `validate(&self) -> Result<(), CoreError>`.
 
@@ -106,28 +106,58 @@ fn safe_sync_prepare_allows_an_identified_source() {
     let context = OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000)
         .with_source(&source);
     assert!(evaluate(&context).is_allowed());
+    assert_eq!(evaluate(&context).code(), PolicyCode::SourceAuthorized);
+}
+
+#[test]
+fn safe_sync_prepare_refuses_an_unidentified_source() {
+    let mut source = identity("srv-1", "prod", 1_000);
+    source.server.server_uuid = None;
+    source.identity_key = None;
+    let context = OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000)
+        .with_source(&source);
+    assert_eq!(evaluate(&context).code(), PolicyCode::UnverifiableSource);
+}
+
+#[test]
+fn safe_sync_prepare_refuses_equal_source_and_destination() {
+    let source = identity("srv-1", "prod", 1_000);
+    let context = OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000)
+        .with_source(&source).with_destination(&source);
+    assert_eq!(evaluate(&context).code(), PolicyCode::SameSourceAndDestination);
+}
+
+#[test]
+fn safe_sync_execute_needs_both_identities() {
+    let destination = identity("srv-9", "dev", 1_000);
+    let only_destination = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
+        .with_destination(&destination);
+    assert_eq!(evaluate(&only_destination).code(), PolicyCode::MissingSource);
 }
 
 #[test]
 fn safe_sync_execute_requires_an_enrolled_destination() {
+    let source = identity("srv-1", "prod", 1_000);
     let destination = identity("srv-9", "dev", 1_000);
     let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
-        .with_destination(&destination);
+        .with_source(&source).with_destination(&destination);
     assert_eq!(evaluate(&context).code(), PolicyCode::NotEnrolled);
 }
 
 #[test]
 fn safe_sync_execute_allows_an_enrolled_development_destination() {
+    let source = identity("srv-1", "prod", 1_000);
     let destination = identity("srv-9", "dev", 1_000);
     let enrolled = enrollment(destination.identity_key.as_deref().unwrap(),
         DestinationCategory::VerifiedDevelopment);
     let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
-        .with_destination(&destination).with_enrollment(&enrolled);
+        .with_source(&source).with_destination(&destination)
+        .with_enrollment(&enrolled);
     assert!(evaluate(&context).is_allowed());
 }
 ```
 
-Replace the M3 test `safe_sync_is_explicitly_unsupported` with these four.
+Replace the M3 test `safe_sync_is_explicitly_unsupported` with these seven.
 
 - [ ] **Step 2: Run the policy tests to verify they fail**
 
@@ -136,7 +166,7 @@ Expected: FAIL with `MissingSource` not found / `unsupported` returned.
 
 - [ ] **Step 3: Implement the policy arms**
 
-Add `MissingSource` to `PolicyCode` and its `as_str`. In `evaluate`, before the `is_write` check:
+Add `MissingSource`, `SourceAuthorized`, `SourceNotReadOnly`, `UnverifiableSource` to `PolicyCode` and to `as_str`. In `evaluate`, before the `is_write` check:
 
 ```rust
 if context.operation == DatabaseOperation::SafeSyncPrepare {
@@ -145,18 +175,25 @@ if context.operation == DatabaseOperation::SafeSyncPrepare {
             reason: "reading a protected source needs a source identity".to_string() };
     };
     if !source.server.is_identified() {
-        return PolicyDecision::Deny { code: PolicyCode::UnverifiableDestination, .. };
+        return PolicyDecision::Deny { code: PolicyCode::UnverifiableSource, .. };
+    }
+    if !source.server.read_only.unwrap_or(false) {
+        return PolicyDecision::Deny { code: PolicyCode::SourceNotReadOnly, .. };
     }
     if let Some(destination) = context.destination {
         if source.identity_key == destination.identity_key {
             return PolicyDecision::Deny { code: PolicyCode::SameSourceAndDestination, .. };
         }
     }
-    return PolicyDecision::Allow { code: PolicyCode::Allowed, evidence: .. };
+    return PolicyDecision::Allow { code: PolicyCode::SourceAuthorized, evidence: .. };
+}
+
+if context.operation == DatabaseOperation::SafeSyncExecute && context.source.is_none() {
+    return PolicyDecision::Deny { code: PolicyCode::MissingSource, .. };
 }
 ```
 
-Remove `SafeSyncPrepare | SafeSyncExecute` from the `Unsupported` early return; keep `SafeSyncExecute` flowing through the existing write checks.
+Remove `SafeSyncPrepare | SafeSyncExecute` from the `Unsupported` early return. `SafeSyncExecute` then flows through the existing write checks unchanged, so M3 destination verification is not altered.
 
 - [ ] **Step 4: Run the policy tests to verify they pass**
 
@@ -419,9 +456,10 @@ git commit -m "feat(safesync): plan a bounded, parameterized, FK-aware selection
 - Produces:
   - `MaskStrategy { Keep, Redact, Null, DeterministicPseudonym, DeterministicEmail, DeterministicPhone, DateShift, AmountJitter, Fixed }`.
   - `ColumnClass { PrimaryKey, ForeignKey, Masked, Keep, Unknown }`.
-  - `MaskingPolicy { name, version, hash, rules }`, `MaskingPolicy::builtin_default()`, `MaskingPolicy::load(path)`.
-  - `Masker::new(policy, key) -> Masker`, `Masker::coverage(graph) -> CoverageReport`, `Masker::mask_row(...)`.
-  - `MaskKey { id, bytes }` with `MaskKeyProvider::current()` / `rotate()` backed by the keyring.
+  - `MaskingPolicy { name, version, hash, rules }`, `MaskingPolicy::builtin_default()` (`development-default@1`), `MaskingPolicy::load(path)`.
+  - `Masker::new(policy, key) -> Masker`, `Masker::filter_digest(...) -> String`, `Masker::coverage(graph) -> CoverageReport`, `Masker::mask_row(...)`.
+  - `MaskKey { id, bytes }` with `MaskKeyProvider::current()` / `rotate()` backed by the keyring, and `MaskKeyProvider::ephemeral(bytes)` under `cfg(any(test, feature = "test-keys"))`.
+  - `development-default@1` rules for `public.accounts`: `id → keep` (explicit), `email → deterministic_email`, `full_name → deterministic_pseudonym`; any other table or column → `unmapped_column` refusal.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -430,8 +468,17 @@ Unit tests:
 ```rust
 #[test] fn the_same_identity_and_key_produce_the_same_output() {}
 #[test] fn a_different_key_produces_a_different_output() {}
-#[test] fn a_pseudonym_is_valid_for_a_text_column() {}
-#[test] fn a_pseudonym_is_valid_for_a_uuid_column() {}
+#[test] fn the_same_value_in_two_columns_produces_different_output() {} // domain separation
+#[test] fn the_email_local_part_is_16_base32_chars() {}
+#[test] fn the_email_domain_is_example_invalid() {}
+#[test] fn the_name_output_is_anon_space_10_base32() {}
+#[test] fn the_uuid_id_is_kept_only_by_an_explicit_rule() {}
+#[test] fn a_policy_without_the_id_rule_refuses_accounts() {}
+#[test] fn a_column_shorter_than_the_output_refuses_without_max_len() {}
+#[test] fn a_column_with_max_len_truncates_deterministically() {}
+#[test] fn a_unicode_value_is_normalised_before_hashing() {}
+#[test] fn a_missing_key_is_refused() {}
+#[test] fn an_unknown_policy_version_is_refused() {}
 #[test] fn date_shift_stays_within_the_policy_bound() {}
 #[test] fn an_unmapped_column_is_refused() {}
 #[test] fn a_jsonb_column_without_a_rule_is_refused() {}
@@ -457,7 +504,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement the masking engine**
 
-`deterministic_pseudonym` = `base32(HMAC-SHA256(key, canonical(table || column || identity)))[..n]`, encoded to the column type. Foreign-key columns inherit the referenced column's strategy so joins survive. Collisions on any unique key are `mask_collision`. The built-in policy maps authentication tokens, password hashes, government identifiers and blobs to `redact`/`null`, and refuses low-entropy identifier columns unless a rule says `redact`. The key lives only in the keyring; the plan records `key_id` only.
+`deterministic_pseudonym` = `base32(HMAC-SHA256(key, "dbpinball/safesync/v1" || 0x1F || schema || 0x1F || table || 0x1F || column || 0x1F || identity))`, NFC-normalised input, ASCII output. Email local part = `token[..16]`, domain fixed `example.invalid`. Name output = `"Anon " + token[..10]`. Foreign-key columns inherit the referenced column's strategy so joins survive. Collisions on any unique key are `mask_collision`. The built-in policy is exactly the `public.accounts` table in spec §8.4A; any other table or column refuses. The key is 32 CSPRNG bytes in the keyring; `MaskKeyProvider::ephemeral` exists only under `cfg(any(test, feature = "test-keys"))`. The plan records `key_id` only, and `filter_digest` uses the same key with the `dbpinball/safesync/filter/v1` domain.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -488,20 +535,27 @@ git commit -m "feat(safesync): add a fail-closed deterministic masking engine"
 **Interfaces:**
 - Consumes: everything above; `security::{policy_check, evaluate, OperationContext, DestinationCategory}`.
 - Produces:
-  - `DryRunPlan` exactly as spec §10.2.
+  - `DryRunPlan` exactly as spec §10.2, including `selection.roots[].filter_digest`, `import.{conflict_policy, mode, sequence_adjustment}`, and `selection.contains_values` (always `false` in M4).
   - `DryRunPlan::fingerprint() -> String`, `DryRunPlan::is_expired(now_ms) -> bool`.
   - `service::{inspect, plan, validate, execute, status, rotate_key}` signatures:
     - `plan(spec, source, destination, credentials, store, now_ms, estimator) -> Result<DryRunPlan, CoreError>`
-    - `validate(plan, source, destination, credentials, store, now_ms) -> Result<ValidationReport, CoreError>`
-    - `execute(plan, acknowledgement, source, destination, credentials, store, progress, now_ms) -> Result<RunReport, CoreError>`
+    - `validate(plan, spec, source, destination, credentials, store, now_ms) -> Result<ValidationReport, CoreError>`
+    - `execute(plan, spec, acknowledgement, source, destination, credentials, store, progress, now_ms) -> Result<RunReport, CoreError>`
   - `AuditRecord { run_id, plan_fingerprint, source_key, destination_key, tables: Vec<TableAudit>, policy, key_id, outcome, started_at, finished_at }` with `TableAudit { name, rows, masked_columns }` and **no values**.
+  - `IdempotencyOutcome { AlreadyCompleted, DestinationDrifted, DestinationNotEmpty, Proceed }`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn the_fingerprint_is_stable_for_the_same_plan() {}
 #[test] fn the_fingerprint_changes_when_the_destination_changes() {}
+#[test] fn the_fingerprint_changes_when_the_mask_key_id_changes() {}
+#[test] fn the_fingerprint_changes_when_the_conflict_policy_changes() {}
+#[test] fn the_fingerprint_changes_when_the_import_mode_changes() {}
+#[test] fn the_fingerprint_is_unchanged_by_run_id_and_timestamps() {}
 #[test] fn the_plan_json_contains_no_row_values() {}
+#[test] fn the_plan_json_contains_no_filter_values() {}
+#[test] fn a_spec_that_does_not_match_the_filter_digest_is_refused() {}
 #[test] fn an_expired_plan_is_refused() {}
 #[test] fn a_mismatched_acknowledgement_is_refused() {}
 #[test] fn an_acknowledgement_for_another_destination_is_refused() {}
@@ -518,7 +572,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement plan, validate, execute, status**
 
-Canonical JSON = sorted keys, no insignificant whitespace, excluding `run_id`, `created_at`, `expires_at`, `plan_fingerprint`. `execute` order: reopen source, `assert_binding(plan.source)`, mask and extract, reopen destination, `assert_binding(plan.destination)`, `policy_check(SafeSyncExecute)` with the session identity, begin the destination transaction, import, commit, write the run table and the audit record. Acknowledgement is compared to the fingerprint and both identity keys.
+Canonical JSON = sorted keys, no insignificant whitespace, `run_id`/`created_at`/`expires_at`/`plan_fingerprint` excluded from the fingerprint document. `filter_digest = HMAC-SHA256(mask_key, "dbpinball/safesync/filter/v1" || 0x1F || schema || 0x1F || table || 0x1F || canonical(filter))`. `execute` requires both the plan and the spec; it recomputes `filter_digest` and refuses a mismatch. Execution order: reopen source, `assert_binding(plan.source)`, mask and extract, reopen destination, `assert_binding(plan.destination)`, `policy_check(SafeSyncExecute)` with the session identity, begin the destination transaction, evaluate idempotency from the run table, import, commit, write the run row and the audit record. Acknowledgement is compared to the fingerprint and both identity keys.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -562,10 +616,12 @@ git commit -m "feat(safesync): add the fingerprinted dry-run plan and run servic
 #[tokio::test] async fn a_non_deferrable_cycle_is_refused_before_any_write() {}
 #[tokio::test] async fn a_non_empty_destination_is_refused_by_default() {}
 #[tokio::test] async fn replace_deletes_only_the_selected_tables() {}
-#[tokio::test] async fn running_the_same_plan_twice_is_a_no_op() {}
+#[tokio::test] async fn running_the_same_plan_twice_is_a_noop() {}
+#[tokio::test] async fn a_completed_run_with_changed_destination_rows_is_destination_drifted() {}
 #[tokio::test] async fn an_interrupted_import_leaves_the_destination_unchanged() {}
 #[tokio::test] async fn schema_drift_is_refused() {}
 #[tokio::test] async fn a_generated_column_is_not_inserted() {}
+#[tokio::test] async fn the_default_import_mode_touches_no_sequence() {}
 #[tokio::test] async fn destination_contents_are_actually_masked() {}
 ```
 
@@ -576,7 +632,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement the importer**
 
-Open one destination transaction. Create `dbpinball_safe_sync_runs` if absent (inside the transaction; a DDL in a transaction is fine in PostgreSQL). Check the run table for the fingerprint: if `completed`, return `already_completed` without writing. Check schema drift against the plan's `schema_hash`. Check the selected tables are empty unless `Replace`. Insert in plan order; `SET CONSTRAINTS ALL DEFERRED` only when the plan says every cycle edge is deferrable. Omit generated columns; insert identity values with `OVERRIDING SYSTEM VALUE` and `setval` where the plan says so. Write the run row, then commit.
+Open one destination transaction. Create `dbpinball_safe_sync_runs` if absent (inside the transaction; a DDL in a transaction is fine in PostgreSQL). Check the run table for the fingerprint: if `completed` and the destination still matches the recorded state, return `already_completed` without writing; if `completed` but the selected tables drifted, refuse `destination_drifted`. Check schema drift against the plan's `schema_hash`. Check the selected tables are empty unless `Replace`. Insert in plan order; `SET CONSTRAINTS ALL DEFERRED` only when the plan says every cycle edge is deferrable. Omit generated columns. **Slice 1 and the default import mode perform no sequence adjustment** (`sequence_adjustment: false`); an identity column is out of scope for Slice 1, and a later milestone must run any `setval` as a separate idempotent step after commit, never claiming it was transactional. Write the run row, then commit. Never use `session_replication_role` or `ALTER TABLE ... DISABLE TRIGGER`.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -614,7 +670,8 @@ Unit (`cli.rs`):
 
 ```rust
 #[test] fn parses_safe_sync_plan_with_spec() {}
-#[test] fn parses_safe_sync_execute_with_ack() {}
+#[test] fn parses_safe_sync_execute_with_ack_and_spec() {}
+#[test] fn execute_without_spec_is_rejected() {}
 #[test] fn rejects_a_password_option() {}
 #[test] fn every_subcommand_has_a_help_line() {}
 ```
@@ -625,6 +682,8 @@ Integration (`safesync_cli_integration.rs`, real databases):
 #[test] fn plan_emits_one_json_envelope() {}
 #[test] fn plan_without_a_tty_and_without_json_is_refused() {}
 #[test] fn execute_without_ack_exits_2() {}
+#[test] fn execute_without_spec_exits_2() {}
+#[test] fn a_spec_that_does_not_match_the_plan_exits_2() {}
 #[test] fn an_unenrolled_destination_exits_4() {}
 #[test] fn an_incomplete_plan_exits_5_with_limit_exceeded() {}
 #[test] fn an_expired_plan_exits_8() {}
@@ -640,7 +699,7 @@ Expected: FAIL — subcommand missing.
 
 - [ ] **Step 3: Implement the CLI**
 
-Add `Command::SafeSync { command: SafeSyncCommand }` with `Inspect`, `Plan`, `Validate`, `Execute`, `Status`, `KeyRotate`. Each arm calls the core service and reproduces exactly one envelope via `print_success`/`print_error`. Add `--ack`, `--replace`, `--yes`, `--estimate`, `--out`. No synchronization logic in the CLI.
+Add `Command::SafeSync { command: SafeSyncCommand }` with `Inspect`, `Plan`, `Validate`, `Execute`, `Status`, `KeyRotate`. Each arm calls the core service and reproduces exactly one envelope via `print_success`/`print_error`. `validate` and `execute` take `--plan` and `--spec` (the plan holds no filter values). Add `--ack`, `--replace`, `--strict-idempotency`, `--yes`, `--estimate`, `--out`. No synchronization logic in the CLI.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -776,16 +835,18 @@ git commit -m "test(safesync): prove the end-to-end masked subset and document M
 
 ## First Vertical Slice (Slice 1)
 
-Before building the full graph, prove the security and correctness spine end to end on **one table with no foreign keys**:
+Slice 1 is specified in `docs/superpowers/plans/2026-11-14-dbpinball-m4-slice-1-brief.md`
+and in spec §16, which carries the 20-row acceptance matrix and 12 negative tests.
+In short: one table with no foreign keys, `public.accounts(id uuid primary key,
+email text, full_name text)`, two isolated disposable clusters, a restricted source
+role, `id → keep` by explicit rule, `email → deterministic_email`,
+`full_name → deterministic_pseudonym`, one destination transaction, and a repeat run
+that is a no-op.
 
-- Source: `public.accounts(id uuid primary key, email text, full_name text)`.
-- Spec: one root, `filter: id eq <uuid>`, `direction: parents`, `depth: 0`.
-- Masking: `email → deterministic_email`, `full_name → deterministic_pseudonym`, `id → keep`.
-- Destination: a second disposable cluster, enrolled `verified_development`.
-
-Slice 1 exercises Task 1 (policy), Task 2 (session binding), Task 4 (single-table extraction), Task 5 (masking), Task 6 (plan/acknowledgement), Task 7 (transactional import) and Task 8 (CLI), in that order, and its acceptance test is the first three end-to-end tests in Task 10. It proves: the source is read-only, the destination is bound and enrolled, masking happens before persistence, the plan carries no values, a repeated run is a no-op, and the destination contains masked rows. It does **not** prove FK traversal or cycles; Task 3 and the remaining Task 4/7 cases prove those next.
-
-When Slice 1 is green, the graph work (Task 3) and the cycle work (Tasks 4 and 7) proceed on the same spine without changing any security decision.
+Slice 1 exercises Task 1 (policy), Task 2 (session binding), Task 4 (single-table
+extraction), Task 5 (masking), Task 6 (plan/acknowledgement/idempotency), Task 7
+(transactional import) and Task 8 (CLI), in that order. It does **not** require the
+graph work (Task 3) or the cycle work, which follow on the same spine.
 
 ## Work-package dependency graph
 

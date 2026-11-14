@@ -231,6 +231,65 @@ The plan records the source identity key. At execute time, the source
 a new plan is required. This is the same rule as the destination, applied to the
 source.
 
+### 4.6 Authorization contract (approved)
+
+The two Safe Sync operations have different authorization needs and must not share
+one decision.
+
+#### `SafeSyncPrepare`
+
+Reading an explicitly authorized source does **not** require destination
+enrollment. It does require all of the following, and fails closed on each:
+
+| Requirement | Enforced by | Refusal code |
+| --- | --- | --- |
+| A source connection is declared | policy | `missing_source` |
+| The source server identified itself | policy | `unverifiable_source` |
+| The source is not the destination | policy | `same_source_and_destination` |
+| The source engine is PostgreSQL | session | `unsupported` / `unsupported_engine` |
+| The source role is not superuser / `rolbypassrls` | session | `source_privileged` |
+| The source role has no write privilege on a selected table | session | `source_privileged` |
+| The session is database-enforced read-only | session | `source_not_read_only` |
+| The extraction scope is declared and catalog-validated | planner | `invalid_identifier` / `unsupported_relation` |
+| Discovery is bounded by the declared limits | planner | `limit_exceeded` |
+| No source write is issued | session + policy | any write is impossible; a bug is `source_write_attempt` |
+
+`evaluate` returns `Allow { code: SourceAuthorized }` when the source is present,
+identified, and not equal to a supplied destination. All the session and planner
+checks are part of `SafeSyncPrepare` authorization even though they are not policy
+inputs, because a policy `Allow` alone is never treated as sufficient.
+
+#### `SafeSyncExecute`
+
+Requires **both** an authorized read-only source session and an enrolled, verified
+development/disposable destination session. Neither the source classification nor
+the operator's acknowledgement is sufficient on its own.
+
+| Requirement | Enforced by | Refusal code |
+| --- | --- | --- |
+| A source identity is present | policy | `missing_source` |
+| A destination identity is present | policy | `missing_destination` |
+| The source server identified itself | policy | `unverifiable_source` |
+| The destination server identified itself | policy | `unverifiable_destination` |
+| Source identity ≠ destination identity | policy | `same_source_and_destination` |
+| Source session is read-only | session | `source_not_read_only` |
+| Destination enrollment matches and is fresh | policy (M3, unchanged) | `not_enrolled` / `destination_changed` / `stale_verification` |
+| Destination category allows writes | policy (M3, unchanged) | `destination_not_allowed` |
+| Destination is not declared production | policy (M3, unchanged) | `protected_source` |
+| Acknowledgement matches the plan and both identities | service | `acknowledgement_mismatch` |
+
+`evaluate` returns `Allow { code: Allowed }` only when the destination checks pass
+exactly as they do for `DatabaseRestore` and `DatabaseCopy`; M3 destination
+verification is not weakened, not re-ordered, and not made optional.
+
+### 4.7 Extraction scope
+
+The source authorization is scoped to the tables the spec names. The planner
+validates every root against the catalog and the relation allowlist, and the
+extractor may read only the columns of those tables plus the parent tables the FK
+graph adds (and only when `direction` permits). A table that is not in the resolved
+plan is never queried, even if the source role could read it.
+
 ---
 
 ## 5. Same-session identity binding
@@ -331,6 +390,46 @@ own identity binding and expiry are the controls.
 
 No retry may reuse a previous authorization without re-running `assert_binding` and
 the policy check.
+
+### 5.7 `BoundSession` contract (final)
+
+One `BoundSession` is created per side per execution. The same authenticated
+`sqlx::PgConnection` is used to:
+
+1. establish the server and database identity (`system_identifier`,
+   `current_database()` and its OID, `current_user`, `pg_backend_pid()`,
+   `pg_stat_activity.backend_start`, `inet_server_addr()`, `inet_server_port()`);
+2. verify the intended database role (superuser / `rolbypassrls` / write privilege
+   / ownership, per §4.1);
+3. enforce the transaction state — the source session opens with
+   `default_transaction_read_only = on` and every extraction transaction is
+   `BEGIN READ ONLY`; the destination session opens read-write and its policy check
+   runs inside the import transaction;
+4. bind the destination policy authorization to the identity just read;
+5. execute every statement of the operation.
+
+Invariants:
+
+- `BoundSession` owns the connection; there is no accessor that returns it to a
+  pool and no `Clone`.
+- `identity()` returns the identity read at open; it is never re-derived from the
+  profile.
+- `assert_binding` compares only `identity_key`. `backend_pid` and `backend_start`
+  are audit fields and legitimately change on reconnect.
+- Any reconnect constructs a new `BoundSession` and therefore a new authorization.
+  There is no code path that reuses an old authorization after a reconnect.
+- The source session's read-only state is asserted at open and re-asserted after
+  every `BEGIN` because a transaction-scoped setting does not survive a new
+  transaction.
+
+Limits, recorded rather than eliminated:
+
+- a malicious server can lie about every identity value it reports;
+- a network path that is already redirected before the first query is undetected;
+- RLS policies and generated-column expressions can call functions with effects
+  outside the read-only transaction, bounded only by the role's privileges;
+- a compromised transport (TLS downgrade or termination) is outside what an
+  application-level identity check can detect.
 
 ---
 
@@ -590,14 +689,99 @@ and encoded to fit the destination type. The same identity and key always produc
 the same value, so a masked primary key and every masked foreign key that
 references it stay joined.
 
-- The mask key is 32 random bytes stored in the OS keyring under service
-  `dbpinball-safe-sync`, account `mask-key:<key_id>`.
+- The mask key is 32 random bytes from a CSPRNG (the OS entropy source via
+  `getrandom`, never `rand::random` seeded from a clock) stored in the OS keyring
+  under service `dbpinball-safe-sync`, account `mask-key:<key_id>`.
 - The key id, not the key, appears in the plan and the audit record.
 - The key never appears in the spec, a CLI argument, a plan file, a log, the audit
   record, the desktop state, or an export.
 - `dbpinball safe-sync key rotate` creates a new key id. Rotating the key changes
   every pseudonym and therefore requires a fresh destination; the plan rejects a
   rotation between plan and execute.
+- Tests inject a synthetic key through an explicit `MaskKeyProvider::ephemeral`
+  constructor compiled only under `cfg(any(test, feature = "test-keys"))`. A test
+  key is never the production key and is never written to the repository.
+
+### 8.4A `development-default@1` (approved first policy)
+
+The first policy is deliberately small. It covers the one table in Slice 1 and
+refuses everything it does not name.
+
+| Table | Column | Type | Disposition | Output |
+| --- | --- | --- | --- | --- |
+| `public.accounts` | `id` | `uuid` | `keep` (explicit, allowed because it is a non-personal surrogate key and the declared row identity) | unchanged UUID |
+| `public.accounts` | `email` | `text` | `deterministic_email` | `<16 base32>@example.invalid` |
+| `public.accounts` | `full_name` | `text` | `deterministic_pseudonym` | `Anon <10 base32>` |
+| any other table | any column | any | none | **refused** (`unmapped_column`) |
+| `public.accounts` | any column not listed | any | none | **refused** (`unmapped_column`) |
+
+Required dispositions, restated as rules:
+
+- `id` is `keep` **only** because the policy explicitly permits it and it is the
+  declared row identity. A UUID that is a natural identifier (for example an email
+  address, or a value derived from PII) is not covered by this rule and must be
+  masked by an explicit rule; absent one, it is refused.
+- `email` is always `deterministic_email`.
+- `full_name` is always `deterministic_pseudonym`.
+- an unexpected column refuses, even if it is nullable, has a default, or looks
+  harmless;
+- a missing mask key refuses (`mask_key_missing`), and the run does not fall back
+  to any unkeyed hash;
+- an invalid or unparsable policy refuses (`mask_policy_invalid`);
+- an unsupported data type refuses (`unsupported_type`).
+
+#### Algorithm
+
+Let `mask_key` be 32 bytes and `identity` be the declared row identity rendered as
+`col1=value1,col2=value2` in primary-key order, NFC-normalised and UTF-8 encoded.
+
+```text
+domain = "dbpinball/safesync/v1"
+material = domain || 0x1F || schema_name || 0x1F || table_name || 0x1F
+           || column_name || 0x1F || identity
+digest = HMAC-SHA256(mask_key, material)            // 32 bytes
+token  = base32_lower_no_padding(digest)            // 52 ASCII chars
+```
+
+- **Synthetic email domain:** `example.invalid`. The reserved `.invalid` TLD
+  guarantees the address can never resolve, so a masked value cannot accidentally
+  deliver mail to a real mailbox.
+- **Domain separation:** `domain`, a `0x1F` separator, and the schema/table/column
+  names are all inside the HMAC input. The same identity value in two different
+  columns or tables therefore produces two different outputs, so a masked value
+  cannot be correlated across fields.
+- **Email:** local part = `token[..16]` (80 bits of digest), domain fixed. Total
+  length 32 characters, within the 254-byte address limit and the 64-byte local-part
+  limit.
+- **Full name:** `"Anon " + token[..10]` (15 ASCII characters).
+- **Type and length compatibility:** if the destination column is shorter than the
+  output, the policy may declare `max_len` for that column, in which case the token
+  is truncated deterministically; otherwise the run refuses
+  (`mask_length_incompatible`). M4 never silently truncates and never pads with
+  original data.
+- **Unicode:** input is NFC-normalised before hashing. Output is pure ASCII, so it
+  is valid in any database encoding and cannot be corrupted by a charset change.
+- **Collisions:** 80 bits for email and 50 bits for the name token. The extractor
+  checks all masked values for uniqueness against every unique key in the selected
+  set; an actual collision refuses (`mask_collision`). The planner warns when the
+  expected collision probability exceeds 1e-6.
+- **Determinism across repeat executions:** the same key id + same identity →
+  the same output. A repeated run of a completed plan is a no-op before any masking
+  is recomputed.
+- **Key rotation:** a new key id changes every output. A plan pinned to the old key
+  id is refused (`mask_key_changed`); the destination must be regenerated into a
+  clean database or schema.
+- **Safe logging:** audit records and errors name the table, column, class and
+  counts. They never contain the source value, the masked value, or the key.
+  `CoverageReport` is the only per-column output and it carries no values.
+
+#### What this policy does not claim
+
+De-identified, not anonymous. A `full_name` pseudonym of 50 bits is not reversible
+from the output without the key, but an attacker who already holds the key can test
+candidate names. The policy therefore also refuses `keep` for email and name, and
+would refuse a pseudonym rule on a low-cardinality column (for example a two-value
+status) because frequency analysis would re-link it.
 
 ### 8.5 Uniqueness and collisions
 
@@ -703,7 +887,9 @@ The plan states which mode produced each number.
 
 ### 10.2 Plan contents
 
-The plan is JSON and contains no row values:
+The plan is JSON. It contains **no row values and no filter values**. Filter values
+live only in the spec the operator controls; the plan carries a keyed digest of
+them so the fingerprint binds the exact selection without storing it.
 
 ```json
 {
@@ -715,28 +901,76 @@ The plan is JSON and contains no row values:
   "plan_fingerprint": "sha256",
   "source":  { "identity_key": "...", "current_user": "...", "engine": "postgres" },
   "destination": { "identity_key": "...", "engine": "postgres", "category": "verified_development" },
+  "selection": {
+    "roots": [
+      { "schema": "public", "table": "accounts",
+        "filter_columns": ["id"], "filter_ops": ["eq"],
+        "filter_digest": "hmac-sha256:...", "contains_values": false }
+    ],
+    "direction": "parents",
+    "depth": 0
+  },
   "tables": [
-    { "schema": "public", "table": "orders", "schema_hash": "sha256",
-      "row_identity": ["order_id"], "rows_estimated": 1, "rls_active": false }
+    { "schema": "public", "table": "accounts", "schema_hash": "sha256",
+      "row_identity": ["id"], "rows_estimated": 1, "rls_active": false }
   ],
-  "graph": { "edges": 4, "cycles": 1, "max_depth_used": 2, "direction": "parents" },
+  "graph": { "edges": 0, "cycles": 0, "max_depth_used": 0, "direction": "parents" },
   "masking": { "policy": "development-default@1", "policy_hash": "sha256",
-               "key_id": "k-...", "columns": 18, "unmapped": 0 },
-  "constraints": { "order": ["public.customers", "public.orders"],
-                   "deferred": ["public.employees"], "cyclic_refused": [] },
+               "key_id": "k-...", "columns": 3, "unmapped": 0 },
+  "import": { "conflict_policy": "refuse", "mode": "single_transaction",
+              "sequence_adjustment": false },
+  "constraints": { "order": ["public.accounts"], "deferred": [], "cyclic_refused": [] },
   "limits": { "max_rows_per_table": 1000, "max_total_rows": 20000,
               "max_depth": 3, "max_bytes": 33554432, "timeout_ms": 60000 },
-  "checks": [ { "limit": "max_total_rows", "observed": 812, "ok": true } ],
+  "checks": [ { "limit": "max_total_rows", "observed": 1, "ok": true } ],
   "complete": true
 }
 ```
 
+`contains_values` is always `false` in M4. It exists so a future milestone cannot add
+values silently.
+
+Because the plan has no filter values, `execute` takes **both** the plan and the
+spec: `execute --plan <file> --spec <file> --ack <fingerprint>`. It re-parses the
+spec, recomputes `filter_digest`, and requires equality. The two files together are
+the execution input; neither alone is sufficient.
+
 ### 10.3 Plan fingerprint
 
-`plan_fingerprint = sha256(canonical_json(plan_without(run_id, created_at,
-expires_at, plan_fingerprint)))`, where canonical JSON sorts keys and uses no
-insignificant whitespace. The fingerprint therefore covers identities, tables,
-graph, limits, policy and completeness.
+```text
+plan_fingerprint = sha256( canonical_json( fingerprint_document ) )
+```
+
+`canonical_json` sorts object keys and emits no insignificant whitespace.
+`fingerprint_document` is the plan with `run_id`, `created_at`, `expires_at` and
+`plan_fingerprint` removed, so the fingerprint is stable for the same plan and
+changes for any other. It binds, explicitly:
+
+| Component | Excluded? | Why |
+| --- | --- | --- |
+| `plan_version` | no | a format change must invalidate a plan |
+| `spec_hash` | no | binds the spec shape |
+| `source.identity_key` | no | binds the source server and database |
+| `destination.identity_key` | no | binds the destination server and database |
+| `selection.roots[].filter_digest` | no | binds the exact filter without storing it |
+| `selection.direction`, `selection.depth` | no | binds the traversal policy |
+| `tables[].schema_hash` | no | binds the catalog shape of every table |
+| `tables[].row_identity` | no | binds how rows are identified |
+| `masking.policy`, `masking.policy_hash`, `masking.key_id` | no | binds the masking behaviour |
+| `import.conflict_policy`, `import.mode`, `import.sequence_adjustment` | no | binds what the destination will do |
+| `limits`, `checks`, `complete` | no | binds the bounds and completeness |
+| `constraints.order`, `constraints.deferred` | no | binds the insertion strategy |
+| `run_id`, `created_at`, `expires_at` | yes | per-execution metadata, not plan content |
+
+The fingerprint is a hex SHA-256. Printing it, storing it in a log, or putting it in
+a PR comment reveals nothing about the data: it is a digest of a document that
+already contains no values.
+
+`filter_digest` is `HMAC-SHA256(mask_key, "dbpinball/safesync/filter/v1" || 0x1F ||
+schema || 0x1F || table || 0x1F || canonical(filter))`. It is keyed so an observer
+who sees two plans cannot brute-force a low-entropy filter value (for example an
+order number) by recomputing an unkeyed hash. A key rotation therefore changes the
+digest, and the plan must be regenerated.
 
 ### 10.4 Acknowledgement
 
@@ -749,14 +983,67 @@ prints the same fingerprint. The acknowledgement is bound to:
 
 An acknowledgement is **not** authorization. The M3/M4 policy still decides, and
 the session binding still must match. A changed plan, a changed destination, or an
-expired plan invalidates the acknowledgement.
+expired plan invalidates the acknowledgement. A mismatched acknowledgement is
+`acknowledgement_mismatch` and exits 2.
 
 ### 10.5 Expiration
 
 Plans expire after `execution.acknowledgement_ttl_ms` (default 15 minutes). An
-expired plan is refused (`plan_expired`) and must be regenerated. The expiry is
-deliberately shorter than M3's 10-minute freshness default only as a bound; it is
-not the security control.
+expired plan is refused (`plan_expired`, exit 8) and must be regenerated. The
+expiry is deliberately shorter than M3's 10-minute freshness default only as a
+bound; it is not the security control.
+
+### 10.6 Idempotency contract
+
+A repeated execution is a **no-op only when the recorded run result and the expected
+destination state are still valid**. M4 never silently ignores destination drift.
+
+The destination records, inside the data transaction, a row in
+`dbpinball_safe_sync_runs`:
+
+```text
+run_id uuid primary key,
+plan_fingerprint text not null,
+spec_hash text not null,
+source_identity_key text not null,
+destination_identity_key text not null,
+schema_hash text not null,
+masking_policy text not null,
+mask_key_id text not null,
+conflict_policy text not null,
+import_mode text not null,
+status text not null,             -- completed | rolled_back
+rows_written bigint not null,
+started_at timestamptz not null,
+finished_at timestamptz not null
+```
+
+| Condition | Behaviour | Exit / detail |
+| --- | --- | --- |
+| Completed run, identical fingerprint, destination tables still match the recorded state | **No-op**; report `already_completed` | 0 |
+| Completed run, identical fingerprint, destination rows were changed since the run | Refuse; `destination_drifted` | 8 |
+| Completed run, different fingerprint | Refuse; `destination_not_empty` unless `--replace` | 8 |
+| Failed run (rolled back) | Nothing persisted; retry allowed with the same plan if identities still match | — |
+| Interrupted run (process died) | Destination transaction rolled back; destination unchanged; retry allowed | — |
+| Destination identity changed | Refuse; `destination_changed` | 4/8 |
+| Source identity changed | Refuse; `source_changed` | 8 |
+| Schema changed (either side) | Refuse; `schema_drift` | 8 |
+| Masking policy changed | Refuse; `mask_policy_changed` | 8 |
+| Mask key changed | Refuse; `mask_key_changed` | 8 |
+| Plan expired | Refuse; `plan_expired` | 8 |
+| Acknowledgement mismatch | Refuse; `acknowledgement_mismatch` | 2 |
+
+"Destination still matches the recorded state" means: the selected tables contain
+exactly the rows the completed run recorded (same row count and the run's
+`run_id` marker is still present in `dbpinball_safe_sync_runs`), and no writer
+changed them. M4 does not attempt a full table checksum by default; it records the
+row count per table and the run marker. A change that keeps the row count identical
+and does not touch the marker is not detected by the default check, which is
+recorded as a residual risk. `--strict-idempotency` compares a per-table content
+digest instead and is available for operators who need it.
+
+The no-op decision is revalidated on every execution; a stale local journal never
+authorizes a skip.
 
 ---
 
@@ -795,12 +1082,9 @@ destination when it disagrees.
 
 ### 12.1 Transaction model
 
-- **Default:** one destination transaction for the whole import. All-or-nothing.
-- **Savepoints:** one savepoint per table, used only to report which table failed;
-  the transaction still rolls back as a whole.
-- **Batches:** `--batch` is opt-in, not atomic, and requires a durable run journal.
-  A batch run records the last committed table in the destination run table and can
-  resume; it is never the default and never claimed to be atomic.
+See §12.5 for the approved model. In one line: one destination transaction by
+default, savepoints only for reporting, and `--batch` is opt-in, non-atomic and
+never described as transactional. §12.4 covers sequences.
 
 ### 12.2 Failure matrix
 
@@ -831,6 +1115,43 @@ destination when it disagrees.
   run pass;
 - never report success for a run whose plan was incomplete.
 
+### 12.4 Sequences (approved caveat)
+
+PostgreSQL sequence operations are **not** rollback-atomic. `nextval()` and
+`setval()` change sequence state outside the transaction: a rollback restores table
+rows but leaves the sequence advanced or reset. `ALTER SEQUENCE ... RESTART` is
+transactional, but it also blocks concurrent `nextval` callers and can hand out a
+value that already exists if the sequence is not the only allocator.
+
+Consequences, fixed for M4:
+
+- **Slice 1 does not touch sequences at all.** `public.accounts.id` is a `uuid`
+  supplied by the application, not a `serial` or identity column, so no sequence is
+  involved and the import is fully transactional.
+- **M4.6 default import mode is `single_transaction` and `sequence_adjustment:
+  false`.** The plan records both, and both are part of the fingerprint.
+- A later milestone that imports into `GENERATED ... AS IDENTITY` columns must treat
+  the sequence step as an independent, idempotent operation: record the intended
+  sequence value in the run table, apply it after a successful data commit, and
+  re-apply it on `status` if it did not complete. It must never claim that
+  `setval()` participated in the data transaction.
+- M4 must not claim "atomic import" for any run whose plan has
+  `sequence_adjustment: true`. The correct description is "transactional row
+  writes with a separate, idempotent sequence step".
+
+### 12.5 Transaction model, restated
+
+- **Default (Slice 1 and M4.6):** one destination transaction for the whole import,
+  `BEGIN` before the destination policy check, `COMMIT` only after every table and
+  the run row are written. Any failure rolls the transaction back.
+- **Savepoints:** one per table, used only to report which table failed; the whole
+  transaction still rolls back.
+- **Batches (`--batch`):** opt-in, one transaction per batch, **not atomic**. It is
+  never described as transactional, and it requires the durable run journal plus a
+  `status` reconciliation to resume.
+- A global constraint-disable operation (`session_replication_role = replica`,
+  `ALTER TABLE ... DISABLE TRIGGER ALL`) is never used, in any mode.
+
 ---
 
 ## 13. CLI contracts
@@ -840,11 +1161,15 @@ destination when it disagrees.
 ```bash
 dbpinball safe-sync inspect --source <id> --json
 dbpinball safe-sync plan    --spec <file> [--estimate] --json
-dbpinball safe-sync validate --plan <file> --json
-dbpinball safe-sync execute --plan <file> --ack <fingerprint> [--replace] --json
+dbpinball safe-sync validate --plan <file> --spec <file> --json
+dbpinball safe-sync execute --plan <file> --spec <file> --ack <fingerprint> [--replace] --json
 dbpinball safe-sync status  --run <id> --json
 dbpinball safe-sync key rotate --json
 ```
+
+`validate` and `execute` take the spec as well as the plan because the plan
+deliberately stores no filter values. The spec is the operator's input; the plan is
+the reviewed artifact. Together they are the execution input.
 
 All commands call `dbpinball_core::safesync` services. No synchronization logic
 lives in the CLI.
@@ -855,8 +1180,8 @@ lives in the CLI.
 | --- | --- | --- | --- |
 | `inspect` | `--source` | `--json` | nothing |
 | `plan` | `--spec` | `--estimate`, `--out <file>`, `--json` | the plan file |
-| `validate` | `--plan` | `--json` | nothing |
-| `execute` | `--plan`, acknowledgement | `--replace`, `--yes`, `--json` | destination data, run table, audit |
+| `validate` | `--plan`, `--spec` | `--json` | nothing |
+| `execute` | `--plan`, `--spec`, acknowledgement | `--replace`, `--yes`, `--strict-idempotency`, `--json` | destination data, run table, audit |
 | `status` | `--run` | `--json` | nothing |
 | `key rotate` | — | `--json` | a new keyring entry |
 
@@ -892,9 +1217,12 @@ Exit codes reuse the documented map:
 | 9 | busy | concurrent run lock |
 
 The Safe Sync detail object carries a stable `safesync_code` (for example
-`limit_exceeded`, `unmapped_column`, `mask_collision`, `destination_not_empty`,
-`plan_expired`, `schema_drift`, `source_privileged`, `unsupported_engine`) so a
-script can branch without parsing prose.
+`limit_exceeded`, `unmapped_column`, `mask_collision`, `mask_key_missing`,
+`mask_policy_invalid`, `mask_key_changed`, `mask_policy_changed`,
+`destination_not_empty`, `destination_drifted`, `plan_expired`,
+`acknowledgement_mismatch`, `schema_drift`, `source_privileged`,
+`source_not_read_only`, `unsupported_type`, `unsupported_relation`,
+`unsupported_engine`) so a script can branch without parsing prose.
 
 ### 13.5 Interaction, cancellation, progress
 
@@ -959,3 +1287,94 @@ M4 documents these and does not claim to eliminate them:
 9. **No background or incremental sync.** M4 is a one-shot workflow. It is not
    replication, and it does not track source changes.
 10. **Redis/other stores.** M4 covers PostgreSQL relational data only.
+
+---
+
+## 16. Slice 1 acceptance specification (approved)
+
+Slice 1 is the first runtime slice and the only thing that may be implemented next.
+It is one PostgreSQL table with no foreign keys, on two isolated disposable
+clusters.
+
+### 16.1 Fixture
+
+```sql
+-- source cluster
+CREATE TABLE public.accounts (
+  id uuid PRIMARY KEY,
+  email text NOT NULL,
+  full_name text NOT NULL
+);
+-- three synthetic rows; emails use example.com only
+
+-- destination cluster
+CREATE TABLE public.accounts (
+  id uuid PRIMARY KEY,
+  email text NOT NULL,
+  full_name text NOT NULL
+);
+```
+
+Two separate clusters (different `system_identifier`), a restricted source role
+(`SELECT` only, not superuser, not `rolbypassrls`), and an enrolled
+`verified_development` destination. All data is synthetic.
+
+### 16.2 Acceptance matrix
+
+Each row is one test that asserts real behaviour, not a command's exit code alone.
+Tests marked *dest* inspect the actual destination rows.
+
+| # | Requirement | Test | Assertion |
+| --- | --- | --- | --- |
+| 1 | Source role is restricted | `slice1_source_role_is_restricted` | `rolsuper=false`, `rolbypassrls=false`, no write privilege on `public.accounts`; a role with `UPDATE` is refused |
+| 2 | Source transaction is read-only | `slice1_source_is_read_only` | `INSERT` on the source session fails with SQLSTATE `25006` |
+| 3 | Source identity bound to the extraction session | `slice1_source_identity_is_bound` | `plan.source.identity_key == session.identity_key`; a session from the other cluster fails `assert_binding` |
+| 4 | Destination identity bound to the write session | `slice1_destination_identity_is_bound` | the policy is evaluated with the execution session's identity; a session from the other cluster is `destination_changed` |
+| 5 | Unknown destination refused | `slice1_unenrolled_destination_exits_4` | exit 4, `not_enrolled`, zero rows written |
+| 6 | Protected destination refused | `slice1_production_destination_exits_4` | `production_like` enrollment → `destination_not_allowed` |
+| 7 | Same source/destination refused | `slice1_same_database_exits_4` | identical identity keys → `same_source_and_destination` |
+| 8 | Selection is explicitly bounded | `slice1_limits_are_enforced` | a spec exceeding `max_total_rows` produces `complete=false` and `limit_exceeded`, zero rows written |
+| 9 | Email masked before persistence | `slice1_email_is_masked` *(dest)* | every destination email matches `^[a-z2-7]{16}@example\.invalid$` and none equals a source email |
+| 10 | Full name masked before persistence | `slice1_full_name_is_masked` *(dest)* | every destination name matches `^Anon [a-z2-7]{10}$` and none equals a source name |
+| 11 | UUID handling follows policy | `slice1_uuid_is_kept_by_explicit_rule` *(dest)* | source and destination `id` values are equal, and a policy that omits the `id` rule refuses |
+| 12 | No plaintext in intermediate files | `slice1_no_plaintext_artifacts` | after plan+execute, no file under the config dir contains a source email or name |
+| 13 | Dry-run has no sensitive values | `slice1_plan_has_no_values` | the plan JSON does not contain any source email, name, or UUID, and `contains_values=false` |
+| 14 | CLI JSON has no secrets | `slice1_cli_output_has_no_secrets` | no password, mask key, source email, or source name appears in stdout or stderr |
+| 15 | Destination import is transactional | `slice1_import_is_transactional` | a failure injected after the first row leaves zero destination rows |
+| 16 | Completed repeat run is idempotent | `slice1_repeat_run_is_noop` *(dest)* | second execute exits 0 with `already_completed`, row count unchanged |
+| 17 | Schema drift is detected | `slice1_schema_drift_is_refused` | a destination column type change → `schema_drift`, zero rows written |
+| 18 | A failed run never reports success | `slice1_failure_is_not_success` | a forced mask collision exits 5 and the envelope is `ok:false` |
+| 19 | Real destination contents inspected | all *(dest)* tests | queries run against the destination, not the CLI response |
+| 20 | No source mutations | `slice1_source_is_unchanged` | a row-by-row snapshot (including `xmin`-independent content hash) is identical before and after |
+
+### 16.3 Negative tests (deliberate refusals)
+
+Each must fail closed, with the stated code, and write nothing:
+
+| Test | Condition | Expected |
+| --- | --- | --- |
+| `slice1_password_argument_is_rejected` | `--password` passed | exit 2, clap error |
+| `slice1_unknown_spec_field_is_rejected` | an extra YAML key | exit 2, `usage` |
+| `slice1_missing_mask_key_is_refused` | keyring entry removed | exit 5, `mask_key_missing` |
+| `slice1_invalid_policy_is_refused` | policy version unknown | exit 5, `mask_policy_invalid` |
+| `slice1_unmapped_column_is_refused` | an extra `phone` column without a rule | exit 5, `unmapped_column` |
+| `slice1_unsupported_type_is_refused` | a `jsonb` column without a rule | exit 5, `unsupported_type` |
+| `slice1_ack_mismatch_is_refused` | wrong fingerprint | exit 2, `acknowledgement_mismatch` |
+| `slice1_expired_plan_is_refused` | TTL passed | exit 8, `plan_expired` |
+| `slice1_destination_not_empty_is_refused` | pre-existing row | exit 8, `destination_not_empty` |
+| `slice1_source_privileged_is_refused` | superuser source role | exit 5, `source_privileged` |
+| `slice1_view_is_refused` | a view in the selection | exit 5, `unsupported_relation` |
+| `slice1_mysql_source_is_refused` | MySQL profile | exit 5, `unsupported_engine` |
+
+### 16.4 Definition of done for Slice 1
+
+- all 20 acceptance rows and all 12 negative tests pass against two real disposable
+  PostgreSQL clusters, in CI, with a non-zero test count;
+- no source row is modified;
+- the destination contains masked rows only;
+- the plan contains no values;
+- a repeat run is a no-op;
+- the docs still say Safe Sync is planned;
+- `cargo fmt`, `clippy -D warnings`, the workspace tests, the boundary check and the
+  docs checks pass.
+

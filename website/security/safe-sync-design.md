@@ -74,13 +74,16 @@ than hidden.
 
 ## A plan you can review before anything is written
 
-`plan` produces a JSON document with no row values: the source and destination
-identities, the selected tables, the foreign-key graph, the row estimates, the
-masking coverage, the constraint strategy, the limits that were checked, and a
-plan fingerprint. `execute` requires that fingerprint as an acknowledgement.
+`plan` produces a JSON document with no row values and no filter values: the
+source and destination identities, the selected tables, the foreign-key graph, the
+row estimates, the masking coverage, the constraint strategy, the limits that were
+checked, and a plan fingerprint. Filter values stay in the spec you control; the
+plan carries only a keyed digest of them.
 
-The acknowledgement is not authorization. The security policy still decides, and
-the destination identity is still checked on the execution session.
+`execute` takes both the plan and the spec and requires the plan fingerprint as an
+acknowledgement. The acknowledgement is not authorization. The security policy
+still decides, and the destination identity is still checked on the execution
+session.
 
 ## What happens when something is wrong
 
@@ -99,6 +102,11 @@ the destination identity is still checked on the execution session.
 Safe Sync will be built in the Rust core first and exposed through the CLI, so it
 can be tested without the desktop. The desktop will be a thin adapter over the same
 core services, with no UI-only security decision.
+
+The first implementation step is deliberately small: one table, no foreign keys,
+two isolated PostgreSQL clusters, and a mandatory masking policy with an explicit
+rule for every column. Relationship traversal and cyclic foreign keys come after
+that spine is proven.
 
 ## Related
 
