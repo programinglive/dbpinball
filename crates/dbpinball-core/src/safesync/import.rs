@@ -18,6 +18,7 @@ use crate::safesync::mask::{hex_lower, MaskedValue};
 use crate::safesync::plan::DryRunPlan;
 use crate::safesync::planner::{quote_ident, TableRows};
 use crate::safesync::session::BoundSession;
+use crate::safesync::spec::QualifiedName;
 
 /// The destination run table. It is created inside the data transaction.
 pub const RUN_TABLE: &str = "public.dbpinball_safe_sync_runs";
@@ -65,6 +66,12 @@ pub async fn run(
     policy: ConflictPolicy,
     cancel: Arc<AtomicBool>,
 ) -> Result<ImportReport, CoreError> {
+    // The run table is created in autocommit before the data transaction. It is
+    // its own transaction, so a failed CREATE leaves the connection usable and
+    // the session lock is released cleanly; it also keeps the DDL out of the
+    // data transaction.
+    setup_run_table(session).await?;
+
     session.begin_destination_transaction().await?;
 
     match run_inner(session, plan, tables, policy, &cancel).await {
@@ -87,6 +94,25 @@ pub async fn run(
 /// A session-scoped advisory lock used only to serialise the run-table DDL.
 const RUN_TABLE_LOCK_KEY: i64 = 0x6470_6269_6e62_6c31; // "dpbinbl1"
 
+/// Create the run table under a short session lock, outside any data
+/// transaction.
+async fn setup_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(RUN_TABLE_LOCK_KEY)
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+
+    let setup = ensure_run_table(session).await;
+
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(RUN_TABLE_LOCK_KEY)
+        .execute(&mut *session.connection())
+        .await;
+
+    setup
+}
+
 /// A 64-bit lock key derived from the plan fingerprint.
 ///
 /// Scope: the destination database, for this plan. Taken as a transaction-scoped
@@ -106,21 +132,6 @@ async fn run_inner(
     policy: ConflictPolicy,
     cancel: &Arc<AtomicBool>,
 ) -> Result<ImportReport, CoreError> {
-    // Two concurrent first-time runs could race on `CREATE TABLE IF NOT EXISTS`.
-    // A short session lock makes that setup single-writer; the connection drop
-    // path releases it even if this process dies.
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(RUN_TABLE_LOCK_KEY)
-        .execute(&mut *session.connection())
-        .await
-        .map_err(connection_error)?;
-    let setup = ensure_run_table(session).await;
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(RUN_TABLE_LOCK_KEY)
-        .execute(&mut *session.connection())
-        .await;
-    setup?;
-
     // Serialize concurrent runs of the same plan. The lock is transaction-scoped,
     // so it is released by the commit or rollback at the end of `run`.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -141,11 +152,17 @@ async fn run_inner(
 
     // Lock the selected tables so the integrity check and the write see one
     // stable state. `SHARE ROW EXCLUSIVE` blocks other writers, not readers.
-    for table in tables {
+    //
+    // The order is sorted, not the plan order: two plans with the same tables in
+    // a different order must still take their locks in one canonical order or
+    // they can deadlock. The insert order stays as the plan defines it.
+    let mut locked: Vec<&QualifiedName> = tables.iter().map(|table| &table.table).collect();
+    locked.sort_by(|left, right| (&left.schema, &left.table).cmp(&(&right.schema, &right.table)));
+    for table in locked {
         let statement = format!(
             "LOCK TABLE {}.{} IN SHARE ROW EXCLUSIVE MODE",
-            quote_ident(&table.table.schema),
-            quote_ident(&table.table.table)
+            quote_ident(&table.schema),
+            quote_ident(&table.table)
         );
         sqlx::query(&statement)
             .execute(&mut *session.connection())
@@ -424,8 +441,25 @@ async fn destination_digest(
         for row in rows {
             hasher.update(b"row");
             for index in 0..table.columns.len() {
-                let value: Option<String> = row.try_get(index).unwrap_or(None);
-                push_field(&mut hasher, value.as_deref().unwrap_or(""));
+                let value: Option<String> = row.try_get(index).map_err(|error| {
+                    CoreError::with_detail(
+                        ErrorCode::Operation,
+                        format!("a destination value could not be read: {error}"),
+                        "destination_value_unreadable",
+                    )
+                })?;
+                // Distinguish SQL NULL from an empty string; otherwise a NULL
+                // that became '' would hash identically and look unchanged.
+                match value {
+                    Some(value) => {
+                        hasher.update([1u8]);
+                        push_field(&mut hasher, &value);
+                    }
+                    None => {
+                        hasher.update([0u8]);
+                        hasher.update(0u64.to_le_bytes());
+                    }
+                }
             }
             total += 1;
         }

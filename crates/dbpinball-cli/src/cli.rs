@@ -92,6 +92,9 @@ pub enum SafeSyncCommand {
         /// Read row counts as an estimate. Never returns values.
         #[arg(long)]
         estimate: bool,
+        /// Record the replace conflict policy in the plan.
+        #[arg(long)]
+        replace: bool,
         /// Also write the plan JSON to this path.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -363,11 +366,13 @@ mod tests {
                     SafeSyncCommand::Plan {
                         spec,
                         estimate,
+                        replace,
                         out,
                     },
             } => {
                 assert_eq!(spec.to_string_lossy(), "spec.yaml");
                 assert!(estimate);
+                assert!(!replace);
                 assert_eq!(out.unwrap().to_string_lossy(), "plan.json");
             }
             other => panic!("unexpected command: {other:?}"),

@@ -499,6 +499,7 @@ async fn an_unenrolled_destination_is_refused() {
         &key_store(),
         now_ms(),
         false,
+        false,
     )
     .await
     .unwrap_err();
@@ -542,6 +543,7 @@ async fn an_enrolled_destination_produces_a_value_free_plan() {
         &store,
         &key_store(),
         now_ms(),
+        false,
         false,
     )
     .await
@@ -603,6 +605,7 @@ async fn the_plan_fingerprint_is_reproducible() {
         &key_store(),
         now_ms(),
         false,
+        false,
     )
     .await
     .expect("plan");
@@ -615,6 +618,7 @@ async fn the_plan_fingerprint_is_reproducible() {
         &store,
         &key_store(),
         now_ms(),
+        false,
         false,
     )
     .await
@@ -669,6 +673,7 @@ async fn the_selection_bound_is_enforced() {
         &key_store(),
         now_ms(),
         true,
+        false,
     )
     .await
     .unwrap_err();
@@ -712,6 +717,7 @@ async fn an_estimate_counts_rows_without_returning_values() {
         &key_store(),
         now_ms(),
         true,
+        false,
     )
     .await
     .expect("plan");
@@ -762,6 +768,7 @@ async fn the_same_database_as_source_and_destination_is_refused() {
         &key_store(),
         now_ms(),
         false,
+        false,
     )
     .await
     .unwrap_err();
@@ -804,6 +811,7 @@ async fn a_tampered_spec_is_refused_at_validate() {
         &store,
         &key_store(),
         now_ms(),
+        false,
         false,
     )
     .await

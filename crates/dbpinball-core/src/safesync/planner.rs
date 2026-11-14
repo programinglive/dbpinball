@@ -212,7 +212,11 @@ pub async fn extract_table(
 
             if table.row_identity.contains(&column.name) {
                 let rendered = masked.as_text().unwrap_or("").to_string();
-                identity_parts.push(format!("{}={}", column.name, rendered));
+                identity_parts.push(format!(
+                    "{}={}",
+                    column.name,
+                    crate::safesync::mask::normalize_identity(&rendered)
+                ));
             }
 
             if let Some(text) = masked.as_text() {

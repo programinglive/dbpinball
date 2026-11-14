@@ -1153,16 +1153,29 @@ async fn replace_does_not_touch_unrelated_tables() {
     .await
     .unwrap();
 
-    let (_envelope, plan_path) = plan(
+    // A destructive plan must be produced with `--replace`; a plan reviewed as
+    // non-destructive refuses the flag at execute time.
+    let spec = spec_file(&config, "0b9f4c3e-0000-0000-0000-000000000001");
+    let plan_path = config.join("plan.json");
+    let planned = cli(
         &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--replace",
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
         &source,
         &destination,
-        "0b9f4c3e-0000-0000-0000-000000000001",
     );
+    assert_eq!(code(&planned), 0);
     let plan_json: Value =
         serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
     let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
-    let spec = config.join("spec.yaml");
+    assert_eq!(plan_json["import"]["conflict_policy"], "replace");
 
     let output = cli(
         &config,
@@ -1218,4 +1231,156 @@ async fn the_environment_key_source_cannot_rotate() {
     let output = cli(&config, &["safe-sync", "key-rotate"], &source, &destination);
     assert_eq!(code(&output), 5);
     assert_eq!(envelope(&output)["error"]["detail"], "mask_key_read_only");
+}
+
+#[tokio::test]
+async fn a_tampered_spec_is_refused_at_execute() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    // Replace the reviewed filter with a different row. The plan fingerprint is
+    // unchanged, so only the spec-to-plan binding can catch this.
+    let spec = spec_file(&config, "0b9f4c3e-0000-0000-0000-000000000002");
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(code(&output), 2);
+    assert_eq!(envelope(&output)["error"]["detail"], "spec_plan_mismatch");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+}
+
+#[tokio::test]
+async fn a_tampered_plan_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let mut plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    // Edit a field without recomputing the fingerprint.
+    plan_json["tables"][0]["schema_hash"] = Value::from("tampered");
+    std::fs::write(&plan_path, serde_json::to_string(&plan_json).unwrap()).unwrap();
+
+    let spec = config.join("spec.yaml");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(code(&output), 8);
+    assert_eq!(envelope(&output)["error"]["detail"], "plan_tampered");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+}
+
+#[tokio::test]
+async fn replace_requires_a_replace_plan() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    // The plan records `refuse`; `--replace` must be refused.
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--replace",
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(code(&output), 2);
+    assert_eq!(
+        envelope(&output)["error"]["detail"],
+        "conflict_policy_mismatch"
+    );
 }

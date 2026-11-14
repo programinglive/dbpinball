@@ -77,6 +77,7 @@ pub async fn plan(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
     estimate: bool,
+    replace: bool,
 ) -> Result<DryRunPlan, CoreError> {
     spec.validate()?;
     let masker = masker_for(spec, keys)?;
@@ -120,7 +121,7 @@ pub async fn plan(
         now_ms,
     )?;
 
-    DryRunPlan::build(
+    let mut plan = DryRunPlan::build(
         spec,
         source_session.identity(),
         destination_session.identity(),
@@ -129,7 +130,16 @@ pub async fn plan(
         &masker,
         &estimates,
         now_ms,
-    )
+    )?;
+
+    // The conflict policy is the reviewed contract, so record it in the plan and
+    // bind it into the fingerprint.
+    if replace {
+        plan.import.conflict_policy = "replace".to_string();
+        plan.plan_fingerprint = plan.fingerprint();
+    }
+
+    Ok(plan)
 }
 
 /// Re-check a plan against live identities, the catalogue and the policy.
@@ -144,6 +154,14 @@ pub async fn validate(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
+    if plan.fingerprint() != plan.plan_fingerprint {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the plan file was modified after it was produced",
+            "plan_tampered",
+        ));
+    }
+
     if plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -153,6 +171,14 @@ pub async fn validate(
     }
 
     let masker = masker_for(spec, keys)?;
+
+    if masker.policy().hash != plan.masking.policy_hash {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking policy changed since the plan was made",
+            "mask_policy_changed",
+        ));
+    }
     let root_tables = root_tables(spec)?;
 
     let mut source_session =
@@ -351,6 +377,17 @@ pub async fn execute(
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
 
+    // The plan file is the reviewed contract. Recompute its fingerprint so a
+    // hand-edited plan cannot silently change the schema hash, key id or
+    // conflict policy under the fingerprint the operator acknowledged.
+    if request.plan.fingerprint() != request.plan.plan_fingerprint {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the plan file was modified after it was produced",
+            "plan_tampered",
+        ));
+    }
+
     if request.plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -379,13 +416,32 @@ pub async fn execute(
         ));
     }
 
+    if masker.policy().hash != request.plan.masking.policy_hash {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking policy changed since the plan was made",
+            "mask_policy_changed",
+        ));
+    }
+
+    // The conflict policy is part of the reviewed plan. A plan reviewed as
+    // non-destructive cannot be run with `--replace`.
+    let plan_replaces = request.plan.import.conflict_policy == "replace";
+    if request.replace != plan_replaces {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            "the conflict policy does not match the plan",
+            "conflict_policy_mismatch",
+        ));
+    }
+
     let root_tables = root_tables(request.spec)?;
 
     let mut source_session = BoundSession::open(
         SessionRole::Source,
         request.source,
         credentials,
-        &request.spec.limits,
+        &request.plan.limits,
     )
     .await?;
     assert_identity(
@@ -395,13 +451,22 @@ pub async fn execute(
     )?;
     source_session.assert_source_role(&root_tables).await?;
 
+    // The specification is not trusted on its own. `planner::build` refuses a
+    // non-zero depth or child traversal, and the resulting contract must match
+    // the reviewed plan byte for byte.
+    let selection = planner::build(&mut source_session, request.spec, &masker).await?;
+    if crate::safesync::plan::spec_hash(request.spec, &selection) != request.plan.spec_hash {
+        return Err(filter_mismatch("the specification does not match the plan"));
+    }
+    check_filter_digests(request.plan, request.spec, &masker)?;
+
     let mut total_rows = 0u64;
     let mut total_bytes = 0u64;
     let mut extracted = Vec::new();
 
     for root in &request.spec.selection.roots {
         let name = QualifiedName::parse(&root.table)?;
-        let Some(table) = request
+        let Some(planned) = request
             .plan
             .tables
             .iter()
@@ -412,9 +477,16 @@ pub async fn execute(
             ));
         };
 
-        let info = crate::safesync::graph::inspect_table(&mut source_session, &name).await?;
+        let Some(info) = selection
+            .tables
+            .iter()
+            .find(|table| table.schema == name.schema && table.table == name.table)
+        else {
+            return Err(filter_mismatch("the specification does not match the plan"));
+        };
+
         // The plan's schema hash is the contract; refuse a source that changed.
-        if info.schema_hash != table.schema_hash {
+        if info.schema_hash != planned.schema_hash {
             return Err(CoreError::with_detail(
                 ErrorCode::Conflict,
                 format!("the schema of {name} changed since the plan was made"),
@@ -432,22 +504,22 @@ pub async fn execute(
 
         let rows = planner::extract_table(
             &mut source_session,
-            &info,
+            info,
             root,
             &masker,
-            &request.spec.limits,
+            &request.plan.limits,
         )
         .await?;
         total_rows = total_rows.saturating_add(rows.row_count());
         total_bytes = total_bytes.saturating_add(rows.total_bytes);
-        if total_rows > request.spec.limits.max_total_rows {
+        if total_rows > request.plan.limits.max_total_rows {
             return Err(CoreError::with_detail(
                 ErrorCode::Operation,
                 "the selection exceeded max_total_rows",
                 "limit_exceeded",
             ));
         }
-        if total_bytes > request.spec.limits.max_bytes {
+        if total_bytes > request.plan.limits.max_bytes {
             return Err(CoreError::with_detail(
                 ErrorCode::Operation,
                 "the selection exceeded max_bytes",
@@ -463,7 +535,7 @@ pub async fn execute(
         SessionRole::Destination,
         request.destination,
         credentials,
-        &request.spec.limits,
+        &request.plan.limits,
     )
     .await?;
     assert_identity(
@@ -482,7 +554,7 @@ pub async fn execute(
         now_ms,
     )?;
 
-    let policy = if request.replace {
+    let policy = if plan_replaces {
         ConflictPolicy::Replace
     } else {
         ConflictPolicy::Refuse

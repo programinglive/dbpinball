@@ -27,8 +27,9 @@ pub async fn run(cli: &Cli, command: &SafeSyncCommand) -> Result<i32, CoreError>
         SafeSyncCommand::Plan {
             spec,
             estimate,
+            replace,
             out,
-        } => plan(cli, spec, *estimate, out.as_deref()).await,
+        } => plan(cli, spec, *estimate, *replace, out.as_deref()).await,
         SafeSyncCommand::Validate { plan, spec } => validate(cli, plan, spec).await,
         SafeSyncCommand::Execute {
             plan,
@@ -107,6 +108,7 @@ async fn plan(
     cli: &Cli,
     spec_path: &Path,
     estimate: bool,
+    replace: bool,
     out: Option<&Path>,
 ) -> Result<i32, CoreError> {
     let spec = read_spec(spec_path)?;
@@ -125,6 +127,7 @@ async fn plan(
         keys.as_ref(),
         now_ms(),
         estimate,
+        replace,
     )
     .await?;
 
