@@ -784,6 +784,144 @@ async fn a_non_postgres_source_is_refused() {
 }
 
 #[tokio::test]
+async fn a_failed_insert_rolls_back_the_destination() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    // A destination constraint rejects the masked row during the insert, after
+    // the transaction has begun. The constraint is not part of the schema hash,
+    // so this reaches the insert rather than failing the drift check.
+    let mut connection = connect(&destination).await;
+    sqlx::query(
+        "ALTER TABLE public.accounts ADD CONSTRAINT m4_email_domain CHECK (email LIKE '%@example.com')",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(code(&output), 5);
+    assert_eq!(
+        envelope(&output)["error"]["detail"],
+        "destination_import_failed"
+    );
+
+    // The failed transaction left nothing behind.
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+
+    sqlx::query("ALTER TABLE public.accounts DROP CONSTRAINT m4_email_domain")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_source_is_never_mutated() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+
+    let mut source_connection = connect(&source).await;
+    let before: (i64,) = sqlx::query_as("SELECT count(*) FROM public.accounts")
+        .fetch_one(&mut source_connection)
+        .await
+        .unwrap();
+    let before_rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id::text, email, full_name FROM public.accounts ORDER BY id")
+            .fetch_all(&mut source_connection)
+            .await
+            .unwrap();
+
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    let spec = config.join("spec.yaml");
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(code(&output), 0);
+
+    let after: (i64,) = sqlx::query_as("SELECT count(*) FROM public.accounts")
+        .fetch_one(&mut source_connection)
+        .await
+        .unwrap();
+    let after_rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id::text, email, full_name FROM public.accounts ORDER BY id")
+            .fetch_all(&mut source_connection)
+            .await
+            .unwrap();
+
+    assert_eq!(before, after);
+    assert_eq!(before_rows, after_rows);
+}
+
+#[tokio::test]
 async fn cli_outputs_contain_no_secrets_or_source_values() {
     let _guard = serial().lock().await;
     let (Some(source), Some(destination)) = (
@@ -837,4 +975,18 @@ async fn cli_outputs_contain_no_secrets_or_source_values() {
     assert!(!combined.contains(&source.password));
     assert!(!combined.contains(KEY_HEX));
     assert!(!combined.contains("0b9f4c3e-0000-0000-0000-000000000001"));
+
+    // No plaintext artifact anywhere under the config directory, including the
+    // audit journal and the plan file.
+    let runs = config.join("safe-sync").join("runs");
+    for entry in std::fs::read_dir(&runs).unwrap() {
+        let path = entry.unwrap().path();
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(!body.contains("alice@example.com"), "artifact: {path:?}");
+        assert!(!body.contains("Alice Example"), "artifact: {path:?}");
+        assert!(!body.contains(KEY_HEX), "artifact: {path:?}");
+    }
+    let plan_body = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(!plan_body.contains("alice@example.com"));
+    assert!(!plan_body.contains("0b9f4c3e-0000-0000-0000-000000000001"));
 }
