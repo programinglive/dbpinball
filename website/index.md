@@ -49,7 +49,7 @@ appears in the other.
 | `dbpinball` CLI (`doctor`, `connections`, `schema inspect`) | <span class="status status-available">Available</span> |
 | Shared connection store between desktop and CLI | <span class="status status-available">Available</span> |
 | Backup, restore and copy from the desktop UI | <span class="status status-planned">Not routed in the UI</span> |
-| Shared security policy and destination verification (M3) | <span class="status status-planned">Planned</span> |
+| Shared security policy and destination verification (M3) | <span class="status status-available">Available</span> |
 | Safe Sync (M4 and later) | <span class="status status-unavailable">Not available</span> |
 
 See the [roadmap](/roadmap) for the full picture.

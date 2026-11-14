@@ -2,6 +2,7 @@ mod connections;
 mod models;
 mod runners;
 mod secrets;
+mod security;
 
 use dbpinball_core::store::{ImportReport, MigrationStatus};
 use models::*;
@@ -132,6 +133,26 @@ fn connections_migration_status() -> Result<MigrationStatus, String> {
     connections::migration_status()
 }
 
+#[tauri::command]
+async fn security_status(
+    connection: DbConnection,
+) -> Result<dbpinball_core::security::SecurityStatus, String> {
+    security::status(connection).await
+}
+
+#[tauri::command]
+async fn security_enroll(
+    connection: DbConnection,
+    category: String,
+) -> Result<dbpinball_core::security::EnrolledFingerprint, String> {
+    security::enroll(connection, category).await
+}
+
+#[tauri::command]
+fn security_forget(connection_id: String) -> Result<bool, String> {
+    security::forget(connection_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -153,7 +174,10 @@ pub fn run() {
             connections_delete,
             connections_import,
             connections_migrate_local_storage,
-            connections_migration_status
+            connections_migration_status,
+            security_status,
+            security_enroll,
+            security_forget
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

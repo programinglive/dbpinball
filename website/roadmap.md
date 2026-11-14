@@ -33,7 +33,7 @@ What it does:
 
 | Capability | Milestone |
 | --- | --- |
-| Shared security policy and destination verification | M3 |
+| Shared security policy and destination verification | M3 — **implemented** (see [Security policy](/security/policy)) |
 | PostgreSQL Safe Sync (sanitized production → development) | M4 |
 | Desktop Safe Sync integration | M5 |
 | MySQL Safe Sync | M6 |

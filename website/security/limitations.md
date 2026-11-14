@@ -36,12 +36,54 @@ local configuration directory.
 DBPinball is an application, not a sandbox. It does not restrict what a user can
 do with the database once connected.
 
-## Not implemented
+## Engine-specific read-only gaps
 
-- Shared security policy and destination verification (M3).
+- **MySQL**: a read-only transaction does not cover DDL, because MySQL performs
+  an implicit commit first. MyISAM tables ignore transactions entirely. The
+  classifier routes DDL to the write path, but the engine guarantee is narrower
+  than PostgreSQL's.
+- **PostgreSQL**: a read-only transaction covers DML and DDL. A function with
+  external side effects can still act outside the database.
+- **Both**: least-privilege credentials remain the only enforcement the engine
+  cannot be talked out of.
+
+## Enrollment concurrency
+
+The enrollment registry takes the same cross-process lock as the connection
+store. A corrupted registry is an error, never a silently empty one, so an
+enrolled destination cannot appear unenrolled after a partial write.
+
+
+## Verification is not a session binding
+
+The policy verifies a destination on one connection, then the operation opens
+another connection to the same parameters. The enrollment is re-checked on every
+call, and the identity includes the server and database, so a changed server or
+database is detected. The freshness window bounds, but does not remove, the gap
+between verification and execution: a DNS change, tunnel redirect, or a malicious
+server that lies about its identity between the two round-trips is not detected.
+A same-session identity assertion is planned for M4.
+
+## MySQL executable comments
+
+MySQL executes the body of `/*! ... */`. The classifier treats any such comment
+as unknown, so it takes the write path instead of being stripped as a comment. An
+ordinary `/* ... */` comment is still stripped normally.
+
+## What is implemented and what is not
+
+Implemented in M3:
+
+- Shared security policy and destination verification in the Rust core.
+- Enrollment with a cross-process lock and no secret persistence.
+- Desktop enforcement at the execution boundary for queries, restore and copy.
+- Read-only execution inside a database-level read-only transaction.
+
+Not implemented:
+
 - Safe Sync (M4 and later).
-- Backup, restore and copy from the desktop UI (commands exist, pages are not
-  routed).
+- Restore and copy from the desktop UI: the commands are gated but their pages
+  are not routed.
 - TLS enforcement (`useSsl` is stored but not applied).
 
 ## Related
