@@ -872,6 +872,11 @@ fn cast_for(type_name: &str) -> Result<&'static str, CoreError> {
         "bigint" => Ok("bigint"),
         "integer" => Ok("integer"),
         "smallint" => Ok("smallint"),
+        "numeric" | "decimal" => Ok("numeric"),
+        "date" => Ok("date"),
+        "timestamp without time zone" => Ok("timestamp"),
+        "timestamp with time zone" => Ok("timestamptz"),
+        "boolean" => Ok("boolean"),
         other => Err(CoreError::with_detail(
             ErrorCode::Unsupported,
             format!("column type '{other}' is not supported in this slice"),

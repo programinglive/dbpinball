@@ -27,6 +27,8 @@ pub struct RootPlan {
     pub table: String,
     pub filter_columns: Vec<String>,
     pub filter_ops: Vec<String>,
+    #[serde(default)]
+    pub filter_types: Vec<String>,
     pub filter_digest: String,
 }
 
@@ -180,18 +182,7 @@ pub async fn build(
             ));
         }
 
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
-        roots.push(RootPlan {
-            schema: name.schema.clone(),
-            table: name.table.clone(),
-            filter_columns: root.filter.iter().map(|f| f.column.clone()).collect(),
-            filter_ops: root
-                .filter
-                .iter()
-                .map(|f| f.op.as_str().to_string())
-                .collect(),
-            filter_digest: masker.filter_digest(&name.schema, &name.table, &canonical),
-        });
+        roots.push(root_plan_for(&info, root, masker)?);
     }
 
     // Parent worklist. A request is (parent, parent columns, tuple, level).
@@ -374,18 +365,7 @@ fn metadata_only(
         let name = QualifiedName::parse(&root.table)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
         masker.coverage(&name.schema, &name.table, &info.column_shapes(graph))?;
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
-        roots.push(RootPlan {
-            schema: name.schema.clone(),
-            table: name.table.clone(),
-            filter_columns: root.filter.iter().map(|f| f.column.clone()).collect(),
-            filter_ops: root
-                .filter
-                .iter()
-                .map(|f| f.op.as_str().to_string())
-                .collect(),
-            filter_digest: masker.filter_digest(&name.schema, &name.table, &canonical),
-        });
+        roots.push(root_plan_for(info, root, masker)?);
     }
 
     let names: Vec<QualifiedName> = graph.tables.iter().map(|table| table.name()).collect();
@@ -974,17 +954,17 @@ fn build_filter(
     let mut binds = Vec::new();
 
     for predicate in &root.filter {
-        if !info
+        let col = info
             .columns
             .iter()
-            .any(|column| column.name == predicate.column)
-        {
-            return Err(CoreError::with_detail(
-                ErrorCode::Usage,
-                format!("filter column {} does not exist", predicate.column),
-                "invalid_identifier",
-            ));
-        }
+            .find(|column| column.name == predicate.column)
+            .ok_or_else(|| {
+                CoreError::with_detail(
+                    ErrorCode::Usage,
+                    format!("filter column {} does not exist", predicate.column),
+                    "invalid_identifier",
+                )
+            })?;
 
         let column = quote_ident(&predicate.column);
 
@@ -1005,16 +985,66 @@ fn build_filter(
                 clauses.push(format!("{column}::text IN ({})", placeholders.join(", ")));
             }
             FilterOp::Gte | FilterOp::Lte => {
-                return Err(CoreError::with_detail(
-                    ErrorCode::Unsupported,
-                    "range filters are not implemented in this slice",
-                    "unsupported_filter",
-                ))
+                let typed =
+                    crate::safesync::typed::parse_typed_value(&col.type_name, &predicate.value)?;
+                binds.push(typed.canonical());
+                let op_sql = match predicate.op {
+                    FilterOp::Gte => ">=",
+                    FilterOp::Lte => "<=",
+                    _ => unreachable!(),
+                };
+                clauses.push(format!(
+                    "{column} {op_sql} ${}::{}",
+                    binds.len(),
+                    typed.cast()
+                ));
             }
         }
     }
 
     Ok((format!("WHERE {}", clauses.join(" AND ")), binds))
+}
+
+fn root_plan_for(
+    info: &TableInfo,
+    root: &crate::safesync::spec::RootSelection,
+    masker: &Masker,
+) -> Result<RootPlan, CoreError> {
+    let mut type_map = BTreeMap::new();
+    let mut canonicalized = Vec::with_capacity(root.filter.len());
+    for predicate in &root.filter {
+        let col = info
+            .columns
+            .iter()
+            .find(|column| column.name == predicate.column)
+            .ok_or_else(|| {
+                CoreError::with_detail(
+                    ErrorCode::Usage,
+                    format!("filter column {} does not exist", predicate.column),
+                    "invalid_identifier",
+                )
+            })?;
+        type_map.insert(col.name.clone(), col.type_name.clone());
+        let encoded = crate::safesync::spec::canonical_predicate(predicate, &col.type_name)?;
+        canonicalized.push((
+            encoded,
+            predicate.column.clone(),
+            predicate.op.as_str().to_string(),
+            col.type_name.clone(),
+        ));
+    }
+    canonicalized.sort_by(|a, b| a.0.cmp(&b.0));
+    canonicalized.dedup_by(|a, b| a.0 == b.0);
+
+    let canonical = crate::safesync::spec::canonical_filter(&root.filter, &type_map)?;
+    Ok(RootPlan {
+        schema: info.schema.clone(),
+        table: info.table.clone(),
+        filter_columns: canonicalized.iter().map(|(_, c, _, _)| c.clone()).collect(),
+        filter_ops: canonicalized.iter().map(|(_, _, o, _)| o.clone()).collect(),
+        filter_types: canonicalized.iter().map(|(_, _, _, t)| t.clone()).collect(),
+        filter_digest: masker.filter_digest(&info.schema, &info.table, &canonical),
+    })
 }
 
 fn render_value(value: &FilterValue) -> Result<String, CoreError> {
@@ -1257,5 +1287,72 @@ mod tests {
         }];
         let ordering = order_tables(&tables, &edges).unwrap();
         assert_eq!(ordering.deferred.len(), 1);
+    }
+
+    #[test]
+    fn build_filter_emits_typed_casts_and_no_spec_literals() {
+        use crate::safesync::graph::{ColumnInfo, TableInfo};
+        use crate::safesync::spec::{FilterPredicate, RootSelection};
+
+        let col = |name: &str, type_name: &str| ColumnInfo {
+            name: name.into(),
+            type_name: type_name.into(),
+            nullable: false,
+            is_primary_key: false,
+            is_generated: false,
+            is_identity: false,
+            identity_always: false,
+            generated_expression: None,
+            max_len: None,
+        };
+        let info = TableInfo {
+            schema: "public".into(),
+            table: "orders".into(),
+            relkind: "r".into(),
+            rls_active: false,
+            columns: vec![
+                col("amount", "numeric"),
+                col("created_at", "timestamp with time zone"),
+                col("note", "text"),
+            ],
+            primary_key: vec!["amount".into()],
+            row_identity: vec!["amount".into()],
+            schema_hash: "hash".into(),
+        };
+        let root = RootSelection {
+            table: "public.orders".into(),
+            filter: vec![
+                FilterPredicate {
+                    column: "amount".into(),
+                    op: FilterOp::Gte,
+                    value: FilterValue::Text("10.50".into()),
+                },
+                FilterPredicate {
+                    column: "created_at".into(),
+                    op: FilterOp::Lte,
+                    value: FilterValue::Text("2026-01-01T07:00:00+07:00".into()),
+                },
+            ],
+        };
+
+        let (where_sql, binds) = build_filter(&info, &root).unwrap();
+        assert_eq!(
+            where_sql,
+            "WHERE \"amount\" >= $1::numeric AND \"created_at\" <= $2::timestamptz"
+        );
+        assert_eq!(binds, vec!["10.5", "2026-01-01T00:00:00Z"]);
+        assert!(!where_sql.contains("10.5"));
+        assert!(!where_sql.contains("2026-01-01"));
+
+        let bad_root = RootSelection {
+            table: "public.orders".into(),
+            filter: vec![FilterPredicate {
+                column: "note".into(),
+                op: FilterOp::Gte,
+                value: FilterValue::Text("abc".into()),
+            }],
+        };
+        let err = build_filter(&info, &bad_root).unwrap_err();
+        assert_eq!(err.detail.as_deref(), Some("invalid_filter"));
     }
 }

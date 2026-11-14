@@ -349,6 +349,26 @@ impl MaskingPolicy {
                 "label",
                 MaskStrategy::DeterministicPseudonym,
             ),
+            // S2-c typed range filter fixture.
+            rule("public", "ranged_customers", "id", MaskStrategy::Keep),
+            rule(
+                "public",
+                "ranged_customers",
+                "email",
+                MaskStrategy::DeterministicEmail,
+            ),
+            rule("public", "ranged_orders", "id", MaskStrategy::Keep),
+            rule("public", "ranged_orders", "customer_id", MaskStrategy::Keep),
+            rule("public", "ranged_orders", "amount", MaskStrategy::Null),
+            rule("public", "ranged_orders", "order_date", MaskStrategy::Null),
+            rule(
+                "public",
+                "ranged_orders",
+                "scheduled_at",
+                MaskStrategy::Null,
+            ),
+            rule("public", "ranged_orders", "created_at", MaskStrategy::Null),
+            rule("public", "ranged_orders", "note", MaskStrategy::Redact),
         ];
 
         let mut policy = Self {

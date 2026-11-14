@@ -1960,3 +1960,154 @@ masking:
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_typed_range_filtered_import_succeeds_and_omits_literals() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+
+    let mut dst_conn = connect(&destination).await;
+    sqlx::raw_sql(
+        r#"
+        DROP TABLE IF EXISTS public.ranged_orders, public.ranged_customers CASCADE;
+        CREATE TABLE public.ranged_customers (
+            id uuid PRIMARY KEY,
+            email text NOT NULL
+        );
+        CREATE TABLE public.ranged_orders (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            customer_id uuid NOT NULL REFERENCES public.ranged_customers(id),
+            amount numeric,
+            order_date date,
+            scheduled_at timestamp without time zone,
+            created_at timestamptz,
+            note text
+        );
+        "#,
+    )
+    .execute(&mut dst_conn)
+    .await
+    .unwrap();
+
+    enroll(&config, &source, &destination);
+
+    let canary_ts = "2026-01-01T00:00:00Z";
+    let spec = config.join("ranged-spec.yaml");
+    std::fs::write(
+        &spec,
+        format!(
+            r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.ranged_orders
+      filter:
+        - column: amount
+          op: gte
+          value: "20.00"
+        - column: created_at
+          op: gte
+          value: "{canary_ts}"
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 10
+  max_total_rows: 10
+  max_depth: 2
+  max_bytes: 1048576
+  timeout_ms: 10000
+masking:
+  policy: development-default@2
+"#
+        ),
+    )
+    .unwrap();
+
+    let plan_path = config.join("ranged-plan.json");
+    let plan_out = cli(
+        &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&plan_out),
+        0,
+        "ranged plan failed: {}",
+        String::from_utf8_lossy(&plan_out.stdout)
+    );
+    let plan_rendered = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(!plan_rendered.contains("20.00"));
+    assert!(!plan_rendered.contains(canary_ts));
+
+    let plan_json: Value = serde_json::from_str(&plan_rendered).unwrap();
+    assert_eq!(
+        plan_json["selection"]["roots"][0]["filter_types"],
+        serde_json::json!(["numeric", "timestamp with time zone"])
+    );
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    let val_out = cli(
+        &config,
+        &[
+            "safe-sync",
+            "validate",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&val_out),
+        0,
+        "ranged validate failed: {}",
+        String::from_utf8_lossy(&val_out.stdout)
+    );
+
+    let exec_out = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&exec_out),
+        0,
+        "ranged execute failed: {}",
+        String::from_utf8_lossy(&exec_out.stdout)
+    );
+    let body = envelope(&exec_out);
+    assert_eq!(body["data"]["status"], "completed");
+    assert_eq!(body["data"]["rowsWritten"], 2);
+}

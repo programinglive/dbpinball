@@ -183,6 +183,7 @@ pub async fn validate(
             "mask_policy_changed",
         ));
     }
+    check_filter_digests(plan, spec, &masker)?;
     let root_tables = root_tables(spec)?;
 
     let mut source_session =
@@ -256,7 +257,25 @@ pub fn check_filter_digests(
     }
 
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
+        if planned.filter_columns.len() != planned.filter_types.len() {
+            return Err(filter_mismatch(
+                "the plan is missing filter column types for the specification",
+            ));
+        }
+        let types: std::collections::BTreeMap<String, String> = planned
+            .filter_columns
+            .iter()
+            .cloned()
+            .zip(planned.filter_types.iter().cloned())
+            .collect();
+        for predicate in &root.filter {
+            if !types.contains_key(&predicate.column) {
+                return Err(filter_mismatch(
+                    "the specification does not match the plan's filter columns",
+                ));
+            }
+        }
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter, &types)?;
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
@@ -444,6 +463,7 @@ pub async fn execute(
         ));
     }
 
+    check_filter_digests(request.plan, request.spec, &masker)?;
     let root_tables = root_tables(request.spec)?;
 
     let mut source_session = BoundSession::open(

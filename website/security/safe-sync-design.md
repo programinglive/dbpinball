@@ -192,6 +192,32 @@ Within S2-b:
 - Database driver errors expose only the SQLSTATE on both the source and the
   destination path; the server message is withheld.
 
+Within S2-c:
+
+- Root table filters support inclusive `gte` (`>=`) and `lte` (`<=`) bounds in
+  addition to `eq` and `in`, up to 8 predicates per root combined with `AND`.
+  Strict `gt` and `lt` are not accepted.
+- Range bounds are permitted only on catalog-verified ordered PostgreSQL types:
+  `smallint` (`int2`), `integer` (`int4`), `bigint` (`int8`), `numeric` /
+  `decimal` (parsed and canonicalized as exact base-10 decimals without
+  floating-point math, up to 1000 fractional digits, collapsing `-0.0` to `0`
+  and stripping insignificant trailing fractional zeros), `date` (`YYYY-MM-DD`),
+  `timestamp without time zone` (`YYYY-MM-DD HH:MM:SS[.ffffff]` with no offset),
+  and `timestamp with time zone` (RFC 3339 with a mandatory numeric offset or
+  `Z`, normalized to UTC microsecond form; zone names are refused). Unordered
+  or collation-dependent types (`text`, `uuid`, `boolean`, `json`/`jsonb`,
+  `bytea`, arrays, enums, ranges, domains) are refused with `invalid_filter`.
+- Each predicate is canonicalized as a collision-free JSON array
+  `[column, op_rank, pg_type_name, canonical_value]`, sorted and deduplicated
+  before computing the keyed `filter_digest`. The digest is bound into
+  `spec_hash`, `plan_fingerprint` and the v3 plan MAC, and the value-free plan
+  records `filter_types` alongside `filter_columns` and `filter_ops` with
+  `contains_values: false`.
+- Range extraction queries bind canonical strings as parameters with explicit
+  PostgreSQL casts (`$n::smallint`, `$n::integer`, `$n::bigint`, `$n::numeric`,
+  `$n::date`, `$n::timestamp without time zone`, `$n::timestamptz`). No filter
+  literal is ever interpolated into SQL text or written to the plan file.
+
 The plan carries the foreign-key graph, the requested depth, the import order,
 the canonical masking domains and the bounds, and all of them are bound to the
 plan fingerprint. A closure that a depth or a limit cannot complete is marked
@@ -207,7 +233,7 @@ incomplete and refused, never imported partially.
   destination. Identity regeneration and remapping are not implemented, and
   identity preservation is restricted to the single-column integer mode
   described above.
-- Range filters and arbitrary transformation scripts.
+- Arbitrary transformation scripts.
 
 Safe Sync as a whole is **not** generally available, and this page should not be
 read as a promise of completeness.
