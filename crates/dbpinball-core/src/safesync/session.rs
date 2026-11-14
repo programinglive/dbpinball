@@ -115,9 +115,11 @@ impl BoundSession {
         let mut connection = PgConnection::connect_with(&options)
             .await
             .map_err(|error| {
-                CoreError::redacted(
+                crate::safesync::database_error(
                     ErrorCode::Connection,
-                    format!("the {} could not be reached: {error}", role_label(role)),
+                    &format!("the {} connection", role_label(role)),
+                    "connect_failed",
+                    error,
                 )
             })?;
 

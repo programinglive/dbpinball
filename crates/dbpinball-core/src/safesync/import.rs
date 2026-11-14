@@ -20,7 +20,8 @@ use crate::safesync::planner::{quote_ident, TableRows};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::QualifiedName;
 
-/// The destination run table. It is created inside the data transaction.
+/// The destination run table. It is created in autocommit before the data
+/// transaction, so a failed CREATE leaves the connection usable.
 pub const RUN_TABLE: &str = "public.dbpinball_safe_sync_runs";
 
 /// What to do when the destination is not empty.
@@ -475,6 +476,24 @@ fn is_insufficient_privilege(error: &sqlx::Error) -> bool {
         .and_then(|database| database.code())
         .map(|code| code == "42501")
         .unwrap_or(false)
+}
+
+/// Read the persisted sequence status for a run.
+///
+/// Used when reconciliation fails, so the report reflects what the run row
+/// actually says instead of assuming `pending`.
+pub async fn persisted_sequence_status(
+    session: &mut BoundSession,
+    run_id: &str,
+) -> Result<String, CoreError> {
+    let status: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT sequence_status FROM {RUN_TABLE} WHERE run_id = $1::uuid"
+    ))
+    .bind(run_id)
+    .fetch_optional(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+    Ok(status.unwrap_or_else(|| "pending".to_string()))
 }
 
 /// The columns a run table must have. A pre-S2-b table is migrated additively;

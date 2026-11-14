@@ -564,11 +564,17 @@ pub async fn execute(
     .await?;
 
     // Sequence adjustment is not part of the row transaction. It runs here,
-    // after the commit, and is idempotent. A failure leaves the marker pending.
+    // after the commit, and is idempotent. On failure the persisted status is
+    // read back, so a replay of a completed run is not mislabelled pending.
     let sequence_status =
-        import::reconcile_sequences(&mut destination_session, &extracted, &report.run_id)
+        match import::reconcile_sequences(&mut destination_session, &extracted, &report.run_id)
             .await
-            .unwrap_or_else(|_| "pending".to_string());
+        {
+            Ok(status) => status,
+            Err(_) => import::persisted_sequence_status(&mut destination_session, &report.run_id)
+                .await
+                .unwrap_or_else(|_| "pending".to_string()),
+        };
 
     if let Some(directory) = audit_dir {
         let record = AuditRecord {
