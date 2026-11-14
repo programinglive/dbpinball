@@ -24,6 +24,14 @@ pub enum PolicyCode {
     Allowed,
     /// No destination identity was supplied for a write.
     MissingDestination,
+    /// No source identity was supplied for a protected read.
+    MissingSource,
+    /// The source server did not identify itself.
+    UnverifiableSource,
+    /// The source session is not database-enforced read-only.
+    SourceNotReadOnly,
+    /// The source was authorized for a bounded read.
+    SourceAuthorized,
     /// The destination could not be identified by the server.
     UnverifiableDestination,
     /// No fingerprint was enrolled for this connection.
@@ -48,6 +56,10 @@ impl PolicyCode {
             PolicyCode::ReadOnlyAllowed => "read_only_allowed",
             PolicyCode::Allowed => "allowed",
             PolicyCode::MissingDestination => "missing_destination",
+            PolicyCode::MissingSource => "missing_source",
+            PolicyCode::UnverifiableSource => "unverifiable_source",
+            PolicyCode::SourceNotReadOnly => "source_not_read_only",
+            PolicyCode::SourceAuthorized => "source_authorized",
             PolicyCode::UnverifiableDestination => "unverifiable_destination",
             PolicyCode::NotEnrolled => "not_enrolled",
             PolicyCode::DestinationChanged => "destination_changed",
@@ -152,14 +164,56 @@ impl<'a> OperationContext<'a> {
 /// The order matters: read-only operations are allowed without a destination,
 /// and every write path fails closed.
 pub fn evaluate(context: &OperationContext<'_>) -> PolicyDecision {
-    // Safe Sync is M4. Refuse it explicitly rather than pretending it works.
-    if matches!(
-        context.operation,
-        DatabaseOperation::SafeSyncPrepare | DatabaseOperation::SafeSyncExecute
-    ) {
+    // Safe Sync is the only operation that reads a protected source. It is a
+    // read of the source, so it must not require destination enrollment, but it
+    // must still fail closed on a missing or ambiguous source.
+    if context.operation == DatabaseOperation::SafeSyncPrepare {
+        let Some(source) = context.source else {
+            return PolicyDecision::Deny {
+                code: PolicyCode::MissingSource,
+                reason: "reading a protected source needs a source identity".to_string(),
+            };
+        };
+
+        if !source.server.is_identified() {
+            return PolicyDecision::Deny {
+                code: PolicyCode::UnverifiableSource,
+                reason: "the source did not report an identity, so it cannot be trusted"
+                    .to_string(),
+            };
+        }
+
+        if !source.server.read_only.unwrap_or(false) {
+            return PolicyDecision::Deny {
+                code: PolicyCode::SourceNotReadOnly,
+                reason: "the source session is not database-enforced read-only".to_string(),
+            };
+        }
+
+        if let Some(destination) = context.destination {
+            if source.identity_key.is_some() && source.identity_key == destination.identity_key {
+                return PolicyDecision::Deny {
+                    code: PolicyCode::SameSourceAndDestination,
+                    reason: "source and destination resolve to the same database".to_string(),
+                };
+            }
+        }
+
+        return PolicyDecision::Allow {
+            code: PolicyCode::SourceAuthorized,
+            evidence: format!(
+                "source {} is identified and read-only",
+                source.identity_key.as_deref().unwrap_or("(unknown)")
+            ),
+        };
+    }
+
+    // Executing a Safe Sync needs the source authorization as well as the
+    // destination checks below. The source half is enforced by the session.
+    if context.operation == DatabaseOperation::SafeSyncExecute && context.source.is_none() {
         return PolicyDecision::Deny {
-            code: PolicyCode::Unsupported,
-            reason: "Safe Sync is not implemented in this milestone".to_string(),
+            code: PolicyCode::MissingSource,
+            reason: "executing a Safe Sync needs an authorized source".to_string(),
         };
     }
 
@@ -441,11 +495,105 @@ mod tests {
         );
     }
 
+    fn read_only_identity(server_uuid: &str, database: &str) -> DestinationIdentity {
+        let mut identity = identity(server_uuid, database, 1_000);
+        identity.server.read_only = Some(true);
+        identity
+    }
+
     #[test]
-    fn safe_sync_is_explicitly_unsupported() {
-        let destination = identity("srv-1", "dev", 1_000);
-        let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
+    fn safe_sync_prepare_needs_an_identified_source() {
+        let context = OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000);
+        assert_eq!(evaluate(&context).code(), PolicyCode::MissingSource);
+    }
+
+    #[test]
+    fn safe_sync_prepare_allows_a_read_only_identified_source() {
+        let source = read_only_identity("srv-1", "prod");
+        let context =
+            OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000).with_source(&source);
+        assert!(evaluate(&context).is_allowed());
+        assert_eq!(evaluate(&context).code(), PolicyCode::SourceAuthorized);
+    }
+
+    #[test]
+    fn safe_sync_prepare_refuses_an_unidentified_source() {
+        let mut source = read_only_identity("srv-1", "prod");
+        source.server.server_uuid = None;
+        source.identity_key = None;
+        let context =
+            OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000).with_source(&source);
+        assert_eq!(evaluate(&context).code(), PolicyCode::UnverifiableSource);
+    }
+
+    #[test]
+    fn safe_sync_prepare_refuses_a_writable_source() {
+        let source = identity("srv-1", "prod", 1_000);
+        let context =
+            OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000).with_source(&source);
+        assert_eq!(evaluate(&context).code(), PolicyCode::SourceNotReadOnly);
+    }
+
+    #[test]
+    fn safe_sync_prepare_refuses_equal_source_and_destination() {
+        let source = read_only_identity("srv-1", "prod");
+        let context = OperationContext::new(DatabaseOperation::SafeSyncPrepare, 1_000)
+            .with_source(&source)
+            .with_destination(&source);
+        assert_eq!(
+            evaluate(&context).code(),
+            PolicyCode::SameSourceAndDestination
+        );
+    }
+
+    #[test]
+    fn safe_sync_execute_needs_both_identities() {
+        let destination = identity("srv-9", "dev", 1_000);
+        let only_destination = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
             .with_destination(&destination);
-        assert_eq!(evaluate(&context).code(), PolicyCode::Unsupported);
+        assert_eq!(
+            evaluate(&only_destination).code(),
+            PolicyCode::MissingSource
+        );
+    }
+
+    #[test]
+    fn safe_sync_execute_requires_an_enrolled_destination() {
+        let source = read_only_identity("srv-1", "prod");
+        let destination = identity("srv-9", "dev", 1_000);
+        let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
+            .with_source(&source)
+            .with_destination(&destination);
+        assert_eq!(evaluate(&context).code(), PolicyCode::NotEnrolled);
+    }
+
+    #[test]
+    fn safe_sync_execute_allows_an_enrolled_development_destination() {
+        let source = read_only_identity("srv-1", "prod");
+        let destination = identity("srv-9", "dev", 1_000);
+        let enrolled = enrollment(
+            destination.identity_key.as_deref().unwrap(),
+            DestinationCategory::VerifiedDevelopment,
+        );
+        let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
+            .with_source(&source)
+            .with_destination(&destination)
+            .with_enrollment(&enrolled);
+        assert!(evaluate(&context).is_allowed());
+    }
+
+    #[test]
+    fn safe_sync_execute_still_denies_a_production_like_destination() {
+        let source = read_only_identity("srv-1", "prod");
+        let destination = identity("srv-9", "prod2", 1_000);
+        let enrolled = enrollment(
+            destination.identity_key.as_deref().unwrap(),
+            DestinationCategory::ProductionLike,
+        );
+        let context = OperationContext::new(DatabaseOperation::SafeSyncExecute, 1_500)
+            .with_source(&source)
+            .with_destination(&destination)
+            .with_enrollment(&enrolled);
+        assert_eq!(evaluate(&context).code(), PolicyCode::DestinationNotAllowed);
     }
 }

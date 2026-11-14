@@ -6,6 +6,7 @@
 pub mod adapters;
 pub mod domain;
 pub mod ports;
+pub mod safesync;
 pub mod security;
 pub mod services;
 pub mod store;
