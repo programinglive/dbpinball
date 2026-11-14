@@ -8,12 +8,17 @@ description = "Headless database services for DBPinball"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres", "mysql", "chrono", "rust_decimal", "json"] }
 keyring = "2"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 serde_json = "1"
