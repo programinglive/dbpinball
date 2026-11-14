@@ -141,9 +141,9 @@ Within S2-b:
   into an empty string, so a nullable integer is never cast from `''`.
 - After the row transaction commits, identity sequences are reconciled in a
   separate, idempotent step. The supported mode is deliberately restricted and
-  its safety is enforced, not assumed: an empty table or a sequence that already
-  covers the imported maximum needs no movement (`not_required`); a sequence
-  behind the data is raised to the imported maximum (`completed`); a sequence
+  its safety is enforced, not assumed: an empty table or a `CACHE 1` sequence
+  that already covers the imported maximum needs no movement (`not_required`); a
+  sequence behind the data is raised to the imported maximum (`completed`); a sequence
   whose state cannot be read, whose lock cannot be taken (missing privilege,
   lock timeout) or whose cache preallocates values is not touched
   (`reconciliation_required`). The read and the `setval` run inside one
@@ -203,7 +203,10 @@ incomplete and refused, never imported partially.
 - MySQL Safe Sync.
 - Desktop integration.
 - Batch import.
-- Generated and identity column import beyond the existing inspection.
+- Generated column values are not imported; they are recomputed by the
+  destination. Identity regeneration and remapping are not implemented, and
+  identity preservation is restricted to the single-column integer mode
+  described above.
 - Range filters and arbitrary transformation scripts.
 
 Safe Sync as a whole is **not** generally available, and this page should not be

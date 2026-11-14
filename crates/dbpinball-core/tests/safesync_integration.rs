@@ -67,13 +67,29 @@ fn target(variable: &str, id: &str) -> Option<Target> {
         );
         return None;
     };
-    let parsed = url::Url::parse(&url).ok()?;
+    let parsed = match url::Url::parse(&url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{variable} is not a valid URL when CI is set: {error}"
+            );
+            return None;
+        }
+    };
+    let Some(host) = parsed.host_str() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} has no host when CI is set"
+        );
+        return None;
+    };
 
     let connection = DbConnection {
         id: id.to_string(),
         name: id.to_string(),
         engine: DbEngine::Postgres,
-        host: parsed.host_str()?.to_string(),
+        host: host.to_string(),
         port: parsed.port().unwrap_or(5432),
         database: parsed.path().trim_start_matches('/').to_string(),
         username: parsed.username().to_string(),

@@ -335,8 +335,8 @@ async fn run_inner(
 ///
 /// - an empty table, or a table whose imported identity values are not
 ///   positive, needs no movement and reports `not_required`;
-/// - a sequence that already covers the imported maximum needs no movement and
-///   reports `not_required`;
+/// - a sequence that already covers the imported maximum, and uses `CACHE 1`,
+///   needs no movement and reports `not_required`;
 /// - a sequence behind the imported maximum is raised to that maximum and
 ///   reports `completed`;
 /// - a sequence whose state cannot be read, whose lock cannot be taken (missing

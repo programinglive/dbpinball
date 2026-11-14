@@ -60,13 +60,29 @@ fn target(variable: &str, id: &str) -> Option<Target> {
         );
         return None;
     };
-    let parsed = url::Url::parse(&url).ok()?;
+    let parsed = match url::Url::parse(&url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{variable} is not a valid URL when CI is set: {error}"
+            );
+            return None;
+        }
+    };
+    let Some(host) = parsed.host_str() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} has no host when CI is set"
+        );
+        return None;
+    };
     Some(Target {
         connection: DbConnection {
             id: id.to_string(),
             name: id.to_string(),
             engine: DbEngine::Postgres,
-            host: parsed.host_str()?.to_string(),
+            host: host.to_string(),
             port: parsed.port().unwrap_or(5432),
             database: parsed.path().trim_start_matches('/').to_string(),
             username: parsed.username().to_string(),
@@ -2125,8 +2141,8 @@ async fn an_ahead_cached_sequence_is_still_reported_as_requiring_reconciliation(
     reset(&destination).await;
     enroll(&destination, &provider, &directory.path().to_path_buf()).await;
 
-    // The sequence is far ahead of the imported maximum, but it still holds a
-    // preallocated block. "Ahead" is not proof of safety: the cache check runs
+    // The sequence is far ahead of the imported maximum, but a backend can hold
+    // a preallocated block. "Ahead" is not proof of safety: the cache check runs
     // before the value is compared, so the run reports reconciliation_required.
     let mut connection = connect(&destination).await;
     sqlx::query("SELECT setval('public.identity_parents_id_seq', 1000, true)")
@@ -2163,6 +2179,17 @@ async fn an_ahead_cached_sequence_is_still_reported_as_requiring_reconciliation(
     assert_eq!(
         status, "reconciliation_required",
         "the cache precondition precedes the ahead check"
+    );
+
+    // Prove the premise: the sequence really is ahead of what was imported.
+    let imported_max: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM public.identity_parents")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert!(
+        before_last > imported_max,
+        "the test premise is that the sequence is ahead of the imported maximum"
     );
 
     let (after_last, after_called): (i64, bool) =
