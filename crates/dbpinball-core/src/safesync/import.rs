@@ -339,17 +339,27 @@ async fn run_inner(
 ///   reports `not_required`;
 /// - a sequence behind the imported maximum is raised to that maximum and
 ///   reports `completed`;
-/// - a sequence whose state cannot be read, or whose lock cannot be taken
-///   (missing privilege, lock timeout), is not touched and reports
-///   `reconciliation_required`.
+/// - a sequence whose state cannot be read, whose lock cannot be taken (missing
+///   privilege, lock timeout) or whose cache preallocates values is not touched
+///   and reports `reconciliation_required`.
 ///
-/// The read and the `setval` run inside one transaction that first takes an
-/// `AccessExclusiveLock` on the sequence with a no-op `ALTER SEQUENCE ... CACHE`.
-/// While that lock is held, an external `nextval`, `setval` or `ALTER SEQUENCE`
-/// blocks, so the observed `last_value` cannot move between the read and the
-/// write. The raise is `setval(seq, GREATEST(max, last_value), true)`, so it
-/// never lowers the value it observed. If the lock cannot be taken, the mode
-/// fails closed instead of guessing.
+/// The read and the `setval` run inside one transaction that first changes the
+/// sequence with `ALTER SEQUENCE ... CACHE <current>`. PostgreSQL documents that
+/// `ALTER SEQUENCE` blocks concurrent `nextval`, `currval`, `lastval` and
+/// `setval`, and the backend takes a `ShareRowExclusiveLock` on the sequence, so
+/// while that lock is held the observed `last_value` cannot move between the
+/// read and the write. The raise is `setval(seq, GREATEST(max, last_value),
+/// true)`, so it never lowers the value it observed.
+///
+/// Only `CACHE 1` sequences are reconciled automatically. With a larger cache a
+/// backend can hold a preallocated block whose values this session cannot see or
+/// revoke, and the PostgreSQL documentation says such backends keep using their
+/// cached values until they notice the change. A two-session test on PostgreSQL
+/// 18 shows that the storage rewrite performed by the `ALTER` does discard those
+/// blocks, but that is not part of the documented contract, so the mode refuses
+/// instead of depending on it. The check is a snapshot taken before the lock: a
+/// cache changed by an uncoordinated external writer mid-run is outside the
+/// supported mode, which requires a quiescent destination.
 pub async fn reconcile_sequences(
     session: &mut BoundSession,
     tables: &[TableRows],
@@ -393,7 +403,7 @@ pub async fn reconcile_sequences(
                 continue;
             };
 
-            let (sequence_schema, sequence_name, cache): (String, String, i64) = sqlx::query_as(
+            let state: Option<(String, String, i64)> = sqlx::query_as(
                 "SELECT n.nspname::text, c.relname::text, s.seqcache
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -401,9 +411,23 @@ pub async fn reconcile_sequences(
                  WHERE c.oid = to_regclass($1)",
             )
             .bind(&sequence)
-            .fetch_one(&mut *session.connection())
+            .fetch_optional(&mut *session.connection())
             .await
             .map_err(connection_error)?;
+            let Some((sequence_schema, sequence_name, cache)) = state else {
+                // The sequence disappeared between discovery and reconciliation.
+                unproven = true;
+                continue;
+            };
+
+            // A sequence with a larger cache hands out preallocated blocks that
+            // this session can neither observe nor revoke. PostgreSQL documents
+            // that other backends keep using their cached values, so the mode
+            // refuses rather than claiming a quiescence it cannot prove.
+            if cache > 1 {
+                unproven = true;
+                continue;
+            }
 
             let qualified_sequence = format!(
                 "{}.{}",
@@ -411,9 +435,9 @@ pub async fn reconcile_sequences(
                 quote_ident(&sequence_name)
             );
 
-            // One transaction per sequence: the AccessExclusiveLock is held
-            // until COMMIT, so external writers are blocked for the read and
-            // the setval, and released before the next sequence.
+            // One transaction per sequence: the lock is held until COMMIT, so
+            // external writers are blocked for the read and the setval, and
+            // released before the next sequence.
             sqlx::query("BEGIN")
                 .execute(&mut *session.connection())
                 .await
@@ -425,8 +449,8 @@ pub async fn reconcile_sequences(
                 .await
                 .map_err(connection_error)?;
 
-            // A no-op ALTER SEQUENCE takes the AccessExclusiveLock. It changes
-            // nothing because the cache is set to its current value.
+            // The ALTER takes the ShareRowExclusiveLock and keeps the cache at
+            // its current value, which the check above proved is 1.
             let locked = sqlx::query(&format!(
                 "ALTER SEQUENCE {qualified_sequence} CACHE {cache}"
             ))

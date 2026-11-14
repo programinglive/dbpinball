@@ -144,18 +144,36 @@ Within S2-b:
   its safety is enforced, not assumed: an empty table or a sequence that already
   covers the imported maximum needs no movement (`not_required`); a sequence
   behind the data is raised to the imported maximum (`completed`); a sequence
-  whose state cannot be read, or whose lock cannot be taken (missing privilege,
-  lock timeout), is not touched (`reconciliation_required`). The read and the
-  `setval` run inside one transaction that first takes an `AccessExclusiveLock`
-  on the sequence with a no-op `ALTER SEQUENCE ... CACHE`. While that lock is
-  held, an external `nextval`, `setval` or `ALTER SEQUENCE` blocks, so the
-  observed `last_value` cannot move between the read and the write. The raise is
+  whose state cannot be read, whose lock cannot be taken (missing privilege,
+  lock timeout) or whose cache preallocates values is not touched
+  (`reconciliation_required`). The read and the `setval` run inside one
+  transaction that first changes the sequence with an `ALTER SEQUENCE` whose
+  `CACHE` clause repeats the current value. PostgreSQL documents that
+  `ALTER SEQUENCE` blocks concurrent
+  `nextval`, `currval`, `lastval` and `setval`, and the backend takes a
+  `ShareRowExclusiveLock` on the sequence, so the observed `last_value` cannot
+  move between the read and the write. The raise is
   `setval(seq, GREATEST(max, last_value), true)`, so it never lowers the value it
-  observed. The lock requires **ownership** of the identity sequence; a role that
-  can insert but does not own the sequence still imports the rows, but the run
-  reports `reconciliation_required`, the sequence is left untouched, and the CLI
-  exits 6. If the lock cannot be taken, the mode fails closed instead of
-  guessing.
+  observed.
+- Only `CACHE 1` identity sequences are reconciled automatically. A larger cache
+  plans ahead by handing out a block of values that this session can neither see
+  nor revoke, and the PostgreSQL documentation says other backends keep using
+  their cached values until they notice a change; the mode therefore refuses
+  instead of depending on undocumented invalidation. Two sessions on PostgreSQL
+  18 were used to prove both halves: after a bare `setval` a cached backend still
+  returned `2` from its block, while the `ALTER`-based step made a blocked
+  `nextval` resume above the reconciled value. The refusal is a snapshot taken
+  before the lock, so a cache changed by an uncoordinated external writer
+  mid-run is outside the supported mode, which requires a **quiescent
+  destination**. The lock also requires **ownership** of the identity sequence.
+  A role that can insert but does not own the sequence still imports the rows,
+  but the run reports `reconciliation_required` and the sequence is left
+  untouched. If the conditions cannot be established, the mode fails closed
+  instead of guessing.
+- An unreconciled sequence is never reported as success: the JSON envelope is
+  `ok: false` with `error.code = "sequence_reconciliation_required"`, `data`
+  still carries the committed run, and the CLI exits 6 (distinct from the
+  documented busy code 9).
 - The run table is migrated additively: an S1 or S2-a table gains
   `sequence_status` under the DDL advisory lock, existing runs are preserved and
   backfilled to `not_required` (those milestones did not import identity

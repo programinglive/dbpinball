@@ -257,26 +257,39 @@ async fn execute(
     )
     .await?;
 
-    output::print_success(cli.json, &report, |report| {
-        println!("Run:             {}", report.run_id);
-        println!("Status:          {}", report.status);
-        println!("Sequence:        {}", report.sequence_status);
-        println!("Rows written:    {}", report.rows_written);
-        println!("Destination:     {}", report.destination_digest);
-        if report.already_completed {
-            println!("This plan already completed; nothing was written.");
-        }
-        if report.sequence_status == "reconciliation_required"
-            || report.sequence_status == "pending"
-        {
-            println!(
-                "Sequence reconciliation is incomplete; re-run execute with the same plan to retry."
-            );
-        }
-    });
+    let exit = sequence_exit_code(&report.sequence_status);
+    if exit == 0 {
+        output::print_success(cli.json, &report, render_run);
+    } else {
+        // The rows are committed, so the report is real, but the run is not a
+        // success: `ok` is false, the error names the incomplete step, and the
+        // exit code is distinct from the busy code.
+        output::print_incomplete(
+            cli.json,
+            &report,
+            "sequence_reconciliation_required",
+            "the rows committed but the identity sequence was not reconciled",
+            "re-run execute with the same plan to retry; an identity sequence must use CACHE 1",
+            render_run,
+        );
+    }
+    Ok(exit)
+}
 
-    // A committed row import with an unreconciled sequence is not full success.
-    Ok(sequence_exit_code(&report.sequence_status))
+fn render_run(report: &safesync::RunReport) {
+    println!("Run:             {}", report.run_id);
+    println!("Status:          {}", report.status);
+    println!("Sequence:        {}", report.sequence_status);
+    println!("Rows written:    {}", report.rows_written);
+    println!("Destination:     {}", report.destination_digest);
+    if report.already_completed {
+        println!("This plan already completed; nothing was written.");
+    }
+    if sequence_exit_code(&report.sequence_status) != 0 {
+        println!(
+            "Sequence reconciliation is incomplete; re-run execute with the same plan to retry."
+        );
+    }
 }
 
 /// Exit code for a committed row import whose sequence reconciliation is
@@ -303,15 +316,28 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
     let report =
         safesync::status(run_id, &connection, provider.as_ref(), &Limits::default()).await?;
 
-    output::print_success(cli.json, &report, |report| {
-        println!("Run:             {}", report.run_id);
-        println!("Status:          {}", report.status);
-        println!("Sequence:        {}", report.sequence_status);
-        println!("Rows written:    {}", report.rows_written);
-        println!("Finished at:     {}", report.finished_at);
-    });
+    let exit = sequence_exit_code(&report.sequence_status);
+    if exit == 0 {
+        output::print_success(cli.json, &report, render_status);
+    } else {
+        output::print_incomplete(
+            cli.json,
+            &report,
+            "sequence_reconciliation_required",
+            "the rows committed but the identity sequence was not reconciled",
+            "re-run execute with the same plan to retry; an identity sequence must use CACHE 1",
+            render_status,
+        );
+    }
+    Ok(exit)
+}
 
-    Ok(sequence_exit_code(&report.sequence_status))
+fn render_status(report: &safesync::RunStatus) {
+    println!("Run:             {}", report.run_id);
+    println!("Status:          {}", report.status);
+    println!("Sequence:        {}", report.sequence_status);
+    println!("Rows written:    {}", report.rows_written);
+    println!("Finished at:     {}", report.finished_at);
 }
 
 fn key_rotate(cli: &Cli) -> Result<i32, CoreError> {

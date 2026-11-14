@@ -1808,3 +1808,131 @@ masking:
     // reported as completed, not as an unreconciled success.
     assert_eq!(envelope(&output)["data"]["sequenceStatus"], "completed");
 }
+
+#[tokio::test]
+async fn a_cached_sequence_is_not_reported_as_success() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+
+    let mut connection = connect(&destination).await;
+    sqlx::query("DELETE FROM public.identity_children")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM public.identity_parents")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    // A preallocating sequence cannot be proven quiescent, so the run must not
+    // claim success after committing the rows.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    enroll(&config, &source, &destination);
+
+    let spec = config.join("cached-spec.yaml");
+    std::fs::write(
+        &spec,
+        r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-0000000000c1
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 10
+  max_total_rows: 10
+  max_depth: 2
+  max_bytes: 1048576
+  timeout_ms: 10000
+masking:
+  policy: development-default@2
+"#,
+    )
+    .unwrap();
+
+    let plan_path = config.join("cached-plan.json");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "plan failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        6,
+        "an unreconciled sequence must exit 6, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let body = envelope(&output);
+    assert_eq!(
+        body["ok"], false,
+        "an unreconciled sequence must not be reported as ok"
+    );
+    assert_eq!(body["error"]["code"], "sequence_reconciliation_required");
+    assert_eq!(body["data"]["sequenceStatus"], "reconciliation_required");
+    assert!(
+        body["data"]["rowsWritten"].as_u64().unwrap() >= 1,
+        "the committed rows must still be reported"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}

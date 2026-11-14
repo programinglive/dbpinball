@@ -2014,3 +2014,87 @@ async fn a_non_owner_sequence_reports_reconciliation_required() {
         .execute(&mut admin)
         .await;
 }
+
+#[tokio::test]
+async fn a_cached_identity_sequence_is_not_reconciled_automatically() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let mut connection = connect(&destination).await;
+    // Put the sequence behind the imported identity and give it a preallocated
+    // block. Another backend can hold values from that block, and PostgreSQL
+    // documents that it keeps using them, so the mode must refuse.
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "reconciliation_required");
+
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        (before_last, before_called),
+        (after_last, after_called),
+        "a refused reconciliation must not move the sequence"
+    );
+    let cache: i64 = sqlx::query_scalar(
+        "SELECT seqcache FROM pg_sequence
+         WHERE seqrelid = 'public.identity_parents_id_seq'::regclass",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        cache, 10,
+        "a refused reconciliation must not rewrite the sequence"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}

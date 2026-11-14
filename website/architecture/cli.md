@@ -18,8 +18,9 @@ calls the core, and prints either human-readable text or one JSON object.
 
 Exit code 6 is the one exception to the `ErrorCode` map: the Safe Sync command
 returns it directly when the row import committed but the identity sequence needs
-reconciliation, so the envelope stays `ok: true` and `data.sequenceStatus` carries
-the state.
+reconciliation. That envelope is `ok: false` with
+`error.code = "sequence_reconciliation_required"`, and `data` is still populated
+with the committed run so the rows are not hidden.
 
 ## Design rules
 
