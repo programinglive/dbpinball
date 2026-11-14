@@ -162,7 +162,7 @@ impl BoundSession {
 
         if is_super || bypass_rls {
             return Err(CoreError::with_detail(
-                ErrorCode::PolicyRefusal,
+                ErrorCode::Operation,
                 "the source role is privileged; use a SELECT-only role",
                 "source_privileged",
             ));
@@ -171,14 +171,14 @@ impl BoundSession {
         for table in tables {
             if table_writes(&mut self.connection, table).await? {
                 return Err(CoreError::with_detail(
-                    ErrorCode::PolicyRefusal,
+                    ErrorCode::Operation,
                     format!("the source role can write to {table}"),
                     "source_privileged",
                 ));
             }
             if owns_table(&mut self.connection, table).await? {
                 return Err(CoreError::with_detail(
-                    ErrorCode::PolicyRefusal,
+                    ErrorCode::Operation,
                     format!("the source role owns {table}"),
                     "source_privileged",
                 ));
@@ -200,6 +200,22 @@ impl BoundSession {
                     "source_not_read_only",
                 )
             })?;
+        Ok(())
+    }
+
+    /// Open the destination transaction.
+    ///
+    /// `READ COMMITTED` is deliberate. The destination is protected by a
+    /// transaction-scoped advisory lock per plan and by `SHARE ROW EXCLUSIVE`
+    /// table locks, so every statement sees the state left by whoever held the
+    /// lock before. `REPEATABLE READ` would take its snapshot before the
+    /// advisory lock is granted, so a waiting run could miss the run that just
+    /// committed and then collide on the primary key.
+    pub async fn begin_destination_transaction(&mut self) -> Result<(), CoreError> {
+        sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut self.connection)
+            .await
+            .map_err(connection_error)?;
         Ok(())
     }
 
@@ -249,7 +265,7 @@ async fn apply_source_guards(
 
     if default_ro != "on" {
         return Err(CoreError::with_detail(
-            ErrorCode::PolicyRefusal,
+            ErrorCode::Operation,
             "the source session is not read-only",
             "source_not_read_only",
         ));

@@ -51,6 +51,10 @@ pub struct SelectionPlan {
 pub struct TableRows {
     pub table: QualifiedName,
     pub columns: Vec<String>,
+    /// Base type names parallel to `columns`, from the catalogue.
+    pub types: Vec<String>,
+    /// The columns that identify a row, in order.
+    pub row_identity: Vec<String>,
     pub rows: Vec<Vec<MaskedValue>>,
     pub total_bytes: u64,
 }
@@ -208,7 +212,11 @@ pub async fn extract_table(
 
             if table.row_identity.contains(&column.name) {
                 let rendered = masked.as_text().unwrap_or("").to_string();
-                identity_parts.push(format!("{}={}", column.name, rendered));
+                identity_parts.push(format!(
+                    "{}={}",
+                    column.name,
+                    crate::safesync::mask::normalize_identity(&rendered)
+                ));
             }
 
             if let Some(text) = masked.as_text() {
@@ -235,6 +243,8 @@ pub async fn extract_table(
     Ok(TableRows {
         table: name,
         columns: table.columns.iter().map(|c| c.name.clone()).collect(),
+        types: table.columns.iter().map(|c| c.type_name.clone()).collect(),
+        row_identity: table.row_identity.clone(),
         rows: masked_rows,
         total_bytes,
     })

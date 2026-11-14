@@ -21,6 +21,7 @@ which = "5"
 [dev-dependencies]
 tempfile = "3"
 url = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres"] }
 
 [features]
 integration = []

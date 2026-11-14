@@ -26,7 +26,11 @@ pub fn print_error(error: &CoreError, json_output: bool) -> i32 {
         let envelope = json!({
             "ok": false,
             "data": null,
-            "error": { "code": error.code, "message": error.message }
+            "error": {
+                "code": error.code,
+                "message": error.message,
+                "detail": error.detail
+            }
         });
         println!(
             "{}",

@@ -3,14 +3,19 @@
 //! decision.
 
 use serde::Serialize;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::domain::connection::DbConnection;
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::ports::credentials::CredentialProvider;
+use crate::safesync::audit::{AuditRecord, TableAudit};
 use crate::safesync::graph::TableInfo;
+use crate::safesync::import::{self, ConflictPolicy, TableImport};
 use crate::safesync::key::MaskKeyStore;
-use crate::safesync::mask::{Masker, MaskingPolicy};
-use crate::safesync::plan::{check_schema_drift, DryRunPlan};
+use crate::safesync::mask::{MaskStrategy, Masker, MaskingPolicy};
+use crate::safesync::plan::{check_schema_drift, DryRunPlan, PlanIdentity};
 use crate::safesync::planner::{self, SelectionPlan};
 use crate::safesync::session::{BoundSession, SessionIdentity, SessionRole};
 use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
@@ -72,6 +77,7 @@ pub async fn plan(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
     estimate: bool,
+    replace: bool,
 ) -> Result<DryRunPlan, CoreError> {
     spec.validate()?;
     let masker = masker_for(spec, keys)?;
@@ -115,7 +121,7 @@ pub async fn plan(
         now_ms,
     )?;
 
-    DryRunPlan::build(
+    let mut plan = DryRunPlan::build(
         spec,
         source_session.identity(),
         destination_session.identity(),
@@ -124,7 +130,16 @@ pub async fn plan(
         &masker,
         &estimates,
         now_ms,
-    )
+    )?;
+
+    // The conflict policy is the reviewed contract, so record it in the plan and
+    // bind it into the fingerprint.
+    if replace {
+        plan.import.conflict_policy = "replace".to_string();
+        plan.plan_fingerprint = plan.fingerprint();
+    }
+
+    Ok(plan)
 }
 
 /// Re-check a plan against live identities, the catalogue and the policy.
@@ -139,6 +154,14 @@ pub async fn validate(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
+    if plan.fingerprint() != plan.plan_fingerprint {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the plan file was modified after it was produced",
+            "plan_tampered",
+        ));
+    }
+
     if plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -148,6 +171,14 @@ pub async fn validate(
     }
 
     let masker = masker_for(spec, keys)?;
+
+    if masker.policy().hash != plan.masking.policy_hash {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking policy changed since the plan was made",
+            "mask_policy_changed",
+        ));
+    }
     let root_tables = root_tables(spec)?;
 
     let mut source_session =
@@ -296,6 +327,362 @@ async fn estimate_rows(
 
 fn filter_mismatch(message: &str) -> CoreError {
     CoreError::with_detail(ErrorCode::Usage, message, "spec_plan_mismatch")
+}
+
+/// Everything `execute` needs.
+pub struct ExecuteRequest<'a> {
+    pub plan: &'a DryRunPlan,
+    pub spec: &'a SafeSyncSpec,
+    pub acknowledgement: &'a str,
+    pub replace: bool,
+    pub source: &'a DbConnection,
+    pub destination: &'a DbConnection,
+}
+
+/// The result of a successful execution.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReport {
+    pub run_id: String,
+    pub plan_fingerprint: String,
+    pub already_completed: bool,
+    pub rows_written: u64,
+    pub destination_digest: String,
+    pub tables: Vec<TableImport>,
+    pub status: String,
+}
+
+/// The state of a recorded run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStatus {
+    pub run_id: String,
+    pub plan_fingerprint: String,
+    pub status: String,
+    pub rows_written: u64,
+    pub destination_digest: String,
+    pub finished_at: String,
+}
+
+/// Execute a plan. This is the only function that writes to a destination.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute(
+    request: ExecuteRequest<'_>,
+    credentials: &dyn CredentialProvider,
+    enrollments: &EnrollmentStore,
+    keys: &dyn MaskKeyStore,
+    audit_dir: Option<&Path>,
+    now_ms: u64,
+    cancel: Arc<AtomicBool>,
+) -> Result<RunReport, CoreError> {
+    request.spec.validate()?;
+
+    // The plan file is the reviewed contract. Recompute its fingerprint so a
+    // hand-edited plan cannot silently change the schema hash, key id or
+    // conflict policy under the fingerprint the operator acknowledged.
+    if request.plan.fingerprint() != request.plan.plan_fingerprint {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the plan file was modified after it was produced",
+            "plan_tampered",
+        ));
+    }
+
+    if request.plan.is_expired(now_ms) {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the plan expired; regenerate it",
+            "plan_expired",
+        ));
+    }
+
+    if request.acknowledgement != request.plan.plan_fingerprint {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            "the acknowledgement does not match the plan fingerprint",
+            "acknowledgement_mismatch",
+        ));
+    }
+
+    let masker = masker_for(request.spec, keys)?;
+
+    // A plan is bound to one mask key. Running it with a rotated key would
+    // produce different pseudonyms for the same rows, so refuse instead.
+    if masker.key_id() != request.plan.masking.key_id {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking key changed since the plan was made",
+            "mask_key_changed",
+        ));
+    }
+
+    if masker.policy().hash != request.plan.masking.policy_hash {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking policy changed since the plan was made",
+            "mask_policy_changed",
+        ));
+    }
+
+    // The conflict policy is part of the reviewed plan. A plan reviewed as
+    // non-destructive cannot be run with `--replace`.
+    let plan_replaces = request.plan.import.conflict_policy == "replace";
+    if request.replace != plan_replaces {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            "the conflict policy does not match the plan",
+            "conflict_policy_mismatch",
+        ));
+    }
+
+    let root_tables = root_tables(request.spec)?;
+
+    let mut source_session = BoundSession::open(
+        SessionRole::Source,
+        request.source,
+        credentials,
+        &request.plan.limits,
+    )
+    .await?;
+    assert_identity(
+        &source_session.identity().identity_key,
+        &request.plan.source,
+        "source_changed",
+    )?;
+    source_session.assert_source_role(&root_tables).await?;
+
+    // The specification is not trusted on its own. `planner::build` refuses a
+    // non-zero depth or child traversal, and the resulting contract must match
+    // the reviewed plan byte for byte.
+    let selection = planner::build(&mut source_session, request.spec, &masker).await?;
+    if crate::safesync::plan::spec_hash(request.spec, &selection) != request.plan.spec_hash {
+        return Err(filter_mismatch("the specification does not match the plan"));
+    }
+    check_filter_digests(request.plan, request.spec, &masker)?;
+
+    let mut total_rows = 0u64;
+    let mut total_bytes = 0u64;
+    let mut extracted = Vec::new();
+
+    for root in &request.spec.selection.roots {
+        let name = QualifiedName::parse(&root.table)?;
+        let Some(planned) = request
+            .plan
+            .tables
+            .iter()
+            .find(|planned| planned.schema == name.schema && planned.table == name.table)
+        else {
+            return Err(filter_mismatch(
+                "the plan does not contain a selected table",
+            ));
+        };
+
+        let Some(info) = selection
+            .tables
+            .iter()
+            .find(|table| table.schema == name.schema && table.table == name.table)
+        else {
+            return Err(filter_mismatch("the specification does not match the plan"));
+        };
+
+        // The plan's schema hash is the contract; refuse a source that changed.
+        if info.schema_hash != planned.schema_hash {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                format!("the schema of {name} changed since the plan was made"),
+                "schema_drift",
+            ));
+        }
+
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "the run was cancelled",
+                "cancelled",
+            ));
+        }
+
+        let rows = planner::extract_table(
+            &mut source_session,
+            info,
+            root,
+            &masker,
+            &request.plan.limits,
+        )
+        .await?;
+        total_rows = total_rows.saturating_add(rows.row_count());
+        total_bytes = total_bytes.saturating_add(rows.total_bytes);
+        if total_rows > request.plan.limits.max_total_rows {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "the selection exceeded max_total_rows",
+                "limit_exceeded",
+            ));
+        }
+        if total_bytes > request.plan.limits.max_bytes {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "the selection exceeded max_bytes",
+                "limit_exceeded",
+            ));
+        }
+        extracted.push(rows);
+    }
+
+    let _ = source_session.rollback().await;
+
+    let mut destination_session = BoundSession::open(
+        SessionRole::Destination,
+        request.destination,
+        credentials,
+        &request.plan.limits,
+    )
+    .await?;
+    assert_identity(
+        &destination_session.identity().identity_key,
+        &request.plan.destination,
+        "destination_changed",
+    )?;
+
+    let registry = enrollments.load()?;
+    let enrollment = registry.get(&request.destination.id);
+    authorize(
+        &source_session,
+        &destination_session,
+        request.destination,
+        enrollment,
+        now_ms,
+    )?;
+
+    let policy = if plan_replaces {
+        ConflictPolicy::Replace
+    } else {
+        ConflictPolicy::Refuse
+    };
+
+    let report = import::run(
+        &mut destination_session,
+        request.plan,
+        &extracted,
+        policy,
+        cancel,
+    )
+    .await?;
+
+    if let Some(directory) = audit_dir {
+        let record = AuditRecord {
+            run_id: report.run_id.clone(),
+            plan_fingerprint: request.plan.plan_fingerprint.clone(),
+            destination_connection_id: request.destination.id.clone(),
+            source_identity_key: request.plan.source.identity_key.clone(),
+            destination_identity_key: request.plan.destination.identity_key.clone(),
+            tables: extracted
+                .iter()
+                .map(|rows| TableAudit {
+                    schema: rows.table.schema.clone(),
+                    table: rows.table.table.clone(),
+                    rows: rows.row_count(),
+                    masked_columns: rows
+                        .columns
+                        .iter()
+                        .filter(|column| {
+                            masker
+                                .policy()
+                                .rule_for(&rows.table.schema, &rows.table.table, column)
+                                .map(|rule| rule.strategy != MaskStrategy::Keep)
+                                .unwrap_or(true)
+                        })
+                        .count() as u64,
+                })
+                .collect(),
+            policy: masker.policy().identifier(),
+            key_id: masker.key_id().to_string(),
+            outcome: if report.already_completed {
+                "already_completed".to_string()
+            } else {
+                "completed".to_string()
+            },
+            started_at_ms: now_ms,
+            finished_at_ms: now_ms,
+        };
+        let _ = crate::safesync::audit::write_record(directory, &record);
+    }
+
+    Ok(RunReport {
+        run_id: report.run_id,
+        plan_fingerprint: request.plan.plan_fingerprint.clone(),
+        already_completed: report.already_completed,
+        rows_written: report.rows_written,
+        destination_digest: report.destination_digest,
+        tables: report.tables,
+        status: if report.already_completed {
+            "already_completed".to_string()
+        } else {
+            "completed".to_string()
+        },
+    })
+}
+
+/// Read a recorded run's state from the destination.
+pub async fn status(
+    run_id: &str,
+    destination: &DbConnection,
+    credentials: &dyn CredentialProvider,
+    limits: &Limits,
+) -> Result<RunStatus, CoreError> {
+    let mut session =
+        BoundSession::open(SessionRole::Destination, destination, credentials, limits).await?;
+
+    let statement = format!(
+        "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, finished_at::text
+         FROM {}
+         WHERE run_id = $1::uuid",
+        crate::safesync::import::RUN_TABLE
+    );
+
+    let row = sqlx::query(&statement)
+        .bind(run_id)
+        .fetch_optional(&mut *session.connection())
+        .await
+        .map_err(|error| {
+            CoreError::redacted(
+                ErrorCode::Connection,
+                format!("the run state could not be read: {error}"),
+            )
+        })?;
+
+    let Some(row) = row else {
+        return Err(CoreError::with_detail(
+            ErrorCode::NotFound,
+            format!("run '{run_id}' was not found on the destination"),
+            "run_not_found",
+        ));
+    };
+
+    use sqlx::Row;
+    Ok(RunStatus {
+        run_id: row.try_get(0).unwrap_or_default(),
+        plan_fingerprint: row.try_get(1).unwrap_or_default(),
+        status: row.try_get(2).unwrap_or_default(),
+        rows_written: row.try_get::<i64, _>(3).unwrap_or(0) as u64,
+        destination_digest: row.try_get(4).unwrap_or_default(),
+        finished_at: row.try_get(5).unwrap_or_default(),
+    })
+}
+
+fn assert_identity(
+    session_key: &Option<String>,
+    planned: &PlanIdentity,
+    code: &'static str,
+) -> Result<(), CoreError> {
+    if *session_key != planned.identity_key {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the database identity changed since the plan was made",
+            code,
+        ));
+    }
+    Ok(())
 }
 
 /// Re-exported so a later slice can import one table without reaching into the

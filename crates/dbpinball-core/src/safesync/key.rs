@@ -52,6 +52,22 @@ impl MaskKey {
         Ok(Self { id, bytes })
     }
 
+    /// Build a key from 64 hex characters. The id is derived from the key.
+    ///
+    /// This exists for automation that supplies a key through an approved
+    /// channel (see the CLI `--mask-key-source env`), never for a key argument.
+    pub fn from_hex(encoded: &str) -> Result<Self, CoreError> {
+        let bytes = decode_hex(encoded).ok_or_else(|| {
+            CoreError::with_detail(
+                ErrorCode::Usage,
+                "the masking key must be 64 hex characters",
+                "mask_key_invalid",
+            )
+        })?;
+        let id = key_id_for(&bytes);
+        Ok(Self { id, bytes })
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

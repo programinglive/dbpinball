@@ -1,5 +1,6 @@
 pub mod connections;
 pub mod doctor;
+pub mod safe_sync;
 pub mod schema;
 pub mod security;
 
@@ -24,5 +25,6 @@ async fn run(cli: &Cli) -> Result<i32, CoreError> {
         Command::Connections { command } => connections::run(cli, command).await,
         Command::Schema { command } => schema::run(cli, command).await,
         Command::Security { command } => security::run(cli, command).await,
+        Command::SafeSync { command } => safe_sync::run(cli, command).await,
     }
 }

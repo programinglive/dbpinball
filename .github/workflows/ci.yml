@@ -192,6 +192,112 @@ jobs:
           DBPINBALL_TEST_MYSQL_URL: mysql://dbpinball:dbpinball_test@127.0.0.1:3306/dbpinball_test
         run: cargo test -p dbpinball-cli --features integration --test cli_integration -- --nocapture
 
+  # M4 Slice 1 needs two isolated clusters: a restricted source and a writable
+  # destination. Sharing one cluster would not prove that identity binding is
+  # enforced across servers.
+  safesync-integration:
+    name: Safe Sync integration (two clusters)
+    runs-on: ubuntu-latest
+    services:
+      source:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: m4owner
+          POSTGRES_PASSWORD: m4owner
+          POSTGRES_DB: srcdb
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U m4owner -d srcdb"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 40
+      destination:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: m4dst
+          POSTGRES_PASSWORD: m4dst
+          POSTGRES_DB: dstdb
+        ports:
+          - 55434:5432
+        options: >-
+          --health-cmd "pg_isready -U m4dst -d dstdb"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      # The source role is deliberately SELECT-only: a superuser source must be
+      # refused, so the tests need a genuinely restricted role plus a separate
+      # superuser URL for the refusal fixtures.
+      - name: Create the restricted source role and fixtures
+        env:
+          PGPASSWORD: m4owner
+        run: |
+          psql -h 127.0.0.1 -p 55433 -U m4owner -d srcdb -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE m4src LOGIN PASSWORD 'm4src';
+          GRANT CONNECT ON DATABASE srcdb TO m4src;
+          GRANT USAGE ON SCHEMA public TO m4src;
+          CREATE TABLE public.accounts (
+            id uuid PRIMARY KEY,
+            email text NOT NULL,
+            full_name text NOT NULL
+          );
+          INSERT INTO public.accounts VALUES
+            ('0b9f4c3e-0000-0000-0000-000000000001', 'alice@example.com', 'Alice Example'),
+            ('0b9f4c3e-0000-0000-0000-000000000002', 'bob@example.com', 'Bob Example'),
+            ('0b9f4c3e-0000-0000-0000-000000000003', 'carol@example.com', 'Carol Example');
+          GRANT SELECT ON public.accounts TO m4src;
+          SQL
+
+      - name: Create the destination fixture
+        env:
+          PGPASSWORD: m4dst
+        run: |
+          psql -h 127.0.0.1 -p 55434 -U m4dst -d dstdb -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE public.accounts (
+            id uuid PRIMARY KEY,
+            email text NOT NULL,
+            full_name text NOT NULL
+          );
+          SQL
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Run core Safe Sync integration tests
+        env:
+          DBPINBALL_TEST_PG_SOURCE_URL: postgres://m4src:m4src@127.0.0.1:55433/srcdb
+          DBPINBALL_TEST_PG_DEST_URL: postgres://m4dst:m4dst@127.0.0.1:55434/dstdb
+          DBPINBALL_TEST_PG_SUPER_URL: postgres://m4owner:m4owner@127.0.0.1:55433/srcdb
+        run: |
+          set -euo pipefail
+          cargo test -p dbpinball-core --features integration --test safesync_integration -- --nocapture | tee /tmp/safesync-core.log
+          # A skipped suite reports zero tests; that is not acceptance.
+          ! grep -q "test result: ok. 0 passed" /tmp/safesync-core.log
+
+      - name: Run CLI Safe Sync acceptance tests
+        env:
+          DBPINBALL_TEST_PG_SOURCE_URL: postgres://m4src:m4src@127.0.0.1:55433/srcdb
+          DBPINBALL_TEST_PG_DEST_URL: postgres://m4dst:m4dst@127.0.0.1:55434/dstdb
+          DBPINBALL_TEST_PG_SUPER_URL: postgres://m4owner:m4owner@127.0.0.1:55433/srcdb
+        run: |
+          set -euo pipefail
+          cargo test -p dbpinball-cli --features integration --test safesync_cli_integration -- --nocapture | tee /tmp/safesync-cli.log
+          ! grep -q "test result: ok. 0 passed" /tmp/safesync-cli.log
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
