@@ -33,15 +33,39 @@ struct Target {
 }
 
 fn target(variable: &str, id: &str) -> Option<Target> {
-    let url = std::env::var(variable).ok()?;
-    let parsed = url::Url::parse(&url).ok()?;
+    // A skipped database test is not a pass. CI always provides the URLs, so a
+    // missing one there is a configuration failure, not a skip.
+    let Ok(url) = std::env::var(variable) else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} must be set when CI is set: a skipped database test is not a pass"
+        );
+        return None;
+    };
+    let parsed = match url::Url::parse(&url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{variable} is not a valid URL when CI is set: {error}"
+            );
+            return None;
+        }
+    };
+    let Some(host) = parsed.host_str() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} has no host when CI is set"
+        );
+        return None;
+    };
 
     Some(Target {
         connection: DbConnection {
             id: id.to_string(),
             name: id.to_string(),
             engine: DbEngine::Postgres,
-            host: parsed.host_str()?.to_string(),
+            host: host.to_string(),
             port: parsed.port().unwrap_or(5432),
             database: parsed.path().trim_start_matches('/').to_string(),
             username: parsed.username().to_string(),
@@ -123,6 +147,16 @@ fn envelope(output: &Output) -> Value {
 
 fn code(output: &Output) -> i32 {
     output.status.code().unwrap_or(-1)
+}
+
+/// Re-seal a plan with the test mask key, so a test can change a field and keep
+/// a valid authorization envelope.
+fn seal_plan(plan: &mut dbpinball_core::safesync::DryRunPlan) {
+    use dbpinball_core::safesync::{resolve_policy, MaskKey, Masker};
+    let key = MaskKey::from_hex(KEY_HEX).unwrap();
+    let policy = resolve_policy(&plan.masking.policy).unwrap();
+    let masker = Masker::new(policy, key).unwrap();
+    plan.seal(&masker);
 }
 
 fn spec_file(directory: &Path, id: &str) -> PathBuf {
@@ -293,6 +327,8 @@ async fn an_end_to_end_masked_import_succeeds() {
     let body = envelope(&output);
     assert_eq!(body["data"]["status"], "completed");
     assert_eq!(body["data"]["rowsWritten"], 1);
+    // A run with no identity column needs no sequence movement.
+    assert_eq!(body["data"]["sequenceStatus"], "not_required");
 
     let rows = destination_rows(&destination).await;
     assert_eq!(rows.len(), 1);
@@ -532,11 +568,15 @@ async fn an_expired_plan_exits_eight() {
         "0b9f4c3e-0000-0000-0000-000000000001",
     );
 
-    let mut plan_json: Value =
+    // A legitimately expired plan still has a valid authorization envelope for
+    // its content, so the expiry check, not the integrity check, must fire.
+    let mut plan: dbpinball_core::safesync::DryRunPlan =
         serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
-    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
-    plan_json["expires_at_ms"] = Value::from(1u64);
-    std::fs::write(&plan_path, serde_json::to_string(&plan_json).unwrap()).unwrap();
+    plan.expires_at_ms = plan.created_at_ms + 1;
+    plan.plan_fingerprint = plan.fingerprint();
+    seal_plan(&mut plan);
+    let fingerprint = plan.plan_fingerprint.clone();
+    std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
 
     let spec = config.join("spec.yaml");
     let output = cli(
@@ -557,6 +597,115 @@ async fn an_expired_plan_exits_eight() {
     );
     assert_eq!(code(&output), 8);
     assert_eq!(envelope(&output)["error"]["detail"], "plan_expired");
+}
+
+#[tokio::test]
+async fn an_extended_expiry_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+
+    let mut plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+    // Extend the lifetime well beyond the maximum window.
+    let created = plan_json["created_at_ms"].as_u64().unwrap_or(0);
+    plan_json["expires_at_ms"] = Value::from(created + 3_600_001);
+    std::fs::write(&plan_path, serde_json::to_string(&plan_json).unwrap()).unwrap();
+
+    let spec = config.join("spec.yaml");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+
+    assert_eq!(code(&output), 8);
+    assert_eq!(envelope(&output)["error"]["detail"], "plan_expiry_invalid");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+}
+
+#[tokio::test]
+async fn a_shifted_issuance_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+
+    // Shift both timestamps forward and recompute the public fingerprint. The
+    // authorization envelope still covers the original issuance, so this is
+    // refused even though the fingerprint is self-consistent.
+    let mut plan: dbpinball_core::safesync::DryRunPlan =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan.created_at_ms += 5_000;
+    plan.expires_at_ms += 5_000;
+    plan.plan_fingerprint = plan.fingerprint();
+    let fingerprint = plan.plan_fingerprint.clone();
+    std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+
+    let spec = config.join("spec.yaml");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+
+    assert_eq!(code(&output), 8);
+    assert_eq!(envelope(&output)["error"]["detail"], "plan_tampered");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
 }
 
 #[tokio::test]
@@ -1573,4 +1722,241 @@ async fn two_overlapping_plans_do_not_corrupt_the_destination() {
     .await
     .unwrap();
     assert_eq!(broken.0, 0);
+}
+
+#[tokio::test]
+async fn an_identity_plan_reports_the_sequence_status() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+
+    // Clear the identity tables and put the sequence behind the imported id.
+    let mut connection = connect(&destination).await;
+    sqlx::query("DELETE FROM public.identity_children")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM public.identity_parents")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    enroll(&config, &source, &destination);
+
+    let spec = config.join("identity-spec.yaml");
+    std::fs::write(
+        &spec,
+        r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-0000000000c1
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 10
+  max_total_rows: 10
+  max_depth: 2
+  max_bytes: 1048576
+  timeout_ms: 10000
+masking:
+  policy: development-default@2
+"#,
+    )
+    .unwrap();
+
+    let plan_path = config.join("identity-plan.json");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "plan failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "execute failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // The owner can take the lock, so the sequence is raised and the run is
+    // reported as completed, not as an unreconciled success.
+    assert_eq!(envelope(&output)["data"]["sequenceStatus"], "completed");
+}
+
+#[tokio::test]
+async fn a_cached_sequence_is_not_reported_as_success() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+
+    let mut connection = connect(&destination).await;
+    sqlx::query("DELETE FROM public.identity_children")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM public.identity_parents")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    // A preallocating sequence cannot be proven quiescent, so the run must not
+    // claim success after committing the rows.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    enroll(&config, &source, &destination);
+
+    let spec = config.join("cached-spec.yaml");
+    std::fs::write(
+        &spec,
+        r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-0000000000c1
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 10
+  max_total_rows: 10
+  max_depth: 2
+  max_bytes: 1048576
+  timeout_ms: 10000
+masking:
+  policy: development-default@2
+"#,
+    )
+    .unwrap();
+
+    let plan_path = config.join("cached-plan.json");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "plan failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        6,
+        "an unreconciled sequence must exit 6, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let body = envelope(&output);
+    assert_eq!(
+        body["ok"], false,
+        "an unreconciled sequence must not be reported as ok"
+    );
+    assert_eq!(body["error"]["code"], "sequence_reconciliation_required");
+    assert_eq!(body["data"]["sequenceStatus"], "reconciliation_required");
+    assert!(
+        body["data"]["rowsWritten"].as_u64().unwrap() >= 1,
+        "the committed rows must still be reported"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
 }

@@ -320,6 +320,37 @@ jobs:
           GRANT SELECT ON public.rls_parents, public.rls_children TO m4src;
           ALTER TABLE public.rls_parents ENABLE ROW LEVEL SECURITY;
           CREATE POLICY rls_visible ON public.rls_parents FOR SELECT TO m4src USING (id = 'R1');
+          -- Identity and generated column fixture.
+          CREATE TABLE public.identity_parents (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            code text NOT NULL,
+            full_label text GENERATED ALWAYS AS (code || ':' || id) STORED
+          );
+          CREATE TABLE public.identity_children (
+            id uuid PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES public.identity_parents(id)
+          );
+          INSERT INTO public.identity_parents (code) VALUES ('A'), ('B');
+          INSERT INTO public.identity_children VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000c1', 1),
+            ('0b9f4c3e-0000-0000-0000-0000000000c2', 2);
+          -- A nullable identity reference and an ordinary integer column.
+          CREATE TABLE public.identity_optional (
+            id uuid PRIMARY KEY,
+            parent_id bigint REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.sensitive_metrics (
+            id uuid PRIMARY KEY,
+            salary bigint NOT NULL,
+            label text NOT NULL
+          );
+          INSERT INTO public.identity_optional VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000d1', NULL),
+            ('0b9f4c3e-0000-0000-0000-0000000000d2', 1);
+          INSERT INTO public.sensitive_metrics VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000e1', 90000, 'metric one');
+          GRANT SELECT ON public.identity_parents, public.identity_children,
+            public.identity_optional, public.sensitive_metrics TO m4src;
           SQL
 
       - name: Create the destination fixture
@@ -370,6 +401,24 @@ jobs:
           CREATE TABLE public.rls_children (
             id text PRIMARY KEY,
             parent_id text NOT NULL REFERENCES public.rls_parents(id)
+          );
+          CREATE TABLE public.identity_parents (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            code text NOT NULL,
+            full_label text GENERATED ALWAYS AS (code || ':' || id) STORED
+          );
+          CREATE TABLE public.identity_children (
+            id uuid PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.identity_optional (
+            id uuid PRIMARY KEY,
+            parent_id bigint REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.sensitive_metrics (
+            id uuid PRIMARY KEY,
+            salary bigint NOT NULL,
+            label text NOT NULL
           );
           SQL
 

@@ -50,6 +50,12 @@ pub struct TableRows {
     pub row_identity: Vec<String>,
     pub schema_hash: String,
     pub rls_active: bool,
+    /// True where the column is GENERATED (computed by the destination).
+    pub generated: Vec<bool>,
+    /// True where the column is any identity column.
+    pub identity: Vec<bool>,
+    /// True where the column is GENERATED ALWAYS AS IDENTITY.
+    pub identity_always: Vec<bool>,
     pub rows: Vec<Vec<MaskedValue>>,
     pub total_bytes: u64,
 }
@@ -124,7 +130,7 @@ pub async fn build(
     // Validate every discovered column's rule up front so the read path and the
     // metadata path agree on what a valid policy is.
     for info in &graph.tables {
-        masker.coverage(&info.schema, &info.table, &info.column_shapes())?;
+        masker.coverage(&info.schema, &info.table, &info.column_shapes(&graph))?;
     }
 
     if !effective_read {
@@ -367,7 +373,7 @@ fn metadata_only(
     for root in &spec.selection.roots {
         let name = QualifiedName::parse(&root.table)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
-        masker.coverage(&name.schema, &name.table, &info.column_shapes())?;
+        masker.coverage(&name.schema, &name.table, &info.column_shapes(graph))?;
         let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         roots.push(RootPlan {
             schema: name.schema.clone(),
@@ -396,6 +402,9 @@ fn metadata_only(
             row_identity: info.row_identity.clone(),
             schema_hash: info.schema_hash.clone(),
             rls_active: info.rls_active,
+            generated: info.columns.iter().map(|c| c.is_generated).collect(),
+            identity: info.columns.iter().map(|c| c.is_identity).collect(),
+            identity_always: info.columns.iter().map(|c| c.identity_always).collect(),
             rows: Vec::new(),
             total_bytes: 0,
         })
@@ -879,11 +888,11 @@ fn mask_table(
 
                 masker.mask_key(rule, &tuple)?
             } else {
-                masker.mask_value(
-                    rule,
-                    &identity,
-                    MaskInput::Text(raw.get(index).and_then(|v| v.as_deref()).unwrap_or("")),
-                )?
+                let input = match raw.get(index).and_then(|value| value.as_deref()) {
+                    Some(value) => MaskInput::Text(value),
+                    None => MaskInput::Null,
+                };
+                masker.mask_value(rule, &identity, input)?
             };
 
             if let Some(text) = masked.as_text() {
@@ -896,7 +905,12 @@ fn mask_table(
         let mut identity_parts = Vec::new();
         for (index, column) in info.columns.iter().enumerate() {
             if info.row_identity.contains(&column.name) {
-                let rendered = values[index].as_text().unwrap_or("").to_string();
+                // A NULL identity is refused earlier, but never conflate it
+                // with an empty string if it ever reaches here.
+                let rendered = match &values[index] {
+                    MaskedValue::Null => "\u{0}null".to_string(),
+                    other => other.as_text().unwrap_or("").to_string(),
+                };
                 identity_parts.push(format!(
                     "{}={}",
                     column.name,
@@ -917,6 +931,9 @@ fn mask_table(
         row_identity: info.row_identity.clone(),
         schema_hash: info.schema_hash.clone(),
         rls_active: info.rls_active,
+        generated: info.columns.iter().map(|c| c.is_generated).collect(),
+        identity: info.columns.iter().map(|c| c.is_identity).collect(),
+        identity_always: info.columns.iter().map(|c| c.identity_always).collect(),
         rows,
         total_bytes,
     })
@@ -1011,6 +1028,12 @@ fn render_value(value: &FilterValue) -> Result<String, CoreError> {
 
 /// Extract and mask one table with no traversal. Kept as a stable helper for
 /// callers and tests that only need a single table.
+/// Extract and mask one table with no traversal.
+///
+/// This is a test-facing helper only. It is compiled out of production builds,
+/// refuses a table that has foreign keys (an empty graph would hide real
+/// dependencies), and enforces the row bound.
+#[cfg(any(test, feature = "integration"))]
 pub async fn extract_table(
     session: &mut BoundSession,
     info: &TableInfo,
@@ -1018,11 +1041,24 @@ pub async fn extract_table(
     masker: &Masker,
     limits: &Limits,
 ) -> Result<TableRows, CoreError> {
+    let name = info.name();
+    let graph = discover_parents(session, std::slice::from_ref(&name), 0).await?;
+    if !graph.edges.is_empty() {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!("{name} has foreign keys; use the bounded planner"),
+            "unguarded_extraction_refused",
+        ));
+    }
+
     let raw = fetch_root(session, info, root, limits).await?;
-    let graph = SchemaGraph {
-        tables: vec![info.clone()],
-        edges: Vec::new(),
-    };
+    if raw.len() as u64 > limits.max_rows_per_table {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            format!("{name} exceeded max_rows_per_table"),
+            "limit_exceeded",
+        ));
+    }
     mask_table(info, &raw, masker, &graph)
 }
 
@@ -1045,9 +1081,11 @@ pub fn quote_ident(identifier: &str) -> String {
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
-    CoreError::redacted(
+    crate::safesync::database_error(
         ErrorCode::Connection,
-        format!("source extraction failed: {error}"),
+        "source extraction",
+        "source_error",
+        error,
     )
 }
 

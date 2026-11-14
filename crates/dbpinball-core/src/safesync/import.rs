@@ -20,7 +20,8 @@ use crate::safesync::planner::{quote_ident, TableRows};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::QualifiedName;
 
-/// The destination run table. It is created inside the data transaction.
+/// The destination run table. It is created in autocommit before the data
+/// transaction, so a failed CREATE leaves the connection usable.
 pub const RUN_TABLE: &str = "public.dbpinball_safe_sync_runs";
 
 /// What to do when the destination is not empty.
@@ -326,6 +327,277 @@ async fn run_inner(
     })
 }
 
+/// Reconcile identity sequences after the row transaction has committed.
+///
+/// `setval` is not rolled back with the rows, so it runs after the commit as a
+/// separate, idempotent step. The supported mode is deliberately restricted and
+/// its safety is enforced, not assumed:
+///
+/// - an empty table, or a table whose imported identity values are not
+///   positive, needs no movement and reports `not_required`;
+/// - a sequence that already covers the imported maximum, and uses `CACHE 1`,
+///   needs no movement and reports `not_required`;
+/// - a sequence behind the imported maximum is raised to that maximum and
+///   reports `completed`;
+/// - a sequence whose state cannot be read, whose lock cannot be taken (missing
+///   privilege, lock timeout) or whose cache preallocates values is not touched
+///   and reports `reconciliation_required`.
+///
+/// The cache precondition is checked before the value is compared, so a `CACHE`
+/// greater than 1 is `reconciliation_required` even when the sequence is already
+/// ahead of the imported maximum. The precedence is deliberate: "ahead" is not
+/// proof of safety while a backend can hold an unobserved block.
+///
+/// The read and the `setval` run inside one transaction that first changes the
+/// sequence with `ALTER SEQUENCE ... CACHE <current>`. PostgreSQL documents that
+/// `ALTER SEQUENCE` blocks concurrent `nextval`, `currval`, `lastval` and
+/// `setval`, and the backend takes a `ShareRowExclusiveLock` on the sequence, so
+/// while that lock is held the observed `last_value` cannot move between the
+/// read and the write. The raise is `setval(seq, GREATEST(max, last_value),
+/// true)`, so it never lowers the value it observed.
+///
+/// Only `CACHE 1` sequences are reconciled automatically. With a larger cache a
+/// backend can hold a preallocated block whose values this session cannot see or
+/// revoke, and the PostgreSQL documentation says such backends keep using their
+/// cached values until they notice the change. A two-session test on PostgreSQL
+/// 18 shows that the storage rewrite performed by the `ALTER` does discard those
+/// blocks, but that is not part of the documented contract, so the mode refuses
+/// instead of depending on it. The check is a snapshot taken before the lock: a
+/// cache changed by an uncoordinated external writer mid-run is outside the
+/// supported mode, which requires a quiescent destination.
+pub async fn reconcile_sequences(
+    session: &mut BoundSession,
+    tables: &[TableRows],
+    run_id: &str,
+) -> Result<String, CoreError> {
+    let mut raised = false;
+    let mut unproven = false;
+
+    for table in tables {
+        for (index, column) in table.columns.iter().enumerate() {
+            if !table.identity.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let qualified = format!("{}.{}", table.table.schema, table.table.table);
+            let sequence: Option<String> =
+                sqlx::query_scalar("SELECT pg_get_serial_sequence($1, $2)")
+                    .bind(&qualified)
+                    .bind(column)
+                    .fetch_one(&mut *session.connection())
+                    .await
+                    .map_err(connection_error)?;
+            let Some(sequence) = sequence else {
+                continue;
+            };
+
+            let max: Option<i64> = sqlx::query_scalar(&format!(
+                "SELECT MAX({})::bigint FROM {}.{}",
+                quote_ident(column),
+                quote_ident(&table.table.schema),
+                quote_ident(&table.table.table)
+            ))
+            .fetch_one(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+
+            // An empty table, or a non-positive identity value, cannot collide
+            // with a sequence that starts at 1. No movement is required, and
+            // `setval(0)` is never attempted.
+            let Some(max) = max.filter(|value| *value > 0) else {
+                continue;
+            };
+
+            let state: Option<(String, String, i64)> = sqlx::query_as(
+                "SELECT n.nspname::text, c.relname::text, s.seqcache
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 JOIN pg_sequence s ON s.seqrelid = c.oid
+                 WHERE c.oid = to_regclass($1)",
+            )
+            .bind(&sequence)
+            .fetch_optional(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            let Some((sequence_schema, sequence_name, cache)) = state else {
+                // The sequence disappeared between discovery and reconciliation.
+                unproven = true;
+                continue;
+            };
+
+            // A sequence with a larger cache hands out preallocated blocks that
+            // this session can neither observe nor revoke. PostgreSQL documents
+            // that other backends keep using their cached values, so the mode
+            // refuses rather than claiming a quiescence it cannot prove.
+            if cache > 1 {
+                unproven = true;
+                continue;
+            }
+
+            let qualified_sequence = format!(
+                "{}.{}",
+                quote_ident(&sequence_schema),
+                quote_ident(&sequence_name)
+            );
+
+            // One transaction per sequence: the lock is held until COMMIT, so
+            // external writers are blocked for the read and the setval, and
+            // released before the next sequence.
+            sqlx::query("BEGIN")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+            // Bound the lock wait so a stuck external writer cannot hang the
+            // run; a timeout is reported as reconciliation_required.
+            sqlx::query("SET LOCAL lock_timeout = '5000'")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+
+            // The ALTER takes the ShareRowExclusiveLock and keeps the cache at
+            // its current value, which the check above proved is 1.
+            let locked = sqlx::query(&format!(
+                "ALTER SEQUENCE {qualified_sequence} CACHE {cache}"
+            ))
+            .execute(&mut *session.connection())
+            .await;
+            if let Err(error) = locked {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
+                if is_lock_or_privilege(&error) {
+                    unproven = true;
+                    continue;
+                }
+                return Err(connection_error(error));
+            }
+
+            let state = sqlx::query_as::<_, (i64, bool)>(&format!(
+                "SELECT last_value, is_called FROM {qualified_sequence}"
+            ))
+            .fetch_optional(&mut *session.connection())
+            .await;
+            let state = match state {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK")
+                        .execute(&mut *session.connection())
+                        .await;
+                    return Err(connection_error(error));
+                }
+            };
+            let Some((last, is_called)) = state else {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
+                unproven = true;
+                continue;
+            };
+
+            // An unused sequence is at its start value; treat it as below any
+            // positive imported identity.
+            let current = if is_called { last } else { 0 };
+            if current < max {
+                // Raise only. `GREATEST` keeps the value we observed, and the
+                // lock guarantees no external writer moved it.
+                let set = sqlx::query(&format!(
+                    "SELECT setval($1::regclass, GREATEST($2::bigint, last_value), true)
+                     FROM {qualified_sequence}"
+                ))
+                .bind(&sequence)
+                .bind(max)
+                .execute(&mut *session.connection())
+                .await;
+                if let Err(error) = set {
+                    let _ = sqlx::query("ROLLBACK")
+                        .execute(&mut *session.connection())
+                        .await;
+                    return Err(connection_error(error));
+                }
+                raised = true;
+            }
+
+            sqlx::query("COMMIT")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+        }
+    }
+
+    let status = if unproven {
+        "reconciliation_required"
+    } else if raised {
+        "completed"
+    } else {
+        "not_required"
+    };
+
+    sqlx::query(&format!(
+        "UPDATE {RUN_TABLE} SET sequence_status = $2 WHERE run_id = $1::uuid"
+    ))
+    .bind(run_id)
+    .bind(status)
+    .execute(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+
+    Ok(status.to_string())
+}
+
+/// True when a driver error means the sequence lock or privilege was not
+/// available, so the safe action is to report `reconciliation_required`.
+fn is_lock_or_privilege(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| matches!(code.as_ref(), "42501" | "55P03" | "57014"))
+        .unwrap_or(false)
+}
+
+/// Read the persisted sequence status for a run.
+///
+/// Used when reconciliation fails, so the report reflects what the run row
+/// actually says instead of assuming `pending`.
+pub async fn persisted_sequence_status(
+    session: &mut BoundSession,
+    run_id: &str,
+) -> Result<String, CoreError> {
+    let status: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT sequence_status FROM {RUN_TABLE} WHERE run_id = $1::uuid"
+    ))
+    .bind(run_id)
+    .fetch_optional(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+    Ok(status.unwrap_or_else(|| "pending".to_string()))
+}
+
+/// The columns a run table must have. A pre-S2-b table is migrated additively;
+/// any other missing column is an incompatible schema and is refused.
+const RUN_TABLE_COLUMNS: &[&str] = &[
+    "run_id",
+    "plan_fingerprint",
+    "spec_hash",
+    "source_identity_key",
+    "destination_identity_key",
+    "schema_hash",
+    "masking_policy",
+    "mask_key_id",
+    "conflict_policy",
+    "import_mode",
+    "destination_digest",
+    "rows_written",
+    "status",
+    "sequence_status",
+    "finished_at",
+];
+
+/// Create the run table, or migrate an existing one additively.
+///
+/// `CREATE TABLE IF NOT EXISTS` does not add a column to an existing table, so
+/// an S1 or S2-a run table would lack `sequence_status`. This runs under the
+/// DDL advisory lock, so concurrent initializers are serialized, and it fails
+/// closed on any other missing column instead of silently discarding state.
 async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {RUN_TABLE} (
@@ -342,12 +614,85 @@ async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
            destination_digest text NOT NULL,
            rows_written bigint NOT NULL,
            status text NOT NULL,
+           sequence_status text NOT NULL DEFAULT 'pending',
            finished_at timestamptz NOT NULL DEFAULT now()
          )"
     ))
     .execute(&mut *session.connection())
     .await
     .map_err(connection_error)?;
+
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname::text
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = 'dbpinball_safe_sync_runs'
+           AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .fetch_all(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+
+    if !existing.iter().any(|column| column == "sequence_status") {
+        // Additive migration for an S1 or S2-a run table. Those milestones did
+        // not import identity columns, so their historical runs need no
+        // sequence movement; new runs still start `pending`. Both statements
+        // run in one transaction so a partial failure cannot leave the unsafe
+        // default in place.
+        sqlx::query("BEGIN")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+        let migrated = async {
+            sqlx::query(&format!(
+                "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'not_required'"
+            ))
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            sqlx::query(&format!(
+                "ALTER TABLE {RUN_TABLE} ALTER COLUMN sequence_status SET DEFAULT 'pending'"
+            ))
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            Ok::<(), CoreError>(())
+        }
+        .await;
+        match migrated {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *session.connection())
+                    .await
+                    .map_err(connection_error)?;
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
+                return Err(error);
+            }
+        }
+    }
+
+    let missing: Vec<&str> = RUN_TABLE_COLUMNS
+        .iter()
+        .copied()
+        .filter(|required| !existing.iter().any(|column| column == required))
+        .filter(|required| *required != "sequence_status")
+        .collect();
+    if !missing.is_empty() {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            format!(
+                "the run table has an incompatible schema; missing columns: {}",
+                missing.join(", ")
+            ),
+            "run_table_incompatible",
+        ));
+    }
+
     Ok(())
 }
 
@@ -381,30 +726,52 @@ async fn insert_row(
     table: &TableRows,
     row: &[MaskedValue],
 ) -> Result<(), CoreError> {
-    let columns = table
-        .columns
-        .iter()
-        .map(|column| quote_ident(column))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut columns = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut values = Vec::new();
+    let mut overriding = false;
 
-    let mut placeholders = Vec::with_capacity(table.types.len());
-    for (index, type_name) in table.types.iter().enumerate() {
-        let cast = cast_for(type_name)?;
-        placeholders.push(format!("CAST(${} AS {})", index + 1, cast));
+    for (index, column) in table.columns.iter().enumerate() {
+        if table.generated.get(index).copied().unwrap_or(false) {
+            // A generated column is recomputed by the destination.
+            continue;
+        }
+        if table.identity_always.get(index).copied().unwrap_or(false) {
+            overriding = true;
+        }
+
+        let cast = cast_for(&table.types[index])?;
+        columns.push(quote_ident(column));
+        placeholders.push(format!("CAST(${} AS {})", placeholders.len() + 1, cast));
+        values.push(
+            row.get(index)
+                .and_then(MaskedValue::as_text)
+                .map(str::to_string),
+        );
     }
 
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let overriding = if overriding {
+        "OVERRIDING SYSTEM VALUE "
+    } else {
+        ""
+    };
+
     let sql = format!(
-        "INSERT INTO {}.{} ({}) VALUES ({})",
+        "INSERT INTO {}.{} ({}) {}VALUES ({})",
         quote_ident(&table.table.schema),
         quote_ident(&table.table.table),
-        columns,
+        columns.join(", "),
+        overriding,
         placeholders.join(", ")
     );
 
     let mut query = sqlx::query(&sql);
-    for value in row {
-        query = query.bind(value.as_text().map(str::to_string));
+    for value in values {
+        query = query.bind(value);
     }
 
     query
@@ -502,6 +869,9 @@ fn cast_for(type_name: &str) -> Result<&'static str, CoreError> {
     match type_name {
         "uuid" => Ok("uuid"),
         "text" | "character varying" | "character" | "varchar" | "citext" | "name" => Ok("text"),
+        "bigint" => Ok("bigint"),
+        "integer" => Ok("integer"),
+        "smallint" => Ok("smallint"),
         other => Err(CoreError::with_detail(
             ErrorCode::Unsupported,
             format!("column type '{other}' is not supported in this slice"),
@@ -515,9 +885,16 @@ fn cancelled() -> CoreError {
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
+    // A server error may echo a bound value, an identifier, or a constraint
+    // detail. Only the SQLSTATE is propagated; the message is withheld.
+    let code = error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     CoreError::with_detail(
         ErrorCode::Operation,
-        format!("destination import failed: {error}"),
+        format!("destination import failed (SQLSTATE {code}); the server message is withheld"),
         "destination_import_failed",
     )
 }
@@ -553,5 +930,92 @@ mod tests {
         // A collision would serialise unrelated work or, worse, share a lock
         // between a plan and the run-table setup.
         assert_ne!(plan_lock_key("fingerprint-a"), RUN_TABLE_LOCK_KEY);
+    }
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        message: String,
+        code: String,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.message)
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl sqlx::error::DatabaseError for FakeDatabaseError {
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(&self.code))
+        }
+
+        fn message(&self) -> &str {
+            &self.message
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    #[test]
+    fn a_driver_error_never_leaks_the_server_message() {
+        let canary = "CANARY-SECRET-VALUE";
+        let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: format!("value {canary} rejected"),
+            code: "22P02".into(),
+        }));
+        let core = connection_error(error);
+        let rendered = format!("{:?} {} {:?}", core.code, core.message, core.detail);
+        assert!(!rendered.contains(canary));
+        assert!(core.message.contains("22P02"));
+    }
+
+    #[test]
+    fn the_shared_database_error_never_leaks_the_server_message() {
+        let canary = "CANARY-SECRET-VALUE";
+        let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: format!("value {canary} rejected"),
+            code: "42501".into(),
+        }));
+        let core = crate::safesync::database_error(
+            ErrorCode::Connection,
+            "source extraction",
+            "source_error",
+            error,
+        );
+        let rendered = format!("{:?} {} {:?}", core.code, core.message, core.detail);
+        assert!(!rendered.contains(canary));
+        assert!(core.message.contains("42501"));
+    }
+
+    #[test]
+    fn a_sequence_lock_or_privilege_error_is_reconciliation_required() {
+        for code in ["42501", "55P03", "57014"] {
+            let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+                message: "withheld".into(),
+                code: code.into(),
+            }));
+            assert!(is_lock_or_privilege(&error), "{code} must be unproven");
+        }
+        let other = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: "withheld".into(),
+            code: "42P01".into(),
+        }));
+        assert!(!is_lock_or_privilege(&other));
     }
 }

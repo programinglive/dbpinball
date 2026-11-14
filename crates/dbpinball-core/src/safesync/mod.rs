@@ -37,7 +37,9 @@ pub use mask::{
     MaskingPolicy, EMAIL_DOMAIN, FILTER_DOMAIN, MASK_DOMAIN,
 };
 pub use plan::{DryRunPlan, PlanIdentity, PLAN_VERSION};
-pub use planner::{extract_table, quote_ident, LimitCheck, RootPlan, SelectionResult, TableRows};
+#[cfg(any(test, feature = "integration"))]
+pub use planner::extract_table;
+pub use planner::{quote_ident, LimitCheck, RootPlan, SelectionResult, TableRows};
 pub use service::{
     execute, inspect, masker_for, plan as build_plan, resolve_policy, status, validate,
     ExecuteRequest, RunReport, RunStatus, ValidationReport,
@@ -48,3 +50,26 @@ pub use spec::{
     QualifiedName, RelationshipSpec, RootSelection, SafeSyncSpec, Selection, TraversalDirection,
     SPEC_VERSION,
 };
+
+/// Convert a driver error into a typed error that exposes only the SQLSTATE.
+///
+/// A server message can echo a bound value, an identifier, a constraint detail
+/// or a credential. The message is therefore withheld everywhere, not only on
+/// the destination path.
+pub(crate) fn database_error(
+    code: crate::domain::error::ErrorCode,
+    context: &str,
+    detail: &'static str,
+    error: sqlx::Error,
+) -> crate::domain::error::CoreError {
+    let sqlstate = error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    crate::domain::error::CoreError::with_detail(
+        code,
+        format!("{context} failed (SQLSTATE {sqlstate}); the server message is withheld"),
+        detail,
+    )
+}
