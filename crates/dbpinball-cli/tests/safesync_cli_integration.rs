@@ -815,12 +815,23 @@ async fn a_failed_insert_rolls_back_the_destination() {
     let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
     let spec = config.join("spec.yaml");
 
-    // A destination constraint rejects the masked row during the insert, after
-    // the transaction has begun. The constraint is not part of the schema hash,
-    // so this reaches the insert rather than failing the drift check.
+    // A destination trigger rejects the masked row during the insert, after the
+    // transaction has begun. A trigger is not part of the schema hash, so this
+    // reaches the insert rather than failing the drift check.
     let mut connection = connect(&destination).await;
+    let _ = sqlx::query("DROP TRIGGER IF EXISTS m4_reject_account ON public.accounts")
+        .execute(&mut connection)
+        .await;
     sqlx::query(
-        "ALTER TABLE public.accounts ADD CONSTRAINT m4_email_domain CHECK (email LIKE '%@example.com')",
+        "CREATE OR REPLACE FUNCTION public.m4_reject_account_row() RETURNS trigger
+         LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rejected'; END $$",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER m4_reject_account BEFORE INSERT ON public.accounts
+         FOR EACH ROW EXECUTE FUNCTION public.m4_reject_account_row()",
     )
     .execute(&mut connection)
     .await
@@ -851,7 +862,11 @@ async fn a_failed_insert_rolls_back_the_destination() {
     // The failed transaction left nothing behind.
     assert_eq!(destination_rows(&destination).await.len(), 0);
 
-    sqlx::query("ALTER TABLE public.accounts DROP CONSTRAINT m4_email_domain")
+    sqlx::query("DROP TRIGGER m4_reject_account ON public.accounts")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION public.m4_reject_account_row()")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -1383,4 +1398,179 @@ async fn replace_requires_a_replace_plan() {
         envelope(&output)["error"]["detail"],
         "conflict_policy_mismatch"
     );
+}
+
+fn orders_spec(directory: &Path, id: &str) -> PathBuf {
+    let path = directory.join(format!("orders-{id}.yaml"));
+    let body = format!(
+        r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.orders
+      filter:
+        - column: id
+          op: eq
+          value: {id}
+  relationships:
+    depth: 1
+    direction: parents
+limits:
+  max_rows_per_table: 100
+  max_total_rows: 100
+  max_depth: 3
+  max_bytes: 1048576
+  timeout_ms: 15000
+masking:
+  policy: development-default@2
+"#
+    );
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn two_overlapping_plans_do_not_corrupt_the_destination() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+
+    // Start from an empty relationship slice.
+    let mut connection = connect(&destination).await;
+    let _ = sqlx::query("BEGIN").execute(&mut connection).await;
+    let _ = sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut connection)
+        .await;
+    for table in ["orders", "customers"] {
+        let _ = sqlx::query(&format!("DELETE FROM public.{table}"))
+            .execute(&mut connection)
+            .await;
+    }
+    let _ = sqlx::query("COMMIT").execute(&mut connection).await;
+
+    // Two different plans: different root rows, different fingerprints,
+    // overlapping destination tables.
+    let spec_a = orders_spec(&config, "0b9f4c3e-0000-0000-0000-000000000001");
+    let spec_b = orders_spec(&config, "0b9f4c3e-0000-0000-0000-000000000002");
+
+    let mut fingerprints = Vec::new();
+    for spec in [&spec_a, &spec_b] {
+        let planned = cli(
+            &config,
+            &[
+                "safe-sync",
+                "plan",
+                "--spec",
+                &spec.to_string_lossy(),
+                "--out",
+                &config
+                    .join(format!("plan-{}.json", fingerprints.len()))
+                    .to_string_lossy(),
+            ],
+            &source,
+            &destination,
+        );
+        assert_eq!(
+            code(&planned),
+            0,
+            "{}",
+            String::from_utf8_lossy(&planned.stdout)
+        );
+        let path = config.join(format!("plan-{}.json", fingerprints.len()));
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        fingerprints.push(json["plan_fingerprint"].as_str().unwrap().to_string());
+    }
+    assert_ne!(fingerprints[0], fingerprints[1]);
+
+    let plan_a = config.join("plan-0.json");
+    let plan_b = config.join("plan-1.json");
+    let args_a = [
+        "safe-sync",
+        "execute",
+        "--plan",
+        &plan_a.to_string_lossy(),
+        "--spec",
+        &spec_a.to_string_lossy(),
+        "--ack",
+        &fingerprints[0],
+        "--yes",
+    ];
+    let args_b = [
+        "safe-sync",
+        "execute",
+        "--plan",
+        &plan_b.to_string_lossy(),
+        "--spec",
+        &spec_b.to_string_lossy(),
+        "--ack",
+        &fingerprints[1],
+        "--yes",
+    ];
+
+    let mut first = cli_command(&config, &args_a, &source, &destination);
+    let mut second = cli_command(&config, &args_b, &source, &destination);
+    let child_a = first
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let child_b = second
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let a = child_a.wait_with_output().unwrap();
+    let b = child_b.wait_with_output().unwrap();
+
+    let successes = [code(&a), code(&b)]
+        .iter()
+        .filter(|code| **code == 0)
+        .count();
+    assert_eq!(
+        successes,
+        1,
+        "exactly one plan may import: a={:?} b={:?}",
+        String::from_utf8_lossy(&a.stdout),
+        String::from_utf8_lossy(&b.stdout)
+    );
+
+    // The loser must refuse deterministically, not partially write.
+    let loser = if code(&a) == 0 { &b } else { &a };
+    assert_eq!(code(loser), 8);
+    assert_eq!(envelope(loser)["error"]["detail"], "destination_not_empty");
+
+    // No duplicates, and the imported order's parent exists.
+    let (orders,): (i64,) = sqlx::query_as("SELECT count(*) FROM public.orders")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let (customers,): (i64,) = sqlx::query_as("SELECT count(*) FROM public.customers")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(orders, 1, "one plan's root row only");
+    assert_eq!(customers, 1, "one parent row, no duplicate");
+
+    let broken: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM public.orders o
+         LEFT JOIN public.customers c ON c.code = o.customer_code
+         WHERE c.code IS NULL",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(broken.0, 0);
 }

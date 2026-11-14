@@ -593,13 +593,26 @@ impl Masker {
             ));
         }
 
-        // A fully NULL tuple is a reference that PostgreSQL does not enforce.
-        if tuple.iter().all(Option::is_none) {
+        // Preserve PostgreSQL NULL semantics per component: a NULL component
+        // stays NULL, and the non-NULL components are hashed with a NULL marker
+        // so they cannot match a real parent key.
+        if tuple
+            .get(rule.key_position)
+            .and_then(|value| value.as_ref())
+            .is_none()
+        {
             return Ok(MaskedValue::Null);
         }
 
+        // Versioned canonical key domain: the referenced table, the ordered
+        // referenced columns and the position are all bound, so two different
+        // key spaces with the same raw values cannot correlate.
         let mut material = String::new();
+        material.push_str("key-domain:v2");
+        material.push('\u{1f}');
         material.push_str(&domain.table);
+        material.push('\u{1f}');
+        material.push_str(&domain.columns.join("\u{1e}"));
         material.push('\u{1f}');
         material.push_str(&rule.key_position.to_string());
         for value in tuple {
@@ -609,9 +622,6 @@ impl Masker {
                     let value = normalize_identity(value);
                     material.push_str(&format!("v{}:{}", value.len(), value));
                 }
-                // A partially NULL tuple is still hashed, with a distinct
-                // marker, so a NOT NULL component is not nulled and the output
-                // cannot collide with a real key.
                 None => material.push('n'),
             }
         }
@@ -1256,16 +1266,45 @@ mod tests {
             }),
             key_position: position,
         };
-        let partial = masker
-            .mask_key(&rule(0), &[Some("x".into()), None])
-            .unwrap();
-        // Not NULL: a NOT NULL component must stay non-null.
-        assert!(partial.as_text().is_some());
-        // It cannot collide with the real (x, "") tuple.
+        let tuple = [Some("x".into()), None];
+        // The non-NULL component stays non-NULL.
+        let first = masker.mask_key(&rule(0), &tuple).unwrap();
+        assert!(first.as_text().is_some());
+        // The NULL component stays NULL.
+        assert_eq!(
+            masker.mask_key(&rule(1), &tuple).unwrap(),
+            MaskedValue::Null
+        );
+        // The partial tuple cannot match the real (x, "") tuple.
         let empty = masker
             .mask_key(&rule(0), &[Some("x".into()), Some("".into())])
             .unwrap();
-        assert_ne!(partial, empty);
+        assert_ne!(first, empty);
+    }
+
+    #[test]
+    fn different_column_orders_are_separated() {
+        let masker = masker();
+        let rule = |columns: &[&str]| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: columns.iter().map(|value| value.to_string()).collect(),
+            }),
+            key_position: 0,
+        };
+
+        let left = masker
+            .mask_key(&rule(&["a", "b"]), &[Some("x".into()), Some("y".into())])
+            .unwrap();
+        let right = masker
+            .mask_key(&rule(&["b", "a"]), &[Some("x".into()), Some("y".into())])
+            .unwrap();
+        assert_ne!(left, right);
     }
 
     #[test]

@@ -111,6 +111,22 @@ Safe Sync is still not generally available, but part of it exists on `main`:
   child foreign key still join, cycle detection with deferrable-only deferral,
   and parent-first import order.
 
+Within S2-a:
+
+- The key-domain material binds the referenced table, the ordered referenced
+  columns and the component position, so two different key spaces cannot
+  correlate.
+- A NULL foreign-key component stays NULL; a partially NULL tuple is hashed with
+  a NULL marker so a NOT NULL component is never nulled and cannot match a real
+  key. MATCH FULL partial-NULL tuples are refused.
+- The plan carries a structural foreign-key fingerprint (name, both sides,
+  ordered columns, match type, deferrability) and a per-table schema hash that
+  includes relevant CHECK constraints. A changed relationship, CHECK, column or
+  nullability invalidates the plan before any destination write.
+- Overlapping plans that share destination tables are serialized by the sorted
+  table locks; the second refuses with a deterministic conflict instead of
+  duplicating or overwriting rows.
+
 The plan carries the foreign-key graph, the requested depth, the import order,
 the canonical masking domains and the bounds, and all of them are bound to the
 plan fingerprint. A closure that a depth or a limit cannot complete is marked

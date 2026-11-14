@@ -67,6 +67,8 @@ pub struct PlanGraph {
     pub cycles: u64,
     pub max_depth_used: u8,
     pub direction: String,
+    /// Structural fingerprint of the foreign-key definitions.
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +184,7 @@ impl DryRunPlan {
                 cycles: selection.deferred.len() as u64,
                 max_depth_used: selection.max_depth_used,
                 direction: selection.direction.clone(),
+                fingerprint: crate::safesync::graph::graph_fingerprint(&selection.graph),
             },
             masking: PlanMasking {
                 policy: masker.policy().identifier(),
@@ -339,7 +342,8 @@ pub fn assert_graph_matches(
         || live_deferred != plan.constraints.deferred
         || planned_tables != live_tables
         || selection.edges as u64 != plan.graph.edges
-        || selection.deferred.len() as u64 != plan.graph.cycles;
+        || selection.deferred.len() as u64 != plan.graph.cycles
+        || crate::safesync::graph::graph_fingerprint(&selection.graph) != plan.graph.fingerprint;
 
     if changed {
         return Err(CoreError::with_detail(

@@ -780,3 +780,88 @@ async fn the_import_mode_is_recorded_and_bound() {
     assert_eq!(plan.constraints.order.len(), 1);
     let _ = ConflictPolicy::Refuse;
 }
+
+#[tokio::test]
+async fn a_destination_constraint_failure_rolls_back_every_row() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // The parent inserts first, then the child fails on a trigger: the whole
+    // transaction must roll back, including the already-inserted parent. A
+    // trigger is not part of the schema hash, so this is an insert-time failure
+    // rather than destination schema drift.
+    let mut connection = connect(&destination).await;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION public.m4_reject_order() RETURNS trigger
+         LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'policy rejected the row'; END $$",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let _ = sqlx::query("DROP TRIGGER IF EXISTS m4_reject_orders ON public.orders")
+        .execute(&mut connection)
+        .await;
+    sqlx::query(
+        "CREATE TRIGGER m4_reject_orders BEFORE INSERT ON public.orders
+         FOR EACH ROW EXECUTE FUNCTION public.m4_reject_order()",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let spec = spec(
+        "public.orders",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        1,
+    );
+    let error = plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        ErrorCode::Operation,
+        "detail={:?} message={}",
+        error.detail,
+        error.message
+    );
+
+    assert_eq!(count(&destination, "customers").await, 0);
+    assert_eq!(count(&destination, "orders").await, 0);
+    let runs: (i64,) = sqlx::query_as("SELECT count(*) FROM public.dbpinball_safe_sync_runs")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(runs.0, 0, "no run marker for a rolled-back import");
+    // The source is untouched.
+    let source_rows: (i64,) = {
+        let mut source_connection = connect(&source).await;
+        sqlx::query_as("SELECT count(*) FROM public.orders")
+            .fetch_one(&mut source_connection)
+            .await
+            .unwrap()
+    };
+    assert_eq!(source_rows.0, 4);
+
+    sqlx::query("DROP TRIGGER m4_reject_orders ON public.orders")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION public.m4_reject_order()")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}

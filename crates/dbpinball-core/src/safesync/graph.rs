@@ -76,6 +76,8 @@ pub struct ForeignKeyEdge {
     pub parent_columns: Vec<String>,
     pub deferrable: bool,
     pub initially_deferred: bool,
+    /// `s` (MATCH SIMPLE) or `f` (MATCH FULL).
+    pub match_type: String,
 }
 
 /// The tables and edges discovered for one selection.
@@ -166,6 +168,7 @@ async fn foreign_keys_of(
                 pc.relname::text,
                 con.condeferrable,
                 con.condeferred,
+                con.confmatchtype::text,
                 (SELECT array_agg(ca.attname::text ORDER BY o.n)
                    FROM unnest(con.conkey) WITH ORDINALITY AS o(attnum, n)
                    JOIN pg_attribute ca
@@ -195,8 +198,9 @@ async fn foreign_keys_of(
         let parent_table: String = row.try_get(2).unwrap_or_default();
         let deferrable: bool = row.try_get(3).unwrap_or(false);
         let initially_deferred: bool = row.try_get(4).unwrap_or(false);
-        let child_columns: Vec<String> = row.try_get(5).unwrap_or_default();
-        let parent_columns: Vec<String> = row.try_get(6).unwrap_or_default();
+        let match_type: String = row.try_get(5).unwrap_or_else(|_| "s".to_string());
+        let child_columns: Vec<String> = row.try_get(6).unwrap_or_default();
+        let parent_columns: Vec<String> = row.try_get(7).unwrap_or_default();
 
         let parent = QualifiedName {
             schema: parent_schema,
@@ -220,10 +224,46 @@ async fn foreign_keys_of(
             parent_columns,
             deferrable,
             initially_deferred,
+            match_type,
         });
     }
 
     Ok(edges)
+}
+
+/// A stable structural fingerprint of the discovered graph.
+///
+/// It binds the constraint name, both sides, the ordered column mapping, the
+/// match type and the deferrability state, so a changed relationship cannot
+/// reuse an old plan. Names and structure, not catalog OIDs, which are not
+/// stable across a dump and restore.
+pub fn graph_fingerprint(graph: &SchemaGraph) -> String {
+    let mut edges: Vec<&ForeignKeyEdge> = graph.edges.iter().collect();
+    edges.sort_by(|left, right| {
+        (left.name.as_str(), left.child.to_string())
+            .cmp(&(right.name.as_str(), right.child.to_string()))
+    });
+
+    let document = serde_json::json!({
+        "edges": edges
+            .iter()
+            .map(|edge| {
+                serde_json::json!({
+                    "name": edge.name,
+                    "child": edge.child.to_string(),
+                    "parent": edge.parent.to_string(),
+                    "childColumns": edge.child_columns,
+                    "parentColumns": edge.parent_columns,
+                    "deferrable": edge.deferrable,
+                    "initiallyDeferred": edge.initially_deferred,
+                    "matchType": edge.match_type,
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+
+    let canonical = serde_json::to_string(&document).unwrap_or_default();
+    crate::safesync::mask::hex_lower(&crate::safesync::mask::digest(canonical.as_bytes()))
 }
 
 pub async fn inspect_table(
@@ -331,12 +371,28 @@ pub async fn inspect_table(
         }
     }
 
+    // CHECK constraints that could reject a masked value are part of the shape.
+    let check_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(k.oid)::text
+         FROM pg_constraint k
+         JOIN pg_class c ON c.oid = k.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE k.contype = 'c' AND n.nspname = $1 AND c.relname = $2
+         ORDER BY k.conname",
+    )
+    .bind(&table.schema)
+    .bind(&table.table)
+    .fetch_all(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+
     let schema_hash = schema_hash(
         &table.schema,
         &table.table,
         &relkind,
         &columns,
         &row_identity,
+        &check_constraints,
     )?;
 
     Ok(TableInfo {
@@ -426,6 +482,7 @@ fn schema_hash(
     relkind: &str,
     columns: &[ColumnInfo],
     row_identity: &[String],
+    check_constraints: &[String],
 ) -> Result<String, CoreError> {
     let document = serde_json::json!({
         "schema": schema,
@@ -433,6 +490,7 @@ fn schema_hash(
         "relkind": relkind,
         "columns": columns,
         "rowIdentity": row_identity,
+        "checkConstraints": check_constraints,
     });
     let canonical = serde_json::to_string(&document).map_err(|error| {
         CoreError::new(
@@ -477,13 +535,13 @@ mod tests {
             is_identity: false,
             max_len: None,
         }];
-        let first = schema_hash("public", "accounts", "r", &columns, &["id".into()]).unwrap();
-        let second = schema_hash("public", "accounts", "r", &columns, &["id".into()]).unwrap();
+        let first = schema_hash("public", "accounts", "r", &columns, &["id".into()], &[]).unwrap();
+        let second = schema_hash("public", "accounts", "r", &columns, &["id".into()], &[]).unwrap();
         assert_eq!(first, second);
 
         let mut changed = columns;
         changed[0].type_name = "text".into();
-        let third = schema_hash("public", "accounts", "r", &changed, &["id".into()]).unwrap();
+        let third = schema_hash("public", "accounts", "r", &changed, &["id".into()], &[]).unwrap();
         assert_ne!(first, third);
     }
 

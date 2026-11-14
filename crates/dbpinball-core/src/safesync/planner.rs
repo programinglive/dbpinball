@@ -521,8 +521,14 @@ fn seed_parents(
             let Ok(tuple) = key_tuple(info, row, &edge.child_columns) else {
                 continue;
             };
-            // A NULL component means PostgreSQL does not enforce the reference.
-            if tuple.iter().any(Option::is_none) {
+            // A NULL component means PostgreSQL does not enforce the reference
+            // under MATCH SIMPLE. Under MATCH FULL a partial NULL is invalid, so
+            // it must not be treated as a satisfied closure.
+            let nulls = tuple.iter().filter(|value| value.is_none()).count();
+            if nulls > 0 {
+                if edge.match_type == "f" && nulls < tuple.len() {
+                    truncated = true;
+                }
                 continue;
             }
             if level >= depth {
@@ -614,6 +620,21 @@ fn key_columns_for(info: &TableInfo, rule: &ColumnRule, graph: &SchemaGraph) -> 
     }
 
     vec![rule.column.clone()]
+}
+
+fn edge_for<'a>(
+    info: &TableInfo,
+    rule: &ColumnRule,
+    graph: &'a SchemaGraph,
+) -> Option<&'a ForeignKeyEdge> {
+    let domain = rule.key_domain.as_ref()?;
+    let parent = QualifiedName::parse(&domain.table).ok()?;
+    graph.edges.iter().find(|edge| {
+        edge.child == info.name()
+            && edge.parent == parent
+            && edge.parent_columns == domain.columns
+            && edge.child_columns.contains(&rule.column)
+    })
 }
 
 /// True when the referenced parent row is already in the selection.
@@ -814,6 +835,25 @@ fn mask_table(
                 }
                 let tuple = key_tuple(info, raw, &tuple_columns)?;
                 let _ = domain;
+
+                // MATCH FULL forbids a partially NULL key; refuse rather than
+                // inventing a parent dependency or a synthetic key.
+                if let Some(edge) = edge_for(info, rule, graph) {
+                    if edge.match_type == "f" {
+                        let nulls = tuple.iter().filter(|value| value.is_none()).count();
+                        if nulls > 0 && nulls < tuple.len() {
+                            return Err(CoreError::with_detail(
+                                ErrorCode::Unsupported,
+                                format!(
+                                    "column {} has a partially NULL MATCH FULL key",
+                                    column.name
+                                ),
+                                "match_full_partial_null",
+                            ));
+                        }
+                    }
+                }
+
                 masker.mask_key(rule, &tuple)?
             } else {
                 masker.mask_value(
@@ -1024,6 +1064,7 @@ mod tests {
             parent_columns: vec!["code".into()],
             deferrable: false,
             initially_deferred: false,
+            match_type: "s".into(),
         }];
         let ordering = order_tables(&tables, &edges).unwrap();
         assert_eq!(
@@ -1045,6 +1086,7 @@ mod tests {
                 parent_columns: vec!["id".into()],
                 deferrable: true,
                 initially_deferred: false,
+                match_type: "s".into(),
             },
             ForeignKeyEdge {
                 name: "b_a".into(),
@@ -1054,6 +1096,7 @@ mod tests {
                 parent_columns: vec!["id".into()],
                 deferrable: true,
                 initially_deferred: false,
+                match_type: "s".into(),
             },
         ];
         let ordering = order_tables(&tables, &edges).unwrap();
@@ -1073,6 +1116,7 @@ mod tests {
                 parent_columns: vec!["id".into()],
                 deferrable: true,
                 initially_deferred: false,
+                match_type: "s".into(),
             },
             ForeignKeyEdge {
                 name: "b_a".into(),
@@ -1082,6 +1126,7 @@ mod tests {
                 parent_columns: vec!["id".into()],
                 deferrable: false,
                 initially_deferred: false,
+                match_type: "s".into(),
             },
         ];
         let error = order_tables(&tables, &edges).unwrap_err();
@@ -1102,6 +1147,7 @@ mod tests {
             parent_columns: vec!["id".into()],
             deferrable: true,
             initially_deferred: false,
+            match_type: "s".into(),
         }];
         let ordering = order_tables(&tables, &edges).unwrap();
         assert_eq!(ordering.deferred.len(), 1);
