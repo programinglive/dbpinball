@@ -107,7 +107,12 @@ dbpinball schema inspect --connection <id> --database app --json
 ```json
 { "ok": true,  "data": { }, "error": null }
 { "ok": false, "data": null, "error": { "code": "connection", "message": "..." } }
+{ "ok": false, "data": { }, "error": { "code": "sequence_reconciliation_required", "message": "...", "detail": "..." } }
 ```
+
+The third shape is the only one that is `ok: false` and still carries `data`:
+Safe Sync committed the rows, so the run report is real, but the identity
+sequence was not reconciled and the run must not read as success.
 
 - Exactly one object on stdout with `--json`.
 - Diagnostics and warnings go to stderr.

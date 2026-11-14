@@ -165,11 +165,14 @@ Within S2-b:
   `nextval` resume above the reconciled value. The refusal is a snapshot taken
   before the lock, so a cache changed by an uncoordinated external writer
   mid-run is outside the supported mode, which requires a **quiescent
-  destination**. The lock also requires **ownership** of the identity sequence.
-  A role that can insert but does not own the sequence still imports the rows,
-  but the run reports `reconciliation_required` and the sequence is left
-  untouched. If the conditions cannot be established, the mode fails closed
-  instead of guessing.
+  destination**. The cache check runs before the value is compared, so a
+  `CACHE` greater than 1 is `reconciliation_required` even when the sequence is
+  already ahead of the imported maximum: "ahead" is not proof of safety while a
+  backend can hold an unobserved block. The lock also requires **ownership** of
+  the identity sequence. A role that can insert but does not own the sequence
+  still imports the rows, but the run reports `reconciliation_required` and the
+  sequence is left untouched. If the conditions cannot be established, the mode
+  fails closed instead of guessing.
 - An unreconciled sequence is never reported as success: the JSON envelope is
   `ok: false` with `error.code = "sequence_reconciliation_required"`, `data`
   still carries the committed run, and the CLI exits 6 (distinct from the

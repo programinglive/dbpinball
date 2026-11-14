@@ -269,7 +269,7 @@ async fn execute(
             &report,
             "sequence_reconciliation_required",
             "the rows committed but the identity sequence was not reconciled",
-            "re-run execute with the same plan to retry; an identity sequence must use CACHE 1",
+            SEQUENCE_DETAIL,
             render_run,
         );
     }
@@ -296,6 +296,11 @@ fn render_run(report: &safesync::RunReport) {
 /// incomplete. It is distinct from the documented "busy" code (9) so a script
 /// can tell "nothing happened" from "rows committed, sequence not reconciled".
 const EXIT_SEQUENCE_RECONCILIATION_REQUIRED: i32 = 6;
+
+/// Remediation shown for any incomplete reconciliation. The status does not say
+/// which precondition failed, so the detail names every supported cause instead
+/// of blaming the cache alone.
+const SEQUENCE_DETAIL: &str = "re-run execute with the same plan to retry; reconciliation needs a destination role that owns the sequence, a sequence with CACHE 1, and a lock it can take";
 
 fn sequence_exit_code(status: &str) -> i32 {
     match status {
@@ -325,7 +330,7 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
             &report,
             "sequence_reconciliation_required",
             "the rows committed but the identity sequence was not reconciled",
-            "re-run execute with the same plan to retry; an identity sequence must use CACHE 1",
+            SEQUENCE_DETAIL,
             render_status,
         );
     }

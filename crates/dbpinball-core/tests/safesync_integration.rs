@@ -58,7 +58,15 @@ struct Target {
 }
 
 fn target(variable: &str, id: &str) -> Option<Target> {
-    let url = std::env::var(variable).ok()?;
+    // A skipped database test is not a pass. CI always provides the URLs, so a
+    // missing one there is a configuration failure, not a skip.
+    let Ok(url) = std::env::var(variable) else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} must be set when CI is set: a skipped database test is not a pass"
+        );
+        return None;
+    };
     let parsed = url::Url::parse(&url).ok()?;
 
     let connection = DbConnection {

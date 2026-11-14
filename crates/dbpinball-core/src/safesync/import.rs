@@ -343,6 +343,11 @@ async fn run_inner(
 ///   privilege, lock timeout) or whose cache preallocates values is not touched
 ///   and reports `reconciliation_required`.
 ///
+/// The cache precondition is checked before the value is compared, so a `CACHE`
+/// greater than 1 is `reconciliation_required` even when the sequence is already
+/// ahead of the imported maximum. The precedence is deliberate: "ahead" is not
+/// proof of safety while a backend can hold an unobserved block.
+///
 /// The read and the `setval` run inside one transaction that first changes the
 /// sequence with `ALTER SEQUENCE ... CACHE <current>`. PostgreSQL documents that
 /// `ALTER SEQUENCE` blocks concurrent `nextval`, `currval`, `lastval` and

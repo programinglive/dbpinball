@@ -51,7 +51,15 @@ struct Target {
 }
 
 fn target(variable: &str, id: &str) -> Option<Target> {
-    let url = std::env::var(variable).ok()?;
+    // A skipped database test is not a pass. CI always provides the URLs, so a
+    // missing one there is a configuration failure, not a skip.
+    let Ok(url) = std::env::var(variable) else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} must be set when CI is set: a skipped database test is not a pass"
+        );
+        return None;
+    };
     let parsed = url::Url::parse(&url).ok()?;
     Some(Target {
         connection: DbConnection {
@@ -1796,7 +1804,7 @@ async fn the_sequence_lock_blocks_external_writers() {
     .await
     .unwrap();
 
-    // Hold the AccessExclusiveLock the reconciliation uses.
+    // Hold the ShareRowExclusiveLock the reconciliation takes.
     sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
     sqlx::query("ALTER SEQUENCE public.lock_probe_id_seq CACHE 1")
         .execute(&mut holder)
@@ -1919,7 +1927,7 @@ async fn a_non_owner_sequence_reports_reconciliation_required() {
     ]);
 
     // A non-owner role: it can insert and read, but it does not own the
-    // identity sequence, so it cannot take the AccessExclusiveLock.
+    // identity sequence, so it cannot take the ShareRowExclusiveLock.
     let mut admin = connect(&destination).await;
     let _ = sqlx::query("DROP OWNED BY m4limited")
         .execute(&mut admin)
@@ -2090,6 +2098,82 @@ async fn a_cached_identity_sequence_is_not_reconciled_automatically() {
     assert_eq!(
         cache, 10,
         "a refused reconciliation must not rewrite the sequence"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_ahead_cached_sequence_is_still_reported_as_requiring_reconciliation() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // The sequence is far ahead of the imported maximum, but it still holds a
+    // preallocated block. "Ahead" is not proof of safety: the cache check runs
+    // before the value is compared, so the run reports reconciliation_required.
+    let mut connection = connect(&destination).await;
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1000, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "reconciliation_required",
+        "the cache precondition precedes the ahead check"
+    );
+
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        (before_last, before_called),
+        (after_last, after_called),
+        "a refused reconciliation must not move an ahead cached sequence"
     );
 
     // Restore the ordinary identity cache for the tests that follow.

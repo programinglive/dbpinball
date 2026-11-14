@@ -1164,9 +1164,11 @@ Consequences, fixed for M4:
   backend still returned `2`, while the `ALTER`-based step made a blocked
   `nextval` resume above the reconciled value. The check is a snapshot taken
   before the lock, so a cache changed by an uncoordinated writer mid-run is
-  outside the supported mode. The lock also requires ownership of the sequence; a
-  role that does not own it reports `reconciliation_required` and leaves the
-  sequence untouched.
+  outside the supported mode. The cache check runs before the value is compared,
+  so a `CACHE` greater than 1 is `reconciliation_required` even when the sequence
+  is already ahead of the imported maximum. The lock also requires ownership of
+  the sequence; a role that does not own it reports `reconciliation_required` and
+  leaves the sequence untouched.
 - A `reconciliation_required` or `pending` run is not full success: the JSON
   envelope is `ok: false` with `error.code = "sequence_reconciliation_required"`,
   `data` still carries the committed run so the rows are not hidden, the CLI
