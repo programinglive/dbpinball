@@ -15,7 +15,7 @@ use crate::safesync::graph::TableInfo;
 use crate::safesync::import::{self, ConflictPolicy, TableImport};
 use crate::safesync::key::MaskKeyStore;
 use crate::safesync::mask::{MaskStrategy, Masker, MaskingPolicy};
-use crate::safesync::plan::{check_schema_drift, DryRunPlan, PlanIdentity};
+use crate::safesync::plan::{assert_graph_matches, check_schema_drift, DryRunPlan, PlanIdentity};
 use crate::safesync::planner::{self};
 use crate::safesync::session::{BoundSession, SessionIdentity, SessionRole};
 use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
@@ -217,6 +217,7 @@ pub async fn validate(
 
     let selection = planner::build(&mut source_session, spec, &masker, true).await?;
     check_schema_drift(plan, &selection)?;
+    assert_graph_matches(plan, &selection)?;
     let _ = source_session.rollback().await;
 
     check_filter_digests(plan, spec, &masker)?;
@@ -446,6 +447,7 @@ pub async fn execute(
         return Err(filter_mismatch("the specification does not match the plan"));
     }
     check_filter_digests(request.plan, request.spec, &masker)?;
+    assert_graph_matches(request.plan, &selection)?;
 
     if !selection.complete {
         return Err(CoreError::with_detail(

@@ -314,6 +314,23 @@ pub async fn inspect_table(
         });
     }
 
+    // A nullable unique key is not a usable row identity: two NULLs would
+    // collapse to one identity and a row could be dropped silently.
+    for column in &row_identity {
+        let nullable = columns
+            .iter()
+            .find(|candidate| &candidate.name == column)
+            .map(|candidate| candidate.nullable)
+            .unwrap_or(true);
+        if nullable {
+            return Err(CoreError::with_detail(
+                ErrorCode::Unsupported,
+                format!("{table} has a nullable row identity column {column}"),
+                "nullable_row_identity",
+            ));
+        }
+    }
+
     let schema_hash = schema_hash(
         &table.schema,
         &table.table,

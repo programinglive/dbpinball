@@ -580,7 +580,21 @@ impl Masker {
             ));
         }
 
-        if tuple.iter().any(Option::is_none) {
+        if rule.key_position >= domain.columns.len() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "key column {} has position {} outside a {}-column domain",
+                    rule.column,
+                    rule.key_position,
+                    domain.columns.len()
+                ),
+                "invalid_key_position",
+            ));
+        }
+
+        // A fully NULL tuple is a reference that PostgreSQL does not enforce.
+        if tuple.iter().all(Option::is_none) {
             return Ok(MaskedValue::Null);
         }
 
@@ -589,11 +603,17 @@ impl Masker {
         material.push('\u{1f}');
         material.push_str(&rule.key_position.to_string());
         for value in tuple {
-            let value = normalize_identity(value.as_deref().unwrap_or(""));
             material.push('\u{1f}');
-            material.push_str(&value.len().to_string());
-            material.push(':');
-            material.push_str(&value);
+            match value {
+                Some(value) => {
+                    let value = normalize_identity(value);
+                    material.push_str(&format!("v{}:{}", value.len(), value));
+                }
+                // A partially NULL tuple is still hashed, with a distinct
+                // marker, so a NOT NULL component is not nulled and the output
+                // cannot collide with a real key.
+                None => material.push('n'),
+            }
         }
 
         let bytes = self.key.hmac(MASK_DOMAIN, material.as_bytes());
@@ -1203,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn a_null_key_component_masks_to_null() {
+    fn a_fully_null_key_masks_to_null() {
         let masker = masker();
         let rule = ColumnRule {
             schema: "public".into(),
@@ -1217,8 +1237,54 @@ mod tests {
             }),
             key_position: 0,
         };
-        let value = masker.mask_key(&rule, &[Some("x".into()), None]).unwrap();
+        let value = masker.mask_key(&rule, &[None, None]).unwrap();
         assert_eq!(value, MaskedValue::Null);
+    }
+
+    #[test]
+    fn a_partially_null_key_component_stays_distinct() {
+        let masker = masker();
+        let rule = |position: usize| ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into(), "b".into()],
+            }),
+            key_position: position,
+        };
+        let partial = masker
+            .mask_key(&rule(0), &[Some("x".into()), None])
+            .unwrap();
+        // Not NULL: a NOT NULL component must stay non-null.
+        assert!(partial.as_text().is_some());
+        // It cannot collide with the real (x, "") tuple.
+        let empty = masker
+            .mask_key(&rule(0), &[Some("x".into()), Some("".into())])
+            .unwrap();
+        assert_ne!(partial, empty);
+    }
+
+    #[test]
+    fn an_out_of_range_key_position_is_refused() {
+        let masker = masker();
+        let rule = ColumnRule {
+            schema: "public".into(),
+            table: "t".into(),
+            column: "c".into(),
+            strategy: MaskStrategy::DeterministicKey,
+            max_len: None,
+            key_domain: Some(KeyDomain {
+                table: "public.parent".into(),
+                columns: vec!["a".into()],
+            }),
+            key_position: 3,
+        };
+        let error = masker.mask_key(&rule, &[Some("x".into())]).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("invalid_key_position"));
     }
 
     #[test]

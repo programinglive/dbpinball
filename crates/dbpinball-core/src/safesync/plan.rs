@@ -299,6 +299,59 @@ fn schema_drift(table: &str) -> CoreError {
     )
 }
 
+/// Refuse a plan when the live graph, table set, order or deferred groups differ
+/// from what the operator reviewed.
+pub fn assert_graph_matches(
+    plan: &DryRunPlan,
+    selection: &SelectionResult,
+) -> Result<(), CoreError> {
+    let live_order: Vec<String> = selection
+        .order
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    let live_deferred: Vec<String> = selection
+        .deferred
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+
+    let mut planned_tables: Vec<String> = plan
+        .tables
+        .iter()
+        .map(|table| format!("{}.{}", table.schema, table.table))
+        .collect();
+    let mut live_tables: Vec<String> = selection
+        .rows
+        .iter()
+        .map(|rows| rows.table.to_string())
+        .collect();
+    planned_tables.sort();
+    live_tables.sort();
+
+    let changed = live_order != plan.constraints.order
+        || live_deferred != plan.constraints.deferred
+        || planned_tables != live_tables
+        || selection.edges as u64 != plan.graph.edges
+        || selection.deferred.len() as u64 != plan.graph.cycles;
+
+    if changed {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the foreign-key graph or selection changed since the plan was made",
+            "graph_changed",
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +474,26 @@ mod tests {
             1_000,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_changed_graph_is_refused() {
+        let plan = plan();
+        let mut drifted = selection();
+        drifted.edges = 1;
+        let error = assert_graph_matches(&plan, &drifted).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("graph_changed"));
+
+        let mut table_drifted = selection();
+        table_drifted.rows.clear();
+        let error = assert_graph_matches(&plan, &table_drifted).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("graph_changed"));
+    }
+
+    #[test]
+    fn an_unchanged_graph_matches() {
+        let plan = plan();
+        assert_graph_matches(&plan, &selection()).unwrap();
     }
 
     #[test]

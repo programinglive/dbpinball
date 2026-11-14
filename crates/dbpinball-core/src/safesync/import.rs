@@ -230,7 +230,15 @@ async fn run_inner(
     }
 
     if policy == ConflictPolicy::Replace {
-        for table in tables {
+        // Defer before deleting, and delete children before parents, so a
+        // deferrable cycle and a parent closure can both be replaced.
+        if !plan.constraints.deferred.is_empty() {
+            sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+        }
+        for table in tables.iter().rev() {
             let statement = format!(
                 "DELETE FROM {}.{}",
                 quote_ident(&table.table.schema),

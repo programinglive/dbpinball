@@ -116,6 +116,17 @@ pub async fn build(
     let graph =
         discover_parents(session, &root_names, if effective_read { depth } else { 0 }).await?;
 
+    // The source role must be safe for every discovered table, not just the
+    // roots: a parent the role owns would bypass RLS on it.
+    let discovered: Vec<QualifiedName> = graph.tables.iter().map(|table| table.name()).collect();
+    session.assert_source_role(&discovered).await?;
+
+    // Validate every discovered column's rule up front so the read path and the
+    // metadata path agree on what a valid policy is.
+    for info in &graph.tables {
+        masker.coverage(&info.schema, &info.table, &info.column_shapes())?;
+    }
+
     if !effective_read {
         return metadata_only(spec, &graph, masker);
     }
@@ -228,6 +239,20 @@ pub async fn build(
 
         max_depth_used = max_depth_used.max(level);
         insert_rows(&info, raw, &mut selected, &mut seen);
+        let parent_rows = selected
+            .get(&parent)
+            .map(|rows| rows.len() as u64)
+            .unwrap_or(0);
+        if parent_rows > limits.max_rows_per_table {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "{parent} exceeded max_rows_per_table ({})",
+                    limits.max_rows_per_table
+                ),
+                "limit_exceeded",
+            ));
+        }
         if seed_parents(
             &graph,
             &parent,
@@ -384,7 +409,9 @@ fn metadata_only(
         max_depth_used: 0,
         direction: "parents".to_string(),
         edges: edges.len(),
-        complete: true,
+        // A depth-0 metadata plan for a table with a foreign key is truncated:
+        // the referenced parent is not selected.
+        complete: graph.edges.is_empty(),
         read_rows: false,
     })
 }
@@ -775,6 +802,16 @@ fn mask_table(
                     )
                 })?;
                 let tuple_columns = key_columns_for(info, rule, graph);
+                if tuple_columns.get(rule.key_position) != Some(&column.name) {
+                    return Err(CoreError::with_detail(
+                        ErrorCode::Operation,
+                        format!(
+                            "key position {} does not point at column {} in the resolved tuple",
+                            rule.key_position, column.name
+                        ),
+                        "invalid_key_position",
+                    ));
+                }
                 let tuple = key_tuple(info, raw, &tuple_columns)?;
                 let _ = domain;
                 masker.mask_key(rule, &tuple)?
