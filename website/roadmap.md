@@ -15,11 +15,11 @@ assume a planned feature exists.
 | Shared connection store between desktop and CLI | <span class="status status-available">Available</span> |
 | Cross-process lock and revision consistency | <span class="status status-available">Available</span> |
 | Desktop migration from `localStorage` | <span class="status status-available">Available</span> |
+| Shared security policy and destination verification (M3) | <span class="status status-available">Available</span> |
 
 ## M2.1 status
 
-M2.1 is the desktop connection store migration. It is implemented on a pull
-request and is **not merged** at the time this page was written.
+M2.1 is the desktop connection store migration. It is merged.
 
 What it does:
 
@@ -33,8 +33,8 @@ What it does:
 
 | Capability | Milestone |
 | --- | --- |
-| Shared security policy and destination verification | M3 — **implemented** (see [Security policy](/security/policy)) |
-| PostgreSQL Safe Sync (sanitized production → development) | M4 |
+| Shared security policy and destination verification | M3 — **implemented and merged** (see [Security policy](/security/policy)) |
+| PostgreSQL Safe Sync (sanitized production → development) | M4 — **design approved, not implemented** (see [Safe Sync design](/security/safe-sync-design)) |
 | Desktop Safe Sync integration | M5 |
 | MySQL Safe Sync | M6 |
 | Advanced snapshots and relational dependency resolution | M7 |

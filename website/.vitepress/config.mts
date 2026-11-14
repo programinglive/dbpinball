@@ -95,6 +95,7 @@ export default defineConfig({
             { text: "Security policy", link: "/security/policy" },
             { text: "Destination verification", link: "/security/destination-verification" },
             { text: "Threat model", link: "/security/threat-model" },
+            { text: "Safe Sync design (planned)", link: "/security/safe-sync-design" },
             { text: "Credential storage", link: "/security/credential-storage" },
             { text: "No plaintext fallback", link: "/security/no-plaintext-fallback" },
             { text: "OS keyring integration", link: "/security/keyring" },
