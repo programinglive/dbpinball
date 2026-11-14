@@ -593,3 +593,99 @@ async fn a_production_like_enrollment_is_never_writable() {
 
     assert_eq!(decision.code(), security::PolicyCode::DestinationNotAllowed);
 }
+
+// ---------------------------------------------------------------------------
+// Destination substitution: a different database on the same server
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_a_different_database_on_the_same_connection_is_denied() {
+    let Some(target) = target("DBPINBALL_TEST_MYSQL_URL", DbEngine::Mysql) else {
+        eprintln!("skipped: DBPINBALL_TEST_MYSQL_URL is not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = security::store_for(directory.path());
+
+    // Enroll the disposable database, keyed by the connection id.
+    let fingerprint = security::enroll(
+        &target.connection,
+        &target.credentials,
+        &store,
+        DestinationCategory::VerifiedDevelopment,
+        now_ms(),
+    )
+    .await
+    .expect("enroll");
+
+    // The same connection id now names a different database on the same
+    // server. This is what `run_query` can do with its database argument.
+    let mut substitute = target.connection.clone();
+    substitute.database = "information_schema".to_string();
+
+    let decision = security::policy_check(
+        &substitute,
+        &target.credentials,
+        &store,
+        DatabaseOperation::DataMutation,
+        FreshnessPolicy::default(),
+        now_ms(),
+    )
+    .await
+    .expect("policy check reaches the database");
+
+    assert_eq!(
+        decision.code(),
+        security::PolicyCode::DestinationChanged,
+        "an enrollment for one database must not authorize another on the same server"
+    );
+    assert!(!decision.is_allowed());
+    assert!(
+        fingerprint
+            .identity_key
+            .contains(&target.connection.database),
+        "the enrollment stays scoped to the enrolled database"
+    );
+}
+
+#[tokio::test]
+async fn postgres_a_different_database_on_the_same_connection_is_denied() {
+    let Some(target) = target("DBPINBALL_TEST_PG_URL", DbEngine::Postgres) else {
+        eprintln!("skipped: DBPINBALL_TEST_PG_URL is not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = security::store_for(directory.path());
+
+    security::enroll(
+        &target.connection,
+        &target.credentials,
+        &store,
+        DestinationCategory::VerifiedDevelopment,
+        now_ms(),
+    )
+    .await
+    .expect("enroll");
+
+    let mut substitute = target.connection.clone();
+    substitute.database = "postgres".to_string();
+
+    let decision = security::policy_check(
+        &substitute,
+        &target.credentials,
+        &store,
+        DatabaseOperation::DataMutation,
+        FreshnessPolicy::default(),
+        now_ms(),
+    )
+    .await
+    .expect("policy check reaches the database");
+
+    assert_eq!(
+        decision.code(),
+        security::PolicyCode::DestinationChanged,
+        "a different database OID on the same cluster must invalidate the enrollment"
+    );
+}

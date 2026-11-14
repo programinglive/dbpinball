@@ -174,6 +174,8 @@ const WRITE_KEYWORDS: &[&str] = &[
     "uninstall",
     "handler",
     "shutdown",
+    "outfile",
+    "dumpfile",
 ];
 
 /// Keywords that may execute arbitrary code and therefore cannot be proven safe.
@@ -185,6 +187,14 @@ const OPAQUE_KEYWORDS: &[&str] = &["call", "do", "execute", "prepare"];
 /// keyword inside a literal cannot change the verdict. It then splits on `;`
 /// and classifies every statement; the strictest verdict wins.
 pub fn classify_sql(sql: &str) -> SqlClass {
+    // MySQL executes the body of a `/*! ... */` comment, so it is not a
+    // comment. Rather than parse version-gated syntax, treat any executable
+    // comment as unprovable. This is deliberately conservative: an ordinary
+    // `/* ... */` comment is still stripped normally.
+    if sql.contains("/*!") {
+        return SqlClass::Unknown;
+    }
+
     let stripped = strip_comments_and_literals(sql);
     let statements: Vec<&str> = stripped
         .split(';')
@@ -235,9 +245,11 @@ fn classify_statement(statement: &str) -> SqlClass {
     }
 
     if first == "with" {
-        // A CTE can contain INSERT/UPDATE/DELETE/MERGE. Scan the whole
-        // statement rather than trusting the leading WITH.
-        if contains_write_keyword(&lower) {
+        // A CTE can contain INSERT/UPDATE/DELETE/MERGE, and the trailing
+        // SELECT can still write with `INTO` (a table in PostgreSQL, a file in
+        // MySQL). Scan the whole statement rather than trusting the leading
+        // WITH.
+        if contains_write_keyword(&lower) || contains_word(&lower, "into") {
             return SqlClass::Write;
         }
         return SqlClass::ReadOnly;
@@ -455,6 +467,128 @@ mod tests {
         assert_eq!(
             SqlClass::ReadOnly.operation(),
             DatabaseOperation::ReadOnlyQuery
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // MySQL bypass vectors. MySQL's read-only transaction does not cover DDL
+    // (implicit commit) or non-transactional engines, so anything that can
+    // escape it must be classified as a write or denied.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_mysql_executable_comment_cannot_hide_a_write() {
+        // MySQL executes the body of `/*! ... */`, so stripping it as a plain
+        // comment would let a write reach the read-only path.
+        assert_ne!(
+            classify_sql("SELECT 1 /*!50000 ; DROP TABLE t */"),
+            SqlClass::ReadOnly
+        );
+        assert_ne!(
+            classify_sql("SELECT 1 /*!50000 INTO OUTFILE '/tmp/x' */"),
+            SqlClass::ReadOnly
+        );
+    }
+
+    #[test]
+    fn a_cte_that_selects_into_a_table_is_a_write() {
+        // PostgreSQL `WITH ... SELECT INTO` creates a table.
+        assert_eq!(
+            classify_sql("WITH cte AS (SELECT 1) SELECT * INTO newtable FROM cte"),
+            SqlClass::Write
+        );
+    }
+
+    #[test]
+    fn a_cte_that_selects_into_a_file_is_a_write() {
+        // MySQL `SELECT ... INTO OUTFILE` writes a file outside the database.
+        assert_eq!(
+            classify_sql("WITH cte AS (SELECT 1) SELECT * INTO OUTFILE '/tmp/x' FROM cte"),
+            SqlClass::Write
+        );
+        assert_eq!(
+            classify_sql("SELECT * INTO DUMPFILE '/tmp/x' FROM t"),
+            SqlClass::Write
+        );
+    }
+
+    #[test]
+    fn transaction_control_is_never_read_only() {
+        for sql in [
+            "START TRANSACTION",
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT s",
+            "SET autocommit = 1",
+            "SET TRANSACTION READ WRITE",
+        ] {
+            assert_ne!(classify_sql(sql), SqlClass::ReadOnly, "{sql}");
+        }
+    }
+
+    #[test]
+    fn prepared_statements_and_procedure_calls_are_opaque() {
+        for sql in [
+            "PREPARE stmt FROM 'DROP TABLE t'",
+            "EXECUTE stmt",
+            "DEALLOCATE PREPARE stmt",
+            "CALL do_something()",
+            "DO SLEEP(1)",
+        ] {
+            assert_ne!(classify_sql(sql), SqlClass::ReadOnly, "{sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_bulk_and_handler_statements_are_writes() {
+        for sql in [
+            "LOAD DATA INFILE '/tmp/x' INTO TABLE t",
+            "LOAD XML INFILE '/tmp/x' INTO TABLE t",
+            "HANDLER t OPEN",
+            "REPLACE INTO t VALUES (1)",
+            "RENAME TABLE a TO b",
+            "TRUNCATE TABLE t",
+            "FLUSH TABLES",
+            "OPTIMIZE TABLE t",
+            "REPAIR TABLE t",
+            "INSTALL PLUGIN p SONAME 'x.so'",
+            "SHUTDOWN",
+            "KILL 12",
+            "USE other",
+        ] {
+            assert_eq!(classify_sql(sql), SqlClass::Write, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_hash_comment_cannot_hide_a_statement() {
+        // `#` is a MySQL line comment. A semicolon after it still splits, so the
+        // hidden statement is classified rather than ignored.
+        assert_eq!(classify_sql("SELECT 1 #\n; DROP TABLE t"), SqlClass::Write);
+        // A `#` comment with no statement after it is genuinely read-only.
+        assert_eq!(classify_sql("SELECT 1 # just a note"), SqlClass::ReadOnly);
+    }
+
+    #[test]
+    fn a_backtick_identifier_cannot_smuggle_a_statement() {
+        // Backticks are not stripped, so a `;` inside one splits the text and
+        // the remainder fails closed.
+        assert_ne!(classify_sql("SELECT `a;b` FROM t"), SqlClass::ReadOnly);
+    }
+
+    #[test]
+    fn locking_reads_are_left_to_the_engine() {
+        // The classifier cannot prove these are side-effect free, but the
+        // engine refuses them inside a read-only transaction. They stay
+        // read-only so the engine, not the parser, is the boundary.
+        assert_eq!(
+            classify_sql("SELECT * FROM t FOR UPDATE"),
+            SqlClass::ReadOnly
+        );
+        assert_eq!(
+            classify_sql("SELECT * FROM t LOCK IN SHARE MODE"),
+            SqlClass::ReadOnly
         );
     }
 

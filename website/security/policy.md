@@ -38,10 +38,13 @@ classifier:
 
 - strips comments and string literals first, so a keyword or `;` inside a literal
   cannot change the verdict;
+- treats any MySQL executable comment (`/*! ... */`) as unknown, because MySQL
+  executes its body instead of ignoring it;
 - splits on `;` and takes the strictest verdict across statements;
 - treats a `WITH` statement as a write when it contains `INSERT`, `UPDATE`,
-  `DELETE`, or `MERGE`;
-- treats `SELECT ... INTO` as a write;
+  `DELETE`, `MERGE`, or `INTO`;
+- treats `SELECT ... INTO` as a write, including `INTO OUTFILE` and
+  `INTO DUMPFILE`, which write outside the database;
 - treats `EXPLAIN ANALYZE` as unknown, because it executes the statement;
 - treats `CALL`, `DO`, `EXECUTE`, and `PREPARE` as unknown, because they can run
   arbitrary code;
@@ -93,6 +96,11 @@ The desktop cannot bypass the policy: the query runner classifies the SQL and
 calls the core before executing anything that can write, and restore and copy are
 gated at the same execution boundary. A command is not safe because its UI page
 is unrouted; the gate is on the command itself.
+
+The query runner authorizes the database it will actually write, not the
+profile's default. A caller that names another database on the same server is
+checked against that database's identity, so an enrollment for one database does
+not authorize a write to another.
 
 ## Read-only execution
 
