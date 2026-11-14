@@ -16,7 +16,7 @@ use crate::safesync::graph::{discover_parents, ForeignKeyEdge, SchemaGraph, Tabl
 use crate::safesync::mask::{ColumnRule, MaskInput, MaskStrategy, MaskedValue, Masker};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::{
-    FilterOp, FilterPredicate, FilterValue, Limits, QualifiedName, SafeSyncSpec, TraversalDirection,
+    FilterOp, FilterValue, Limits, QualifiedName, SafeSyncSpec, TraversalDirection,
 };
 
 /// One root selection with its keyed digest.
@@ -158,12 +158,23 @@ pub async fn build(
         }
         insert_rows(&info, raw, &mut selected, &mut seen);
 
-        let canonical = root
-            .filter
-            .iter()
-            .map(FilterPredicate::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
+        // The limit is cumulative across roots on the same table.
+        let accumulated = selected
+            .get(&name)
+            .map(|rows| rows.len() as u64)
+            .unwrap_or(0);
+        if accumulated > limits.max_rows_per_table {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "{name} exceeded max_rows_per_table ({})",
+                    limits.max_rows_per_table
+                ),
+                "limit_exceeded",
+            ));
+        }
+
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         roots.push(RootPlan {
             schema: name.schema.clone(),
             table: name.table.clone(),
@@ -357,12 +368,7 @@ fn metadata_only(
         let name = QualifiedName::parse(&root.table)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
         masker.coverage(&name.schema, &name.table, &info.column_shapes())?;
-        let canonical = root
-            .filter
-            .iter()
-            .map(FilterPredicate::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         roots.push(RootPlan {
             schema: name.schema.clone(),
             table: name.table.clone(),
@@ -401,11 +407,21 @@ fn metadata_only(
         roots,
         order: ordering.order,
         deferred: ordering.deferred,
-        checks: vec![LimitCheck {
-            limit: "max_depth".into(),
-            observed: 0,
-            ok: true,
-        }],
+        checks: {
+            let mut checks = vec![LimitCheck {
+                limit: "max_depth".into(),
+                observed: 0,
+                ok: true,
+            }];
+            if !graph.edges.is_empty() {
+                checks.push(LimitCheck {
+                    limit: "closure".into(),
+                    observed: 0,
+                    ok: false,
+                });
+            }
+            checks
+        },
         max_depth_used: 0,
         direction: "parents".to_string(),
         edges: edges.len(),
@@ -543,26 +559,26 @@ fn seed_parents(
                 }
                 continue;
             }
+            let key = ParentRequestKey {
+                parent: edge.parent.clone(),
+                parent_columns: edge.parent_columns.clone(),
+                tuple: tuple.clone(),
+            };
             if level >= depth {
                 // A real reference that the depth cannot follow. It is only a
-                // truncation if the parent row is not already in the selection;
-                // in a cycle the referenced row is usually the root itself.
+                // truncation if the parent row is neither already selected nor
+                // already queued by a sibling at a shallower level.
                 let present = graph
                     .table(&edge.parent)
                     .map(|info| {
                         parent_present(selected, &edge.parent, info, &edge.parent_columns, &tuple)
                     })
                     .unwrap_or(false);
-                if !present {
+                if !present && !requested.contains(&key) {
                     truncated = true;
                 }
                 continue;
             }
-            let key = ParentRequestKey {
-                parent: edge.parent.clone(),
-                parent_columns: edge.parent_columns.clone(),
-                tuple: tuple.clone(),
-            };
             if requested.insert(key) {
                 queue.push_back((
                     edge.parent.clone(),

@@ -1051,6 +1051,58 @@ masking:
 }
 
 #[tokio::test]
+async fn a_per_table_limit_is_cumulative_across_roots() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // Two roots on the same table, each returning one row, with a limit of one.
+    let yaml = r#"
+version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.orders
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-000000000001
+    - table: public.orders
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-000000000002
+  relationships:
+    depth: 0
+limits:
+  max_rows_per_table: 1
+  max_total_rows: 100
+  max_depth: 3
+  max_bytes: 1048576
+  timeout_ms: 15000
+masking:
+  policy: development-default@2
+"#;
+    let spec = SafeSyncSpec::parse_yaml(yaml).unwrap();
+    let error = plan_error(&spec, &source, &destination, &provider, directory.path()).await;
+    assert_eq!(error.detail.as_deref(), Some("limit_exceeded"));
+    assert_eq!(count(&destination, "orders").await, 0);
+}
+
+#[tokio::test]
 async fn a_global_row_limit_is_refused() {
     let _guard = serial().lock().await;
     let (Some(source), Some(destination)) = (

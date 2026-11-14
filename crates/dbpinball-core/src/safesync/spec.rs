@@ -212,15 +212,18 @@ pub struct FilterPredicate {
 }
 
 impl FilterPredicate {
-    /// A stable, unambiguous rendering used for the keyed filter digest.
+    /// A canonical, injective rendering used for the keyed filter digest.
     pub fn canonical(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            self.column,
-            self.op.as_str(),
-            self.value.canonical()
-        )
+        serde_json::to_string(self).unwrap_or_default()
     }
+}
+
+/// Canonical, injective rendering of a whole filter list.
+///
+/// JSON is used instead of delimiter-joined fields: a value containing `|`,
+/// `,` or a separator byte cannot make two different filters look identical.
+pub fn canonical_filter(filter: &[FilterPredicate]) -> String {
+    serde_json::to_string(filter).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +528,46 @@ mod tests {
             op: FilterOp::Eq,
             value: FilterValue::Text("a:b".into()),
         };
-        assert_eq!(filter.canonical(), "id:eq:t:a:b");
+        // JSON, so a value that contains a delimiter stays distinguishable.
+        assert!(filter.canonical().contains("a:b"));
+        assert!(filter.canonical().starts_with('{'));
+
+        let list = FilterPredicate {
+            column: "id".into(),
+            op: FilterOp::In,
+            value: FilterValue::List(vec![
+                FilterValue::Text("a".into()),
+                FilterValue::Text("b".into()),
+            ]),
+        };
+        let smuggled = FilterPredicate {
+            column: "id".into(),
+            op: FilterOp::In,
+            value: FilterValue::List(vec![FilterValue::Text("a,t:b".into())]),
+        };
+        assert_ne!(
+            canonical_filter(std::slice::from_ref(&list)),
+            canonical_filter(std::slice::from_ref(&smuggled))
+        );
+
+        let first = FilterPredicate {
+            column: "id".into(),
+            op: FilterOp::Eq,
+            value: FilterValue::Text("a".into()),
+        };
+        let second = FilterPredicate {
+            column: "id".into(),
+            op: FilterOp::Eq,
+            value: FilterValue::Text("b".into()),
+        };
+        let single = FilterPredicate {
+            column: "id".into(),
+            op: FilterOp::Eq,
+            value: FilterValue::Text("a|{}".into()),
+        };
+        assert_ne!(
+            canonical_filter(&[first, second]),
+            canonical_filter(std::slice::from_ref(&single))
+        );
     }
 }

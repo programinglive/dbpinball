@@ -218,6 +218,13 @@ pub async fn validate(
     let selection = planner::build(&mut source_session, spec, &masker, true).await?;
     check_schema_drift(plan, &selection)?;
     assert_graph_matches(plan, &selection)?;
+    if !selection.complete {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection is incomplete and cannot be imported",
+            "limit_exceeded",
+        ));
+    }
     let _ = source_session.rollback().await;
 
     check_filter_digests(plan, spec, &masker)?;
@@ -242,12 +249,7 @@ pub fn check_filter_digests(
     }
 
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let canonical = root
-            .filter
-            .iter()
-            .map(crate::safesync::spec::FilterPredicate::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
