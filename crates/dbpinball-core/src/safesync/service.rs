@@ -136,6 +136,9 @@ pub async fn plan(
         plan.plan_fingerprint = plan.fingerprint();
     }
 
+    // Authenticate the final document, including its issuance time and expiry.
+    plan.seal(&masker);
+
     Ok(plan)
 }
 
@@ -152,7 +155,7 @@ pub async fn validate(
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
     plan.check_version()?;
-    plan.check_expiry_contract()?;
+    plan.check_expiry_contract(now_ms)?;
 
     if plan.fingerprint() != plan.plan_fingerprint {
         return Err(CoreError::with_detail(
@@ -162,6 +165,9 @@ pub async fn validate(
         ));
     }
 
+    let masker = masker_for(spec, keys)?;
+    plan.verify_authorization(&masker)?;
+
     if plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -169,8 +175,6 @@ pub async fn validate(
             "plan_expired",
         ));
     }
-
-    let masker = masker_for(spec, keys)?;
 
     if masker.policy().hash != plan.masking.policy_hash {
         return Err(CoreError::with_detail(
@@ -365,7 +369,7 @@ pub async fn execute(
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
     request.plan.check_version()?;
-    request.plan.check_expiry_contract()?;
+    request.plan.check_expiry_contract(now_ms)?;
 
     // The plan file is the reviewed contract. Recompute its fingerprint so a
     // hand-edited plan cannot silently change the schema hash, key id or
@@ -377,6 +381,25 @@ pub async fn execute(
             "plan_tampered",
         ));
     }
+
+    let masker = masker_for(request.spec, keys)?;
+
+    // A plan is bound to one mask key. Running it with a rotated key would
+    // produce different pseudonyms for the same rows, so refuse instead. This
+    // is checked before the authorization MAC so a rotation is reported as a
+    // key change, not as tampering.
+    if masker.key_id() != request.plan.masking.key_id {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking key changed since the plan was made",
+            "mask_key_changed",
+        ));
+    }
+
+    // The authorization envelope binds the content, the issuance time, the
+    // expiry, the run id and the key id. A re-dated plan fails here even when
+    // its public fingerprint was recomputed.
+    request.plan.verify_authorization(&masker)?;
 
     if request.plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
@@ -399,18 +422,6 @@ pub async fn execute(
             ErrorCode::Usage,
             "the acknowledgement does not match the plan fingerprint",
             "acknowledgement_mismatch",
-        ));
-    }
-
-    let masker = masker_for(request.spec, keys)?;
-
-    // A plan is bound to one mask key. Running it with a rotated key would
-    // produce different pseudonyms for the same rows, so refuse instead.
-    if masker.key_id() != request.plan.masking.key_id {
-        return Err(CoreError::with_detail(
-            ErrorCode::Conflict,
-            "the masking key changed since the plan was made",
-            "mask_key_changed",
         ));
     }
 
@@ -636,9 +647,11 @@ pub async fn status(
         .fetch_optional(&mut *session.connection())
         .await
         .map_err(|error| {
-            CoreError::redacted(
+            crate::safesync::database_error(
                 ErrorCode::Connection,
-                format!("the run state could not be read: {error}"),
+                "the run state read",
+                "run_state_unreadable",
+                error,
             )
         })?;
 

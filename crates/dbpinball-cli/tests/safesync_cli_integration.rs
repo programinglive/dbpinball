@@ -125,6 +125,16 @@ fn code(output: &Output) -> i32 {
     output.status.code().unwrap_or(-1)
 }
 
+/// Re-seal a plan with the test mask key, so a test can change a field and keep
+/// a valid authorization envelope.
+fn seal_plan(plan: &mut dbpinball_core::safesync::DryRunPlan) {
+    use dbpinball_core::safesync::{resolve_policy, MaskKey, Masker};
+    let key = MaskKey::from_hex(KEY_HEX).unwrap();
+    let policy = resolve_policy(&plan.masking.policy).unwrap();
+    let masker = Masker::new(policy, key).unwrap();
+    plan.seal(&masker);
+}
+
 fn spec_file(directory: &Path, id: &str) -> PathBuf {
     let path = directory.join("spec.yaml");
     let body = format!(
@@ -532,12 +542,13 @@ async fn an_expired_plan_exits_eight() {
         "0b9f4c3e-0000-0000-0000-000000000001",
     );
 
-    // A legitimately expired plan still has a valid fingerprint for its
-    // content, so the expiry check, not the integrity check, must fire.
+    // A legitimately expired plan still has a valid authorization envelope for
+    // its content, so the expiry check, not the integrity check, must fire.
     let mut plan: dbpinball_core::safesync::DryRunPlan =
         serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
     plan.expires_at_ms = plan.created_at_ms + 1;
     plan.plan_fingerprint = plan.fingerprint();
+    seal_plan(&mut plan);
     let fingerprint = plan.plan_fingerprint.clone();
     std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
 
@@ -612,6 +623,62 @@ async fn an_extended_expiry_is_refused() {
 
     assert_eq!(code(&output), 8);
     assert_eq!(envelope(&output)["error"]["detail"], "plan_expiry_invalid");
+    assert_eq!(destination_rows(&destination).await.len(), 0);
+}
+
+#[tokio::test]
+async fn a_shifted_issuance_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+    enroll(&config, &source, &destination);
+    let (_envelope, plan_path) = plan(
+        &config,
+        &source,
+        &destination,
+        "0b9f4c3e-0000-0000-0000-000000000001",
+    );
+
+    // Shift both timestamps forward and recompute the public fingerprint. The
+    // authorization envelope still covers the original issuance, so this is
+    // refused even though the fingerprint is self-consistent.
+    let mut plan: dbpinball_core::safesync::DryRunPlan =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan.created_at_ms += 5_000;
+    plan.expires_at_ms += 5_000;
+    plan.plan_fingerprint = plan.fingerprint();
+    let fingerprint = plan.plan_fingerprint.clone();
+    std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+
+    let spec = config.join("spec.yaml");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+
+    assert_eq!(code(&output), 8);
+    assert_eq!(envelope(&output)["error"]["detail"], "plan_tampered");
     assert_eq!(destination_rows(&destination).await.len(), 0);
 }
 

@@ -86,6 +86,14 @@ pub struct ColumnShape {
     pub type_name: String,
     pub nullable: bool,
     pub is_primary_key: bool,
+    /// Catalog-verified `GENERATED ... AS IDENTITY`.
+    pub is_identity: bool,
+    /// A foreign-key column whose referenced parent column is an identity.
+    ///
+    /// Such a column carries a preserved identity value, so it may be kept when
+    /// the identity-preserve mode is in use. It is not a blanket integer
+    /// exemption: the flag comes from the discovered foreign-key graph.
+    pub is_identity_reference: bool,
     /// An explicit destination length limit, when the policy supplies one.
     pub max_len: Option<usize>,
 }
@@ -324,6 +332,23 @@ impl MaskingPolicy {
                 "parent_id",
                 MaskStrategy::Keep,
             ),
+            // A nullable identity reference: Keep must preserve SQL NULL.
+            rule("public", "identity_optional", "id", MaskStrategy::Keep),
+            rule(
+                "public",
+                "identity_optional",
+                "parent_id",
+                MaskStrategy::Keep,
+            ),
+            // An ordinary integer: Keep must be refused by the type gate.
+            rule("public", "sensitive_metrics", "id", MaskStrategy::Keep),
+            rule("public", "sensitive_metrics", "salary", MaskStrategy::Keep),
+            rule(
+                "public",
+                "sensitive_metrics",
+                "label",
+                MaskStrategy::DeterministicPseudonym,
+            ),
         ];
 
         let mut policy = Self {
@@ -418,6 +443,8 @@ pub struct CoverageReport {
 pub enum MaskInput<'a> {
     Text(&'a str),
     Uuid(&'a str),
+    /// SQL NULL. It is preserved as NULL, never converted to an empty string.
+    Null,
 }
 
 /// A typed output value.
@@ -460,6 +487,25 @@ impl Masker {
 
     pub fn key_id(&self) -> &str {
         self.key.id()
+    }
+
+    /// The plan-authorization MAC.
+    ///
+    /// The key is derived from the mask key under a separate domain, so the
+    /// masking key is never used directly as a signing key. The derivation is
+    /// explicit key separation, not a second use of the same key bytes.
+    pub fn authorization_mac(&self, material: &[u8]) -> String {
+        let derived = self
+            .key
+            .hmac(crate::safesync::plan::PLAN_AUTH_KEY_DOMAIN, b"derive");
+        let mac = hmac_sha256(&derived, crate::safesync::plan::PLAN_AUTH_DOMAIN, material);
+        hex_lower(&mac)
+    }
+
+    /// Constant-time verification of a plan-authorization MAC.
+    pub fn verify_authorization_mac(&self, material: &[u8], expected: &str) -> bool {
+        let actual = self.authorization_mac(material);
+        constant_time_eq(actual.as_bytes(), expected.as_bytes())
     }
 
     /// Every column must have a rule, and the rule must be safe for the type.
@@ -524,10 +570,17 @@ impl Masker {
         identity: &str,
         input: MaskInput<'_>,
     ) -> Result<MaskedValue, CoreError> {
+        // SQL NULL is a typed value, not an empty string. It stays NULL for
+        // every strategy, so a nullable integer is never cast from ''.
+        if matches!(input, MaskInput::Null) {
+            return Ok(MaskedValue::Null);
+        }
+
         let output = match rule.strategy {
             MaskStrategy::Keep => match input {
                 MaskInput::Text(value) => MaskedValue::Text(value.to_string()),
                 MaskInput::Uuid(value) => MaskedValue::Uuid(value.to_string()),
+                MaskInput::Null => MaskedValue::Null,
             },
             MaskStrategy::Redact => match input {
                 MaskInput::Text(_) => MaskedValue::Text("REDACTED".to_string()),
@@ -536,6 +589,7 @@ impl Masker {
                         "redact is not implemented for this column type",
                     ))
                 }
+                MaskInput::Null => MaskedValue::Null,
             },
             MaskStrategy::Null => MaskedValue::Null,
             MaskStrategy::DeterministicEmail => {
@@ -718,7 +772,25 @@ fn validate_rule_for_type(rule: &ColumnRule, column: &ColumnShape) -> Result<(),
 
     match rule.strategy {
         MaskStrategy::Keep => {
-            if !is_keepable_type(&type_name) {
+            if is_keepable_type(&type_name) {
+                // Text and uuid keep their existing behaviour.
+            } else if is_integer_type(&type_name) {
+                // An integer may be kept only when the catalogue proves it is an
+                // identity column, or a foreign key that carries a preserved
+                // identity value. An ordinary integer (salary, birth year,
+                // account number) is refused, so the type alone is never an
+                // exemption.
+                if !(column.is_identity || column.is_identity_reference) {
+                    return Err(CoreError::with_detail(
+                        ErrorCode::Unsupported,
+                        format!(
+                            "column {} is an ordinary integer and cannot be kept unchanged",
+                            column.name
+                        ),
+                        "integer_keep_requires_identity",
+                    ));
+                }
+            } else {
                 return Err(unsupported_type(format!(
                     "column {} cannot be kept unchanged",
                     column.name
@@ -796,9 +868,12 @@ pub fn is_uuid_type(type_name: &str) -> bool {
 }
 
 pub fn is_keepable_type(type_name: &str) -> bool {
-    is_text_type(type_name)
-        || is_uuid_type(type_name)
-        || matches!(type_name, "bigint" | "integer" | "smallint")
+    is_text_type(type_name) || is_uuid_type(type_name)
+}
+
+/// Integer types that an identity column can use.
+pub fn is_integer_type(type_name: &str) -> bool {
+    matches!(type_name, "bigint" | "integer" | "smallint")
 }
 
 pub fn is_risky_type(type_name: &str) -> bool {
@@ -879,6 +954,18 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
+/// Compare two byte strings without an early exit.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
 /// RFC 4648 base32, lowercase, no padding.
 pub fn base32_lower(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -924,6 +1011,8 @@ mod tests {
                 type_name: "uuid".into(),
                 nullable: false,
                 is_primary_key: true,
+                is_identity: false,
+                is_identity_reference: false,
                 max_len: None,
             },
             ColumnShape {
@@ -931,6 +1020,8 @@ mod tests {
                 type_name: "text".into(),
                 nullable: false,
                 is_primary_key: false,
+                is_identity: false,
+                is_identity_reference: false,
                 max_len: None,
             },
             ColumnShape {
@@ -938,6 +1029,8 @@ mod tests {
                 type_name: "text".into(),
                 nullable: false,
                 is_primary_key: false,
+                is_identity: false,
+                is_identity_reference: false,
                 max_len: None,
             },
         ]
@@ -1065,6 +1158,8 @@ mod tests {
             type_name: "text".into(),
             nullable: true,
             is_primary_key: false,
+            is_identity: false,
+            is_identity_reference: false,
             max_len: None,
         });
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
@@ -1090,6 +1185,8 @@ mod tests {
             type_name: "jsonb".into(),
             nullable: true,
             is_primary_key: false,
+            is_identity: false,
+            is_identity_reference: false,
             max_len: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
@@ -1114,6 +1211,8 @@ mod tests {
             type_name: "jsonb".into(),
             nullable: true,
             is_primary_key: false,
+            is_identity: false,
+            is_identity_reference: false,
             max_len: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
@@ -1424,6 +1523,83 @@ mod tests {
     fn base32_is_lowercase_and_padding_free() {
         let encoded = base32_lower(&[0u8, 0u8, 0u8, 0u8, 0u8]);
         assert_eq!(encoded, "aaaaaaaa");
+    }
+
+    fn integer_column(name: &str, identity: bool, reference: bool) -> ColumnShape {
+        ColumnShape {
+            name: name.into(),
+            type_name: "bigint".into(),
+            nullable: true,
+            is_primary_key: false,
+            is_identity: identity,
+            is_identity_reference: reference,
+            max_len: None,
+        }
+    }
+
+    fn keep_rule(table: &str, column: &str) -> ColumnRule {
+        ColumnRule {
+            schema: "public".into(),
+            table: table.into(),
+            column: column.into(),
+            strategy: MaskStrategy::Keep,
+            max_len: None,
+            key_domain: None,
+            key_position: 0,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_integer_cannot_be_kept() {
+        let mut policy = MaskingPolicy::builtin_default();
+        policy.rules.push(keep_rule("accounts", "salary"));
+        let masker = Masker::new(policy, key()).unwrap();
+        let columns = vec![integer_column("salary", false, false)];
+        let error = masker.coverage("public", "accounts", &columns).unwrap_err();
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("integer_keep_requires_identity")
+        );
+    }
+
+    #[test]
+    fn an_identity_integer_can_be_kept() {
+        let mut policy = MaskingPolicy::builtin_default();
+        policy.rules.push(keep_rule("accounts", "identity_id"));
+        let masker = Masker::new(policy, key()).unwrap();
+        let columns = vec![integer_column("identity_id", true, false)];
+        masker.coverage("public", "accounts", &columns).unwrap();
+    }
+
+    #[test]
+    fn an_identity_reference_integer_can_be_kept() {
+        let mut policy = MaskingPolicy::builtin_default();
+        policy.rules.push(keep_rule("accounts", "parent_id"));
+        let masker = Masker::new(policy, key()).unwrap();
+        let columns = vec![integer_column("parent_id", false, true)];
+        masker.coverage("public", "accounts", &columns).unwrap();
+    }
+
+    #[test]
+    fn a_nullable_integer_keeps_null() {
+        let masker = masker();
+        let value = masker
+            .mask_value(&keep_rule("accounts", "id"), "id=1", MaskInput::Null)
+            .unwrap();
+        assert_eq!(value, MaskedValue::Null);
+    }
+
+    #[test]
+    fn a_nullable_text_keeps_null() {
+        let masker = masker();
+        let value = masker
+            .mask_value(
+                &rule(MaskStrategy::DeterministicEmail),
+                "id=1",
+                MaskInput::Null,
+            )
+            .unwrap();
+        assert_eq!(value, MaskedValue::Null);
     }
 
     impl Masker {

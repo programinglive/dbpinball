@@ -130,18 +130,38 @@ Within S2-a:
 Within S2-b:
 
 - Generated columns are omitted from the insert and recomputed by the
-  destination.
+  destination. The generated expression is part of the schema hash, so a
+  destination with a different expression is refused before any row is written.
 - A restricted identity-preserve mode keeps single-column integer identity keys
   with `OVERRIDING SYSTEM VALUE`; regenerating and remapping identities is not
-  supported.
-- After the row transaction commits, identity sequences are raised to
-  `GREATEST(max(key), last_value)` and never lowered. The run records
-  `sequence_status` as `completed`, `not_required` or `pending`; a retry
-  reconciles a pending run.
-- Plans are format version 2. An expiry outside the 60-minute window is refused,
-  and an unsupported plan version is refused.
-- Database driver errors expose only the SQLSTATE; the server message is
-  withheld.
+  supported. An integer column may be kept only when the catalogue proves it is
+  an identity column or a foreign key that carries a preserved identity value;
+  an ordinary integer is refused.
+- SQL NULL is preserved as a typed NULL for every strategy. It is never turned
+  into an empty string, so a nullable integer is never cast from `''`.
+- After the row transaction commits, identity sequences are reconciled in a
+  separate, idempotent step. The supported mode is deliberately restricted: an
+  empty table or a sequence that already covers the imported maximum needs no
+  movement (`not_required`); a sequence behind the data is raised to the
+  imported maximum (`completed`); a sequence whose state cannot be read is not
+  touched (`reconciliation_required`). The raise is
+  `setval(seq, GREATEST(max, last_value), true)`, so it never lowers the value it
+  observed. PostgreSQL sequence functions are not transactional and an external
+  `setval`/`ALTER SEQUENCE` can still race this step, so the mode assumes a
+  quiescent destination and reports `reconciliation_required` rather than
+  claiming a guarantee it cannot prove.
+- The run table is migrated additively: an S1 or S2-a table gains
+  `sequence_status` under the DDL advisory lock, existing runs are preserved,
+  and any other missing column is an incompatible schema and is refused.
+- Plans are format version 3. The plan carries an authorization envelope: an
+  HMAC over the content, the issuance time, the expiry, the run id and the key
+  id, produced with a key derived from the mask key under a separate domain.
+  Editing any field, including re-dating both timestamps, invalidates the MAC
+  even when the public fingerprint is recomputed. The expiry is bounded to 60
+  minutes and the issuance may not be more than 60 seconds ahead of the executor
+  clock. A version 1 or 2 plan has no authorization and is refused.
+- Database driver errors expose only the SQLSTATE on both the source and the
+  destination path; the server message is withheld.
 
 The plan carries the foreign-key graph, the requested depth, the import order,
 the canonical masking domains and the bounds, and all of them are bound to the

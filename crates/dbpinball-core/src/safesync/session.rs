@@ -432,9 +432,11 @@ fn bind(
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
-    CoreError::redacted(
+    crate::safesync::database_error(
         ErrorCode::Connection,
-        format!("database operation failed: {error}"),
+        "database operation",
+        "session_error",
+        error,
     )
 }
 

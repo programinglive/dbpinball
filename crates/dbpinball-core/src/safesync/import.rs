@@ -328,23 +328,36 @@ async fn run_inner(
 
 /// Reconcile identity sequences after the row transaction has committed.
 ///
-/// `setval` is not rolled back with the rows, so it runs after the commit and is
-/// idempotent: it raises a sequence to `GREATEST(max(column), last_value)` and
-/// never lowers it. A failure leaves the run marker `pending`; a retry re-runs
-/// this reconciliation.
+/// `setval` is not rolled back with the rows, so it runs after the commit as a
+/// separate, idempotent step. The supported mode is deliberately restricted:
+///
+/// - an empty table, or a table whose imported identity values are not
+///   positive, needs no movement and reports `not_required`;
+/// - a sequence that already covers the imported maximum needs no movement and
+///   reports `not_required`;
+/// - a sequence behind the imported maximum is raised to that maximum and
+///   reports `completed`;
+/// - a sequence whose state cannot be read (missing privilege) is not touched
+///   and reports `reconciliation_required`.
+///
+/// The raise is `setval(seq, GREATEST(max, last_value), true)`, so it never
+/// lowers the value it observed. PostgreSQL sequence functions are not
+/// transactional and an external `setval`/`ALTER SEQUENCE` can still race this
+/// step; the mode therefore assumes a quiescent destination and reports
+/// `reconciliation_required` rather than claiming a guarantee it cannot prove.
 pub async fn reconcile_sequences(
     session: &mut BoundSession,
     tables: &[TableRows],
     run_id: &str,
 ) -> Result<String, CoreError> {
-    let mut required = false;
+    let mut raised = false;
+    let mut unproven = false;
 
     for table in tables {
         for (index, column) in table.columns.iter().enumerate() {
             if !table.identity.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            required = true;
 
             let qualified = format!("{}.{}", table.table.schema, table.table.table);
             let sequence: Option<String> =
@@ -368,6 +381,13 @@ pub async fn reconcile_sequences(
             .await
             .map_err(connection_error)?;
 
+            // An empty table, or a non-positive identity value, cannot collide
+            // with a sequence that starts at 1. No movement is required, and
+            // `setval(0)` is never attempted.
+            let Some(max) = max.filter(|value| *value > 0) else {
+                continue;
+            };
+
             let (sequence_schema, sequence_name): (String, String) = sqlx::query_as(
                 "SELECT n.nspname::text, c.relname::text
                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -378,41 +398,111 @@ pub async fn reconcile_sequences(
             .await
             .map_err(connection_error)?;
 
-            let last: Option<i64> = sqlx::query_scalar(
-                "SELECT last_value FROM pg_sequences
-                 WHERE schemaname = $1 AND sequencename = $2",
-            )
-            .bind(&sequence_schema)
-            .bind(&sequence_name)
+            let qualified_sequence = format!(
+                "{}.{}",
+                quote_ident(&sequence_schema),
+                quote_ident(&sequence_name)
+            );
+
+            // Read the real sequence state. `pg_sequences.last_value` is NULL
+            // both for an unused sequence and for a missing privilege, so the
+            // sequence relation is read directly to tell them apart.
+            let state = match sqlx::query_as::<_, (i64, bool)>(&format!(
+                "SELECT last_value, is_called FROM {qualified_sequence}"
+            ))
             .fetch_optional(&mut *session.connection())
             .await
-            .map_err(connection_error)?
-            .flatten();
+            {
+                Ok(state) => state,
+                Err(error) if is_insufficient_privilege(&error) => {
+                    unproven = true;
+                    continue;
+                }
+                Err(error) => return Err(connection_error(error)),
+            };
 
-            let target = max.unwrap_or(0).max(last.unwrap_or(0));
-            sqlx::query("SELECT setval($1::regclass, $2, true)")
-                .bind(&sequence)
-                .bind(target)
-                .execute(&mut *session.connection())
-                .await
-                .map_err(connection_error)?;
+            let Some((last, is_called)) = state else {
+                unproven = true;
+                continue;
+            };
+
+            // An unused sequence is at its start value; treat it as below any
+            // positive imported identity.
+            let current = if is_called { last } else { 0 };
+            if current >= max {
+                continue;
+            }
+
+            // Raise only. `GREATEST` keeps the value we observed, so this never
+            // knowingly lowers the sequence.
+            sqlx::query(&format!(
+                "SELECT setval($1::regclass, GREATEST($2::bigint, last_value), true)
+                 FROM {qualified_sequence}"
+            ))
+            .bind(&sequence)
+            .bind(max)
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            raised = true;
         }
     }
 
-    if required {
-        sqlx::query(&format!(
-            "UPDATE {RUN_TABLE} SET sequence_status = 'completed' WHERE run_id = $1::uuid"
-        ))
-        .bind(run_id)
-        .execute(&mut *session.connection())
-        .await
-        .map_err(connection_error)?;
-        Ok("completed".to_string())
+    let status = if unproven {
+        "reconciliation_required"
+    } else if raised {
+        "completed"
     } else {
-        Ok("not_required".to_string())
-    }
+        "not_required"
+    };
+
+    sqlx::query(&format!(
+        "UPDATE {RUN_TABLE} SET sequence_status = $2 WHERE run_id = $1::uuid"
+    ))
+    .bind(run_id)
+    .bind(status)
+    .execute(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+
+    Ok(status.to_string())
 }
 
+/// True when a driver error is PostgreSQL `insufficient_privilege` (42501).
+fn is_insufficient_privilege(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code == "42501")
+        .unwrap_or(false)
+}
+
+/// The columns a run table must have. A pre-S2-b table is migrated additively;
+/// any other missing column is an incompatible schema and is refused.
+const RUN_TABLE_COLUMNS: &[&str] = &[
+    "run_id",
+    "plan_fingerprint",
+    "spec_hash",
+    "source_identity_key",
+    "destination_identity_key",
+    "schema_hash",
+    "masking_policy",
+    "mask_key_id",
+    "conflict_policy",
+    "import_mode",
+    "destination_digest",
+    "rows_written",
+    "status",
+    "sequence_status",
+    "finished_at",
+];
+
+/// Create the run table, or migrate an existing one additively.
+///
+/// `CREATE TABLE IF NOT EXISTS` does not add a column to an existing table, so
+/// an S1 or S2-a run table would lack `sequence_status`. This runs under the
+/// DDL advisory lock, so concurrent initializers are serialized, and it fails
+/// closed on any other missing column instead of silently discarding state.
 async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {RUN_TABLE} (
@@ -436,6 +526,47 @@ async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     .execute(&mut *session.connection())
     .await
     .map_err(connection_error)?;
+
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname::text
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = 'dbpinball_safe_sync_runs'
+           AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .fetch_all(&mut *session.connection())
+    .await
+    .map_err(connection_error)?;
+
+    if !existing.iter().any(|column| column == "sequence_status") {
+        // Additive migration for an S1 or S2-a run table. Existing rows keep
+        // their history and default to `pending`, which a replay reconciles.
+        sqlx::query(&format!(
+            "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'pending'"
+        ))
+        .execute(&mut *session.connection())
+        .await
+        .map_err(connection_error)?;
+    }
+
+    let missing: Vec<&str> = RUN_TABLE_COLUMNS
+        .iter()
+        .copied()
+        .filter(|required| !existing.iter().any(|column| column == required))
+        .filter(|required| *required != "sequence_status")
+        .collect();
+    if !missing.is_empty() {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            format!(
+                "the run table has an incompatible schema; missing columns: {}",
+                missing.join(", ")
+            ),
+            "run_table_incompatible",
+        ));
+    }
+
     Ok(())
 }
 
@@ -673,5 +804,76 @@ mod tests {
         // A collision would serialise unrelated work or, worse, share a lock
         // between a plan and the run-table setup.
         assert_ne!(plan_lock_key("fingerprint-a"), RUN_TABLE_LOCK_KEY);
+    }
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        message: String,
+        code: String,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.message)
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl sqlx::error::DatabaseError for FakeDatabaseError {
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(&self.code))
+        }
+
+        fn message(&self) -> &str {
+            &self.message
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    #[test]
+    fn a_driver_error_never_leaks_the_server_message() {
+        let canary = "CANARY-SECRET-VALUE";
+        let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: format!("value {canary} rejected"),
+            code: "22P02".into(),
+        }));
+        let core = connection_error(error);
+        let rendered = format!("{:?} {} {:?}", core.code, core.message, core.detail);
+        assert!(!rendered.contains(canary));
+        assert!(core.message.contains("22P02"));
+    }
+
+    #[test]
+    fn the_shared_database_error_never_leaks_the_server_message() {
+        let canary = "CANARY-SECRET-VALUE";
+        let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: format!("value {canary} rejected"),
+            code: "42501".into(),
+        }));
+        let core = crate::safesync::database_error(
+            ErrorCode::Connection,
+            "source extraction",
+            "source_error",
+            error,
+        );
+        let rendered = format!("{:?} {} {:?}", core.code, core.message, core.detail);
+        assert!(!rendered.contains(canary));
+        assert!(core.message.contains("42501"));
     }
 }

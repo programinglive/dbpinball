@@ -334,7 +334,23 @@ jobs:
           INSERT INTO public.identity_children VALUES
             ('0b9f4c3e-0000-0000-0000-0000000000c1', 1),
             ('0b9f4c3e-0000-0000-0000-0000000000c2', 2);
-          GRANT SELECT ON public.identity_parents, public.identity_children TO m4src;
+          -- A nullable identity reference and an ordinary integer column.
+          CREATE TABLE public.identity_optional (
+            id uuid PRIMARY KEY,
+            parent_id bigint REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.sensitive_metrics (
+            id uuid PRIMARY KEY,
+            salary bigint NOT NULL,
+            label text NOT NULL
+          );
+          INSERT INTO public.identity_optional VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000d1', NULL),
+            ('0b9f4c3e-0000-0000-0000-0000000000d2', 1);
+          INSERT INTO public.sensitive_metrics VALUES
+            ('0b9f4c3e-0000-0000-0000-0000000000e1', 90000, 'metric one');
+          GRANT SELECT ON public.identity_parents, public.identity_children,
+            public.identity_optional, public.sensitive_metrics TO m4src;
           SQL
 
       - name: Create the destination fixture
@@ -394,6 +410,15 @@ jobs:
           CREATE TABLE public.identity_children (
             id uuid PRIMARY KEY,
             parent_id bigint NOT NULL REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.identity_optional (
+            id uuid PRIMARY KEY,
+            parent_id bigint REFERENCES public.identity_parents(id)
+          );
+          CREATE TABLE public.sensitive_metrics (
+            id uuid PRIMARY KEY,
+            salary bigint NOT NULL,
+            label text NOT NULL
           );
           SQL
 

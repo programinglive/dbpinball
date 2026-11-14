@@ -130,7 +130,7 @@ pub async fn build(
     // Validate every discovered column's rule up front so the read path and the
     // metadata path agree on what a valid policy is.
     for info in &graph.tables {
-        masker.coverage(&info.schema, &info.table, &info.column_shapes())?;
+        masker.coverage(&info.schema, &info.table, &info.column_shapes(&graph))?;
     }
 
     if !effective_read {
@@ -373,7 +373,7 @@ fn metadata_only(
     for root in &spec.selection.roots {
         let name = QualifiedName::parse(&root.table)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
-        masker.coverage(&name.schema, &name.table, &info.column_shapes())?;
+        masker.coverage(&name.schema, &name.table, &info.column_shapes(graph))?;
         let canonical = crate::safesync::spec::canonical_filter(&root.filter);
         roots.push(RootPlan {
             schema: name.schema.clone(),
@@ -888,11 +888,11 @@ fn mask_table(
 
                 masker.mask_key(rule, &tuple)?
             } else {
-                masker.mask_value(
-                    rule,
-                    &identity,
-                    MaskInput::Text(raw.get(index).and_then(|v| v.as_deref()).unwrap_or("")),
-                )?
+                let input = match raw.get(index).and_then(|value| value.as_deref()) {
+                    Some(value) => MaskInput::Text(value),
+                    None => MaskInput::Null,
+                };
+                masker.mask_value(rule, &identity, input)?
             };
 
             if let Some(text) = masked.as_text() {
@@ -905,7 +905,12 @@ fn mask_table(
         let mut identity_parts = Vec::new();
         for (index, column) in info.columns.iter().enumerate() {
             if info.row_identity.contains(&column.name) {
-                let rendered = values[index].as_text().unwrap_or("").to_string();
+                // A NULL identity is refused earlier, but never conflate it
+                // with an empty string if it ever reaches here.
+                let rendered = match &values[index] {
+                    MaskedValue::Null => "\u{0}null".to_string(),
+                    other => other.as_text().unwrap_or("").to_string(),
+                };
                 identity_parts.push(format!(
                     "{}={}",
                     column.name,
@@ -1076,9 +1081,11 @@ pub fn quote_ident(identifier: &str) -> String {
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
-    CoreError::redacted(
+    crate::safesync::database_error(
         ErrorCode::Connection,
-        format!("source extraction failed: {error}"),
+        "source extraction",
+        "source_error",
+        error,
     )
 }
 
