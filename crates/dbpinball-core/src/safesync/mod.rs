@@ -5,20 +5,35 @@
 //!
 //! - [`spec`] validates the operator's selection specification;
 //! - [`mask`] applies a fail-closed, keyed, deterministic masking policy;
-//! - [`key`] owns the masking key and never exposes it.
-//!
-//! Later slices add bound sessions, extraction, the plan and the import.
+//! - [`key`] owns the masking key and never exposes it;
+//! - [`session`] binds an identity to the one connection that runs the work;
+//! - [`graph`] inspects a table's catalogue shape;
+//! - [`planner`] bounds and extracts a selection;
+//! - [`plan`] produces the reviewable, value-free plan and its fingerprint;
+//! - [`service`] combines them with the M3 security policy.
 
+pub mod graph;
 pub mod key;
 pub mod mask;
+pub mod plan;
+pub mod planner;
+pub mod service;
+pub mod session;
 pub mod spec;
 
+pub use graph::{inspect_table, ColumnInfo, TableInfo};
 pub use key::{key_id_for, InMemoryMaskKeyStore, KeyringMaskKeyStore, MaskKey, MaskKeyStore};
 pub use mask::{
     base32_lower, hex_lower, normalize_identity, ColumnClass, ColumnCoverage, ColumnRule,
     ColumnShape, CoverageReport, MaskInput, MaskStrategy, MaskedValue, Masker, MaskingPolicy,
     EMAIL_DOMAIN, FILTER_DOMAIN, MASK_DOMAIN,
 };
+pub use plan::{DryRunPlan, PlanIdentity, PLAN_VERSION};
+pub use planner::{extract_table, TableRows};
+pub use service::{
+    inspect, masker_for, plan as build_plan, resolve_policy, validate, ValidationReport,
+};
+pub use session::{BoundSession, SessionIdentity, SessionRole};
 pub use spec::{
     ExecutionOptions, FilterOp, FilterPredicate, FilterValue, Limits, MaskingSelection,
     QualifiedName, RelationshipSpec, RootSelection, SafeSyncSpec, Selection, TraversalDirection,

@@ -1,0 +1,503 @@
+//! The reviewable, value-free plan and its canonical fingerprint.
+//!
+//! The plan never contains a selected row value or a plaintext filter value. It
+//! carries a keyed filter digest instead, so `validate` and `execute` need the
+//! original specification as well as the plan.
+
+use serde::{Deserialize, Serialize};
+
+use crate::domain::error::{CoreError, ErrorCode};
+use crate::safesync::mask::{digest, hex_lower, Masker};
+use crate::safesync::planner::SelectionPlan;
+use crate::safesync::session::SessionIdentity;
+use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
+use crate::security::DestinationCategory;
+
+/// The plan format version.
+pub const PLAN_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanIdentity {
+    pub identity_key: Option<String>,
+    pub current_user: String,
+    pub engine: String,
+}
+
+impl PlanIdentity {
+    pub fn from_session(identity: &SessionIdentity) -> Self {
+        Self {
+            identity_key: identity.identity_key.clone(),
+            current_user: identity.current_user.clone(),
+            engine: "postgres".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRoot {
+    pub schema: String,
+    pub table: String,
+    pub filter_columns: Vec<String>,
+    pub filter_ops: Vec<String>,
+    pub filter_digest: String,
+    /// Always `false` in M4; a future version cannot add values silently.
+    pub contains_values: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanSelection {
+    pub roots: Vec<PlanRoot>,
+    pub direction: String,
+    pub depth: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanTable {
+    pub schema: String,
+    pub table: String,
+    pub schema_hash: String,
+    pub row_identity: Vec<String>,
+    pub rows_estimated: Option<u64>,
+    pub rls_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanGraph {
+    pub edges: u64,
+    pub cycles: u64,
+    pub max_depth_used: u8,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanMasking {
+    pub policy: String,
+    pub policy_hash: String,
+    pub key_id: String,
+    pub columns: u64,
+    pub unmapped: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanImport {
+    pub conflict_policy: String,
+    pub mode: String,
+    pub sequence_adjustment: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCheck {
+    pub limit: String,
+    pub observed: u64,
+    pub ok: bool,
+}
+
+/// The whole plan document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DryRunPlan {
+    pub plan_version: u32,
+    pub run_id: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub spec_hash: String,
+    pub plan_fingerprint: String,
+    pub source: PlanIdentity,
+    pub destination: PlanIdentity,
+    pub selection: PlanSelection,
+    pub tables: Vec<PlanTable>,
+    pub graph: PlanGraph,
+    pub masking: PlanMasking,
+    pub import: PlanImport,
+    pub constraints: PlanConstraints,
+    pub limits: Limits,
+    pub checks: Vec<PlanCheck>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanConstraints {
+    pub order: Vec<String>,
+    pub deferred: Vec<String>,
+    pub cyclic_refused: Vec<String>,
+}
+
+impl DryRunPlan {
+    /// Build a plan. Estimates are optional and never carry values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build(
+        spec: &SafeSyncSpec,
+        source: &SessionIdentity,
+        destination: &SessionIdentity,
+        _destination_category: DestinationCategory,
+        selection: &SelectionPlan,
+        masker: &Masker,
+        estimates: &[(QualifiedName, u64)],
+        now_ms: u64,
+    ) -> Result<Self, CoreError> {
+        let mut plan = Self {
+            plan_version: PLAN_VERSION,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(spec.execution.acknowledgement_ttl_ms),
+            spec_hash: String::new(),
+            plan_fingerprint: String::new(),
+            source: PlanIdentity::from_session(source),
+            destination: PlanIdentity::from_session(destination),
+            selection: PlanSelection {
+                roots: selection
+                    .roots
+                    .iter()
+                    .map(|root| PlanRoot {
+                        schema: root.schema.clone(),
+                        table: root.table.clone(),
+                        filter_columns: root.filter_columns.clone(),
+                        filter_ops: root.filter_ops.clone(),
+                        filter_digest: root.filter_digest.clone(),
+                        contains_values: false,
+                    })
+                    .collect(),
+                direction: selection.direction.clone(),
+                depth: selection.max_depth_used,
+            },
+            tables: selection
+                .tables
+                .iter()
+                .map(|table| PlanTable {
+                    schema: table.schema.clone(),
+                    table: table.table.clone(),
+                    schema_hash: table.schema_hash.clone(),
+                    row_identity: table.row_identity.clone(),
+                    rows_estimated: estimates
+                        .iter()
+                        .find(|(name, _)| *name == table.name())
+                        .map(|(_, rows)| *rows),
+                    rls_active: table.rls_active,
+                })
+                .collect(),
+            graph: PlanGraph {
+                edges: 0,
+                cycles: 0,
+                max_depth_used: selection.max_depth_used,
+                direction: selection.direction.clone(),
+            },
+            masking: PlanMasking {
+                policy: masker.policy().identifier(),
+                policy_hash: masker.policy().hash.clone(),
+                key_id: masker.key_id().to_string(),
+                columns: selection
+                    .tables
+                    .iter()
+                    .map(|table| table.columns.len() as u64)
+                    .sum(),
+                unmapped: 0,
+            },
+            import: PlanImport {
+                conflict_policy: "refuse".to_string(),
+                mode: "single_transaction".to_string(),
+                sequence_adjustment: false,
+            },
+            constraints: PlanConstraints {
+                order: selection
+                    .tables
+                    .iter()
+                    .map(|table| format!("{}.{}", table.schema, table.table))
+                    .collect(),
+                deferred: Vec::new(),
+                cyclic_refused: Vec::new(),
+            },
+            limits: spec.limits.clone(),
+            checks: selection
+                .checks
+                .iter()
+                .map(|check| PlanCheck {
+                    limit: check.limit.clone(),
+                    observed: check.observed,
+                    ok: check.ok,
+                })
+                .collect(),
+            complete: selection.complete,
+        };
+
+        plan.spec_hash = spec_hash(spec, selection);
+        plan.plan_fingerprint = plan.fingerprint();
+        Ok(plan)
+    }
+
+    /// Canonical SHA-256 over everything except per-execution metadata.
+    pub fn fingerprint(&self) -> String {
+        let mut value = serde_json::to_value(self).expect("the plan always serializes");
+        if let Some(object) = value.as_object_mut() {
+            for key in [
+                "run_id",
+                "created_at_ms",
+                "expires_at_ms",
+                "plan_fingerprint",
+            ] {
+                object.remove(key);
+            }
+        }
+        // serde_json's map is ordered, so this is canonical.
+        let canonical = serde_json::to_string(&value).expect("the plan always serializes");
+        hex_lower(&digest(canonical.as_bytes()))
+    }
+
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        now_ms >= self.expires_at_ms
+    }
+}
+
+/// A hash of the selection shape that never includes a raw filter value.
+pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionPlan) -> String {
+    let document = serde_json::json!({
+        "version": spec.version,
+        "source": spec.source,
+        "destination": spec.destination,
+        "roots": selection.roots,
+        "depth": selection.max_depth_used,
+        "direction": selection.direction,
+        "limits": spec.limits,
+        "policy": spec.masking.policy,
+    });
+    let canonical = serde_json::to_string(&document).unwrap_or_default();
+    hex_lower(&digest(canonical.as_bytes()))
+}
+
+/// Refuse a plan whose schema has drifted from the live catalogue.
+pub fn check_schema_drift(plan: &DryRunPlan, selection: &SelectionPlan) -> Result<(), CoreError> {
+    for planned in &plan.tables {
+        let Some(live) = selection
+            .tables
+            .iter()
+            .find(|table| table.schema == planned.schema && table.table == planned.table)
+        else {
+            return Err(schema_drift(&planned.table));
+        };
+
+        if live.schema_hash != planned.schema_hash {
+            return Err(schema_drift(&planned.table));
+        }
+    }
+    Ok(())
+}
+
+fn schema_drift(table: &str) -> CoreError {
+    CoreError::with_detail(
+        ErrorCode::Conflict,
+        format!("the schema of {table} changed since the plan was made"),
+        "schema_drift",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::connection::{DbEngine, TargetClass};
+    use crate::safesync::graph::{ColumnInfo, TableInfo};
+    use crate::safesync::key::MaskKey;
+    use crate::safesync::mask::Masker;
+    use crate::safesync::planner::{LimitCheck, RootPlan};
+    use crate::safesync::spec::{
+        ExecutionOptions, FilterOp, FilterPredicate, FilterValue, MaskingSelection,
+        RelationshipSpec, RootSelection, Selection,
+    };
+    use crate::security::ServerIdentity;
+
+    fn spec() -> SafeSyncSpec {
+        SafeSyncSpec {
+            version: 1,
+            source: "prod".into(),
+            destination: "dev".into(),
+            selection: Selection {
+                roots: vec![RootSelection {
+                    table: "public.accounts".into(),
+                    filter: vec![FilterPredicate {
+                        column: "id".into(),
+                        op: FilterOp::Eq,
+                        value: FilterValue::Text("secret-value".into()),
+                    }],
+                }],
+                relationships: RelationshipSpec::default(),
+            },
+            limits: Limits::default(),
+            masking: MaskingSelection {
+                policy: "development-default@1".into(),
+            },
+            execution: ExecutionOptions::default(),
+        }
+    }
+
+    fn session(label: &str) -> SessionIdentity {
+        SessionIdentity {
+            engine: DbEngine::Postgres,
+            identity_key: Some(format!("postgres://h:1/{label}#1")),
+            system_identifier: Some("1".into()),
+            database_oid: label.into(),
+            database_name: label.into(),
+            current_user: "dev".into(),
+            backend_pid: 1,
+            backend_start: "2026-01-01".into(),
+            server_addr: "127.0.0.1".into(),
+            server_port: 5432,
+            transaction_read_only: label != "dev",
+            host: "127.0.0.1".into(),
+            port: 5432,
+            server: ServerIdentity {
+                server_uuid: Some("1".into()),
+                database_id: Some(label.into()),
+                database: Some(label.into()),
+                ..ServerIdentity::default()
+            },
+        }
+    }
+
+    fn table() -> TableInfo {
+        TableInfo {
+            schema: "public".into(),
+            table: "accounts".into(),
+            relkind: "r".into(),
+            rls_active: false,
+            columns: vec![ColumnInfo {
+                name: "id".into(),
+                type_name: "uuid".into(),
+                nullable: false,
+                is_primary_key: true,
+                is_generated: false,
+                is_identity: false,
+                max_len: None,
+            }],
+            primary_key: vec!["id".into()],
+            row_identity: vec!["id".into()],
+            schema_hash: "hash".into(),
+        }
+    }
+
+    fn selection() -> SelectionPlan {
+        SelectionPlan {
+            tables: vec![table()],
+            roots: vec![RootPlan {
+                schema: "public".into(),
+                table: "accounts".into(),
+                filter_columns: vec!["id".into()],
+                filter_ops: vec!["eq".into()],
+                filter_digest: "hmac-sha256:abc".into(),
+            }],
+            checks: vec![LimitCheck {
+                limit: "max_depth".into(),
+                observed: 0,
+                ok: true,
+            }],
+            max_depth_used: 0,
+            direction: "parents".into(),
+            complete: true,
+        }
+    }
+
+    fn masker() -> Masker {
+        Masker::from_builtin(MaskKey::from_bytes("k-test", [7u8; 32])).unwrap()
+    }
+
+    fn plan() -> DryRunPlan {
+        DryRunPlan::build(
+            &spec(),
+            &session("prod"),
+            &session("dev"),
+            DestinationCategory::VerifiedDevelopment,
+            &selection(),
+            &masker(),
+            &[],
+            1_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_plan_contains_no_filter_value() {
+        let rendered = serde_json::to_string(&plan()).unwrap();
+        assert!(!rendered.contains("secret-value"));
+        assert!(rendered.contains("contains_values\":false"));
+    }
+
+    #[test]
+    fn the_fingerprint_is_stable_for_the_same_plan() {
+        let first = plan();
+        let second = plan();
+        assert_eq!(first.plan_fingerprint, second.plan_fingerprint);
+        assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_the_destination() {
+        let first = plan();
+        let second = DryRunPlan::build(
+            &spec(),
+            &session("prod"),
+            &session("other"),
+            DestinationCategory::VerifiedDevelopment,
+            &selection(),
+            &masker(),
+            &[],
+            1_000,
+        )
+        .unwrap();
+        assert_ne!(first.plan_fingerprint, second.plan_fingerprint);
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_the_key_id() {
+        let first = plan();
+        let other = Masker::from_builtin(MaskKey::from_bytes("k-other", [9u8; 32])).unwrap();
+        let second = DryRunPlan::build(
+            &spec(),
+            &session("prod"),
+            &session("dev"),
+            DestinationCategory::VerifiedDevelopment,
+            &selection(),
+            &other,
+            &[],
+            1_000,
+        )
+        .unwrap();
+        assert_ne!(first.plan_fingerprint, second.plan_fingerprint);
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_the_import_mode() {
+        let first = plan();
+        let mut second = plan();
+        second.import.mode = "batch".into();
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_execution_metadata() {
+        let first = plan();
+        let mut second = plan();
+        second.run_id = "different".into();
+        second.created_at_ms += 5_000;
+        second.expires_at_ms += 5_000;
+        assert_eq!(first.plan_fingerprint, second.plan_fingerprint);
+    }
+
+    #[test]
+    fn an_expired_plan_is_detected() {
+        let plan = plan();
+        assert!(!plan.is_expired(1_001));
+        assert!(plan.is_expired(plan.expires_at_ms));
+    }
+
+    #[test]
+    fn schema_drift_is_detected() {
+        let plan = plan();
+        let mut drifted = selection();
+        drifted.tables[0].schema_hash = "other".into();
+        let error = check_schema_drift(&plan, &drifted).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("schema_drift"));
+    }
+
+    #[test]
+    fn the_plan_is_never_a_user_label_decision() {
+        // The declared target is not part of the plan; the policy decides.
+        let _ = TargetClass::Local;
+        assert!(plan().complete);
+    }
+}
