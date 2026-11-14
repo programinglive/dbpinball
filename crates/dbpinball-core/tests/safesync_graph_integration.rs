@@ -161,6 +161,8 @@ async fn reset(destination: &Target) {
         "cycle_b",
         "cycle_x",
         "cycle_y",
+        "rls_children",
+        "rls_parents",
     ] {
         let _ = sqlx::query(&format!("DELETE FROM public.{table}"))
             .execute(&mut connection)
@@ -864,4 +866,316 @@ async fn a_destination_constraint_failure_rolls_back_every_row() {
         .execute(&mut connection)
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// RLS-hidden parent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_rls_hidden_parent_cannot_produce_a_complete_plan() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // C2 references R2, which row-level security hides from the source role.
+    let hidden = spec("public.rls_children", "id", "C2", 1);
+    let store = security::store_for(directory.path());
+    let plan = service::plan(
+        &hidden,
+        &source.connection,
+        &destination.connection,
+        &provider,
+        &store,
+        &key_store(),
+        now_ms(),
+        true,
+        false,
+    )
+    .await
+    .expect("planning succeeds with an incomplete plan");
+
+    assert!(!plan.complete, "a hidden parent must not look complete");
+    assert!(plan
+        .checks
+        .iter()
+        .any(|check| check.limit == "closure" && !check.ok));
+
+    let store = security::store_for(directory.path());
+    let error = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &hidden,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &source.connection,
+            destination: &destination.connection,
+        },
+        &provider,
+        &store,
+        &key_store(),
+        None,
+        now_ms(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.detail.as_deref(), Some("limit_exceeded"));
+    assert!(!error.message.contains("Hidden"));
+    assert!(!error.message.contains("R2"));
+
+    assert_eq!(count(&destination, "rls_children").await, 0);
+    assert_eq!(count(&destination, "rls_parents").await, 0);
+
+    // The visible parent path still works.
+    let visible = spec("public.rls_children", "id", "C1", 1);
+    plan_and_execute(&visible, &source, &destination, &provider, directory.path())
+        .await
+        .expect("a visible parent imports");
+    assert_eq!(count(&destination, "rls_children").await, 1);
+    assert_eq!(count(&destination, "rls_parents").await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Bounds matrix
+// ---------------------------------------------------------------------------
+
+fn spec_yaml(root: &str, column: &str, value: &str, depth: u8, extra_limits: &str) -> SafeSyncSpec {
+    let yaml = format!(
+        r#"
+version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: {root}
+      filter:
+        - column: {column}
+          op: eq
+          value: {value}
+  relationships:
+    depth: {depth}
+    direction: parents
+limits:
+{extra_limits}
+masking:
+  policy: development-default@2
+"#
+    );
+    SafeSyncSpec::parse_yaml(&yaml).expect("the test spec is valid")
+}
+
+async fn plan_error(
+    spec: &SafeSyncSpec,
+    source: &Target,
+    destination: &Target,
+    provider: &MapProvider,
+    directory: &std::path::Path,
+) -> CoreError {
+    let store = security::store_for(directory);
+    service::plan(
+        spec,
+        &source.connection,
+        &destination.connection,
+        provider,
+        &store,
+        &key_store(),
+        now_ms(),
+        true,
+        false,
+    )
+    .await
+    .unwrap_err()
+}
+
+#[tokio::test]
+async fn a_per_table_row_limit_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // Three roots, a limit of two.
+    let yaml = r#"
+version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.orders
+      filter:
+        - column: id
+          op: in
+          value:
+            - 0b9f4c3e-0000-0000-0000-000000000001
+            - 0b9f4c3e-0000-0000-0000-000000000002
+            - 0b9f4c3e-0000-0000-0000-000000000003
+  relationships:
+    depth: 0
+limits:
+  max_rows_per_table: 2
+  max_total_rows: 100
+  max_depth: 3
+  max_bytes: 1048576
+  timeout_ms: 15000
+masking:
+  policy: development-default@2
+"#;
+    let spec = SafeSyncSpec::parse_yaml(yaml).unwrap();
+    let error = plan_error(&spec, &source, &destination, &provider, directory.path()).await;
+    assert_eq!(error.detail.as_deref(), Some("limit_exceeded"));
+    assert_eq!(count(&destination, "orders").await, 0);
+}
+
+#[tokio::test]
+async fn a_global_row_limit_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // One order plus its parent is two rows; the global limit is one.
+    let spec = spec_yaml(
+        "public.orders",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        1,
+        "  max_rows_per_table: 100\n  max_total_rows: 1\n  max_depth: 3\n  max_bytes: 1048576\n  timeout_ms: 15000",
+    );
+    let error = plan_error(&spec, &source, &destination, &provider, directory.path()).await;
+    assert_eq!(error.detail.as_deref(), Some("limit_exceeded"));
+    assert_eq!(count(&destination, "orders").await, 0);
+}
+
+#[tokio::test]
+async fn a_byte_limit_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec_yaml(
+        "public.orders",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        1,
+        "  max_rows_per_table: 100\n  max_total_rows: 100\n  max_depth: 3\n  max_bytes: 1\n  timeout_ms: 15000",
+    );
+    let error = plan_error(&spec, &source, &destination, &provider, directory.path()).await;
+    assert_eq!(error.detail.as_deref(), Some("limit_exceeded"));
+    assert_eq!(count(&destination, "orders").await, 0);
+}
+
+#[tokio::test]
+async fn a_cancelled_run_writes_nothing() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.orders",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        1,
+    );
+    let store = security::store_for(directory.path());
+    let plan = service::plan(
+        &spec,
+        &source.connection,
+        &destination.connection,
+        &provider,
+        &store,
+        &key_store(),
+        now_ms(),
+        true,
+        false,
+    )
+    .await
+    .expect("plan");
+
+    let store = security::store_for(directory.path());
+    let error = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &spec,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &source.connection,
+            destination: &destination.connection,
+        },
+        &provider,
+        &store,
+        &key_store(),
+        None,
+        now_ms(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.detail.as_deref(), Some("cancelled"));
+    assert_eq!(count(&destination, "orders").await, 0);
+    assert_eq!(count(&destination, "customers").await, 0);
+    let runs: (i64,) = sqlx::query_as("SELECT count(*) FROM public.dbpinball_safe_sync_runs")
+        .fetch_one(&mut connect(&destination).await)
+        .await
+        .unwrap();
+    assert_eq!(runs.0, 0);
 }

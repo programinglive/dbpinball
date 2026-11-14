@@ -179,7 +179,7 @@ pub async fn build(
 
     // Parent worklist. A request is (parent, parent columns, tuple, level).
     let mut queue: VecDeque<ParentRequest> = VecDeque::new();
-    let mut requested: BTreeSet<(String, String, String)> = BTreeSet::new();
+    let mut requested: BTreeSet<ParentRequestKey> = BTreeSet::new();
 
     let mut truncated = false;
     for name in &root_names {
@@ -499,6 +499,18 @@ fn order_tables(tables: &[QualifiedName], edges: &[ForeignKeyEdge]) -> Result<Or
     }
 }
 
+/// A structurally typed deduplication key for a pending parent fetch.
+///
+/// A typed key is used instead of a joined string so a separator byte inside a
+/// value cannot make two distinct requests look identical. `Option<String>`
+/// also keeps NULL distinct from the empty string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ParentRequestKey {
+    parent: QualifiedName,
+    parent_columns: Vec<String>,
+    tuple: Vec<Option<String>>,
+}
+
 fn seed_parents(
     graph: &SchemaGraph,
     child: &QualifiedName,
@@ -506,7 +518,7 @@ fn seed_parents(
     level: u8,
     depth: u8,
     queue: &mut VecDeque<ParentRequest>,
-    requested: &mut BTreeSet<(String, String, String)>,
+    requested: &mut BTreeSet<ParentRequestKey>,
 ) -> bool {
     let mut truncated = false;
     let Some(info) = graph.table(child) else {
@@ -546,16 +558,11 @@ fn seed_parents(
                 }
                 continue;
             }
-            let marker = tuple
-                .iter()
-                .map(|value| value.clone().unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join("\u{1f}");
-            let key = (
-                edge.parent.to_string(),
-                edge.parent_columns.join(","),
-                marker,
-            );
+            let key = ParentRequestKey {
+                parent: edge.parent.clone(),
+                parent_columns: edge.parent_columns.clone(),
+                tuple: tuple.clone(),
+            };
             if requested.insert(key) {
                 queue.push_back((
                     edge.parent.clone(),
@@ -1035,6 +1042,51 @@ mod tests {
 
     fn name(value: &str) -> QualifiedName {
         QualifiedName::parse(value).unwrap()
+    }
+
+    #[test]
+    fn the_dedup_key_cannot_collapse_delimiter_values() {
+        let build = |region: &str, code: &str| ParentRequestKey {
+            parent: name("public.shipments"),
+            parent_columns: vec!["region".into(), "code".into()],
+            tuple: vec![Some(region.into()), Some(code.into())],
+        };
+
+        // The old joined marker produced the same string for both.
+        assert_ne!(build("a", "b\u{1f}c"), build("a\u{1f}b", "c"));
+        assert_ne!(build("a", "b\u{1e}c"), build("a\u{1e}b", "c"));
+        assert_ne!(build("a", "b\u{1fe}c"), build("a\u{1f}", "b\u{1e}c"));
+        assert_eq!(build("a", "b"), build("a", "b"));
+    }
+
+    #[test]
+    fn the_dedup_key_keeps_null_and_empty_distinct() {
+        let key = |value: Option<&str>| ParentRequestKey {
+            parent: name("public.parent"),
+            parent_columns: vec!["id".into()],
+            tuple: vec![value.map(str::to_string)],
+        };
+        assert_ne!(key(None), key(Some("")));
+    }
+
+    #[test]
+    fn the_dedup_key_binds_parent_and_column_order() {
+        let first = ParentRequestKey {
+            parent: name("public.shipments"),
+            parent_columns: vec!["region".into(), "code".into()],
+            tuple: vec![Some("a".into()), Some("b".into())],
+        };
+        let other_table = ParentRequestKey {
+            parent: name("public.other"),
+            ..first.clone()
+        };
+        let other_order = ParentRequestKey {
+            parent_columns: vec!["code".into(), "region".into()],
+            tuple: vec![Some("b".into()), Some("a".into())],
+            ..first.clone()
+        };
+        assert_ne!(first, other_table);
+        assert_ne!(first, other_order);
     }
 
     #[test]

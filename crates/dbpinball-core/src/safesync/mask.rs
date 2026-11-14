@@ -287,6 +287,22 @@ impl MaskingPolicy {
             key("cycle_x", "y_id", "public.cycle_y", &["id"], 0),
             key("cycle_y", "id", "public.cycle_y", &["id"], 0),
             key("cycle_y", "x_id", "public.cycle_x", &["id"], 0),
+            // Row-level-security fixture.
+            key("rls_parents", "id", "public.rls_parents", &["id"], 0),
+            rule(
+                "public",
+                "rls_parents",
+                "name",
+                MaskStrategy::DeterministicPseudonym,
+            ),
+            key("rls_children", "id", "public.rls_children", &["id"], 0),
+            key(
+                "rls_children",
+                "parent_id",
+                "public.rls_parents",
+                &["id"],
+                0,
+            ),
         ];
 
         let mut policy = Self {

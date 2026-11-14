@@ -309,6 +309,17 @@ jobs:
           INSERT INTO public.cycle_y VALUES ('Y1', NULL);
           INSERT INTO public.cycle_x VALUES ('X1', 'Y1');
           GRANT SELECT ON ALL TABLES IN SCHEMA public TO m4src;
+          -- RLS-hidden parent fixture.
+          CREATE TABLE public.rls_parents (id text PRIMARY KEY, name text NOT NULL);
+          CREATE TABLE public.rls_children (
+            id text PRIMARY KEY,
+            parent_id text NOT NULL REFERENCES public.rls_parents(id)
+          );
+          INSERT INTO public.rls_parents VALUES ('R1', 'Visible Parent'), ('R2', 'Hidden Parent');
+          INSERT INTO public.rls_children VALUES ('C1', 'R1'), ('C2', 'R2');
+          GRANT SELECT ON public.rls_parents, public.rls_children TO m4src;
+          ALTER TABLE public.rls_parents ENABLE ROW LEVEL SECURITY;
+          CREATE POLICY rls_visible ON public.rls_parents FOR SELECT TO m4src USING (id = 'R1');
           SQL
 
       - name: Create the destination fixture
@@ -355,6 +366,11 @@ jobs:
             FOREIGN KEY (y_id) REFERENCES public.cycle_y(id);
           ALTER TABLE public.cycle_y ADD CONSTRAINT cycle_y_x
             FOREIGN KEY (x_id) REFERENCES public.cycle_x(id);
+          CREATE TABLE public.rls_parents (id text PRIMARY KEY, name text NOT NULL);
+          CREATE TABLE public.rls_children (
+            id text PRIMARY KEY,
+            parent_id text NOT NULL REFERENCES public.rls_parents(id)
+          );
           SQL
 
       - name: Set up Rust
