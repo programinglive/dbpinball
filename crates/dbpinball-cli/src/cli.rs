@@ -27,12 +27,27 @@ pub struct Cli {
     )]
     pub credential_source: CredentialSource,
 
+    /// Where masking keys are read from.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = MaskKeySource::Keyring
+    )]
+    pub mask_key_source: MaskKeySource,
+
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialSource {
+    Keyring,
+    Env,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskKeySource {
     Keyring,
     Env,
 }
@@ -56,6 +71,64 @@ pub enum Command {
         #[command(subcommand)]
         command: SecurityCommand,
     },
+    /// Bounded, masked PostgreSQL production-to-local sync.
+    SafeSync {
+        #[command(subcommand)]
+        command: SafeSyncCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SafeSyncCommand {
+    /// Read the identity of a source without writing anything.
+    Inspect {
+        #[arg(long)]
+        source: String,
+    },
+    /// Build a reviewable, value-free plan from a specification.
+    Plan {
+        #[arg(long)]
+        spec: PathBuf,
+        /// Read row counts as an estimate. Never returns values.
+        #[arg(long)]
+        estimate: bool,
+        /// Also write the plan JSON to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Re-check a plan against live identities, the catalogue and the policy.
+    Validate {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Execute a plan. Writes only to the enrolled development destination.
+    Execute {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        spec: PathBuf,
+        /// The plan fingerprint the operator reviewed.
+        #[arg(long)]
+        ack: String,
+        /// Replace the selected rows instead of refusing a non-empty destination.
+        #[arg(long)]
+        replace: bool,
+        /// Required when stdin is not a terminal.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Read a recorded run's state from the destination.
+    Status {
+        #[arg(long)]
+        run: String,
+        /// The destination profile. Falls back to the local run journal.
+        #[arg(long)]
+        destination: Option<String>,
+    },
+    /// Rotate the masking key. Invalidates every existing plan and destination.
+    KeyRotate,
 }
 
 #[derive(Subcommand, Debug)]
@@ -270,6 +343,113 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_safe_sync_plan_with_spec() {
+        let cli = Cli::try_parse_from([
+            "dbpinball",
+            "safe-sync",
+            "plan",
+            "--spec",
+            "spec.yaml",
+            "--estimate",
+            "--out",
+            "plan.json",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::SafeSync {
+                command:
+                    SafeSyncCommand::Plan {
+                        spec,
+                        estimate,
+                        out,
+                    },
+            } => {
+                assert_eq!(spec.to_string_lossy(), "spec.yaml");
+                assert!(estimate);
+                assert_eq!(out.unwrap().to_string_lossy(), "plan.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_safe_sync_execute_with_ack_and_spec() {
+        let cli = Cli::try_parse_from([
+            "dbpinball",
+            "safe-sync",
+            "execute",
+            "--plan",
+            "plan.json",
+            "--spec",
+            "spec.yaml",
+            "--ack",
+            "abc",
+            "--yes",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::SafeSync {
+                command:
+                    SafeSyncCommand::Execute {
+                        plan,
+                        spec,
+                        ack,
+                        replace,
+                        yes,
+                    },
+            } => {
+                assert_eq!(plan.to_string_lossy(), "plan.json");
+                assert_eq!(spec.to_string_lossy(), "spec.yaml");
+                assert_eq!(ack, "abc");
+                assert!(!replace);
+                assert!(yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn safe_sync_execute_without_spec_is_rejected() {
+        let result = Cli::try_parse_from([
+            "dbpinball",
+            "safe-sync",
+            "execute",
+            "--plan",
+            "p",
+            "--ack",
+            "a",
+        ]);
+        assert!(result.is_err(), "execute must require --spec");
+    }
+
+    #[test]
+    fn safe_sync_has_no_password_option() {
+        let result = Cli::try_parse_from([
+            "dbpinball",
+            "safe-sync",
+            "plan",
+            "--spec",
+            "s",
+            "--password",
+            "x",
+        ]);
+        assert!(result.is_err(), "a --password flag must not exist");
+    }
+
+    #[test]
+    fn the_mask_key_source_defaults_to_keyring() {
+        let cli = Cli::try_parse_from(["dbpinball", "safe-sync", "key-rotate"]).unwrap();
+        assert_eq!(cli.mask_key_source, MaskKeySource::Keyring);
+        assert!(matches!(
+            cli.command,
+            Command::SafeSync {
+                command: SafeSyncCommand::KeyRotate
+            }
+        ));
+    }
     #[test]
     fn parses_remove_yes() {
         let cli =

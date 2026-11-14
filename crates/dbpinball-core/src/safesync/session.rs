@@ -162,7 +162,7 @@ impl BoundSession {
 
         if is_super || bypass_rls {
             return Err(CoreError::with_detail(
-                ErrorCode::PolicyRefusal,
+                ErrorCode::Operation,
                 "the source role is privileged; use a SELECT-only role",
                 "source_privileged",
             ));
@@ -171,14 +171,14 @@ impl BoundSession {
         for table in tables {
             if table_writes(&mut self.connection, table).await? {
                 return Err(CoreError::with_detail(
-                    ErrorCode::PolicyRefusal,
+                    ErrorCode::Operation,
                     format!("the source role can write to {table}"),
                     "source_privileged",
                 ));
             }
             if owns_table(&mut self.connection, table).await? {
                 return Err(CoreError::with_detail(
-                    ErrorCode::PolicyRefusal,
+                    ErrorCode::Operation,
                     format!("the source role owns {table}"),
                     "source_privileged",
                 ));
@@ -200,6 +200,16 @@ impl BoundSession {
                     "source_not_read_only",
                 )
             })?;
+        Ok(())
+    }
+
+    /// Open the destination transaction. `REPEATABLE READ` gives the integrity
+    /// check and the write one stable snapshot.
+    pub async fn begin_destination_transaction(&mut self) -> Result<(), CoreError> {
+        sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut self.connection)
+            .await
+            .map_err(connection_error)?;
         Ok(())
     }
 
@@ -249,7 +259,7 @@ async fn apply_source_guards(
 
     if default_ro != "on" {
         return Err(CoreError::with_detail(
-            ErrorCode::PolicyRefusal,
+            ErrorCode::Operation,
             "the source session is not read-only",
             "source_not_read_only",
         ));

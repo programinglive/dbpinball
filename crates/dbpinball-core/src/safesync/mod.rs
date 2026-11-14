@@ -10,9 +10,13 @@
 //! - [`graph`] inspects a table's catalogue shape;
 //! - [`planner`] bounds and extracts a selection;
 //! - [`plan`] produces the reviewable, value-free plan and its fingerprint;
+//! - [`import`] writes masked rows in one destination transaction;
+//! - [`audit`] records counts and identities, never values;
 //! - [`service`] combines them with the M3 security policy.
 
+pub mod audit;
 pub mod graph;
+pub mod import;
 pub mod key;
 pub mod mask;
 pub mod plan;
@@ -21,7 +25,9 @@ pub mod service;
 pub mod session;
 pub mod spec;
 
+pub use audit::{AuditRecord, TableAudit};
 pub use graph::{inspect_table, ColumnInfo, TableInfo};
+pub use import::{ConflictPolicy, ImportReport, TableImport};
 pub use key::{key_id_for, InMemoryMaskKeyStore, KeyringMaskKeyStore, MaskKey, MaskKeyStore};
 pub use mask::{
     base32_lower, hex_lower, normalize_identity, ColumnClass, ColumnCoverage, ColumnRule,
@@ -31,7 +37,8 @@ pub use mask::{
 pub use plan::{DryRunPlan, PlanIdentity, PLAN_VERSION};
 pub use planner::{extract_table, TableRows};
 pub use service::{
-    inspect, masker_for, plan as build_plan, resolve_policy, validate, ValidationReport,
+    execute, inspect, masker_for, plan as build_plan, resolve_policy, status, validate,
+    ExecuteRequest, RunReport, RunStatus, ValidationReport,
 };
 pub use session::{BoundSession, SessionIdentity, SessionRole};
 pub use spec::{
