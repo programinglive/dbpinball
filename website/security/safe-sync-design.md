@@ -140,16 +140,19 @@ Within S2-b:
 - SQL NULL is preserved as a typed NULL for every strategy. It is never turned
   into an empty string, so a nullable integer is never cast from `''`.
 - After the row transaction commits, identity sequences are reconciled in a
-  separate, idempotent step. The supported mode is deliberately restricted: an
-  empty table or a sequence that already covers the imported maximum needs no
-  movement (`not_required`); a sequence behind the data is raised to the
-  imported maximum (`completed`); a sequence whose state cannot be read is not
-  touched (`reconciliation_required`). The raise is
+  separate, idempotent step. The supported mode is deliberately restricted and
+  its safety is enforced, not assumed: an empty table or a sequence that already
+  covers the imported maximum needs no movement (`not_required`); a sequence
+  behind the data is raised to the imported maximum (`completed`); a sequence
+  whose state cannot be read, or whose lock cannot be taken (missing privilege,
+  lock timeout), is not touched (`reconciliation_required`). The read and the
+  `setval` run inside one transaction that first takes an `AccessExclusiveLock`
+  on the sequence with a no-op `ALTER SEQUENCE ... CACHE`. While that lock is
+  held, an external `nextval`, `setval` or `ALTER SEQUENCE` blocks, so the
+  observed `last_value` cannot move between the read and the write. The raise is
   `setval(seq, GREATEST(max, last_value), true)`, so it never lowers the value it
-  observed. PostgreSQL sequence functions are not transactional and an external
-  `setval`/`ALTER SEQUENCE` can still race this step, so the mode assumes a
-  quiescent destination and reports `reconciliation_required` rather than
-  claiming a guarantee it cannot prove.
+  observed. If the lock cannot be taken, the mode fails closed instead of
+  guessing.
 - The run table is migrated additively: an S1 or S2-a table gains
   `sequence_status` under the DDL advisory lock, existing runs are preserved,
   and any other missing column is an incompatible schema and is refused.

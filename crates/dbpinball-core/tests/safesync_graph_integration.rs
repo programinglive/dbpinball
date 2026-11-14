@@ -1745,3 +1745,136 @@ async fn a_changed_generated_expression_is_refused() {
     .await
     .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Sequence reconciliation safety
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_sequence_lock_blocks_external_writers() {
+    let _guard = serial().lock().await;
+    let Some(destination) = target("DBPINBALL_TEST_PG_DEST_URL", "destination") else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let mut holder = connect(&destination).await;
+    let mut writer = connect(&destination).await;
+
+    sqlx::query("DROP TABLE IF EXISTS public.lock_probe")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE public.lock_probe (
+           id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+         )",
+    )
+    .execute(&mut holder)
+    .await
+    .unwrap();
+
+    // Hold the AccessExclusiveLock the reconciliation uses.
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    sqlx::query("ALTER SEQUENCE public.lock_probe_id_seq CACHE 1")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    // An external nextval must block while the lock is held.
+    sqlx::query("SET statement_timeout = '1500'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let blocked = sqlx::query("SELECT nextval('public.lock_probe_id_seq')")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    let code = blocked
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_default();
+    assert_eq!(code, "57014", "nextval must block on the sequence lock");
+
+    // An external setval must block too.
+    let blocked = sqlx::query("SELECT setval('public.lock_probe_id_seq', 50, true)")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    let code = blocked
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_default();
+    assert_eq!(code, "57014", "setval must block on the sequence lock");
+
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    // After the lock is released, the writer proceeds.
+    sqlx::query("SET statement_timeout = '5000'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let value: i64 = sqlx::query_scalar("SELECT nextval('public.lock_probe_id_seq')")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert!(value >= 1);
+
+    sqlx::query("DROP TABLE IF EXISTS public.lock_probe")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_sequence_ahead_of_the_data_is_not_required() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // Put the destination sequence well ahead of the imported identity.
+    let mut connection = connect(&destination).await;
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 100, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "not_required");
+
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(last >= 100, "an ahead sequence must not be lowered");
+}

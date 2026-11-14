@@ -330,7 +330,8 @@ async fn run_inner(
 /// Reconcile identity sequences after the row transaction has committed.
 ///
 /// `setval` is not rolled back with the rows, so it runs after the commit as a
-/// separate, idempotent step. The supported mode is deliberately restricted:
+/// separate, idempotent step. The supported mode is deliberately restricted and
+/// its safety is enforced, not assumed:
 ///
 /// - an empty table, or a table whose imported identity values are not
 ///   positive, needs no movement and reports `not_required`;
@@ -338,14 +339,17 @@ async fn run_inner(
 ///   reports `not_required`;
 /// - a sequence behind the imported maximum is raised to that maximum and
 ///   reports `completed`;
-/// - a sequence whose state cannot be read (missing privilege) is not touched
-///   and reports `reconciliation_required`.
+/// - a sequence whose state cannot be read, or whose lock cannot be taken
+///   (missing privilege, lock timeout), is not touched and reports
+///   `reconciliation_required`.
 ///
-/// The raise is `setval(seq, GREATEST(max, last_value), true)`, so it never
-/// lowers the value it observed. PostgreSQL sequence functions are not
-/// transactional and an external `setval`/`ALTER SEQUENCE` can still race this
-/// step; the mode therefore assumes a quiescent destination and reports
-/// `reconciliation_required` rather than claiming a guarantee it cannot prove.
+/// The read and the `setval` run inside one transaction that first takes an
+/// `AccessExclusiveLock` on the sequence with a no-op `ALTER SEQUENCE ... CACHE`.
+/// While that lock is held, an external `nextval`, `setval` or `ALTER SEQUENCE`
+/// blocks, so the observed `last_value` cannot move between the read and the
+/// write. The raise is `setval(seq, GREATEST(max, last_value), true)`, so it
+/// never lowers the value it observed. If the lock cannot be taken, the mode
+/// fails closed instead of guessing.
 pub async fn reconcile_sequences(
     session: &mut BoundSession,
     tables: &[TableRows],
@@ -389,9 +393,11 @@ pub async fn reconcile_sequences(
                 continue;
             };
 
-            let (sequence_schema, sequence_name): (String, String) = sqlx::query_as(
-                "SELECT n.nspname::text, c.relname::text
-                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            let (sequence_schema, sequence_name, cache): (String, String, i64) = sqlx::query_as(
+                "SELECT n.nspname::text, c.relname::text, s.seqcache
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 JOIN pg_sequence s ON s.seqrelid = c.oid
                  WHERE c.oid = to_regclass($1)",
             )
             .bind(&sequence)
@@ -405,24 +411,56 @@ pub async fn reconcile_sequences(
                 quote_ident(&sequence_name)
             );
 
-            // Read the real sequence state. `pg_sequences.last_value` is NULL
-            // both for an unused sequence and for a missing privilege, so the
-            // sequence relation is read directly to tell them apart.
-            let state = match sqlx::query_as::<_, (i64, bool)>(&format!(
-                "SELECT last_value, is_called FROM {qualified_sequence}"
+            // One transaction per sequence: the AccessExclusiveLock is held
+            // until COMMIT, so external writers are blocked for the read and
+            // the setval, and released before the next sequence.
+            sqlx::query("BEGIN")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+            // Bound the lock wait so a stuck external writer cannot hang the
+            // run; a timeout is reported as reconciliation_required.
+            sqlx::query("SET LOCAL lock_timeout = '5000'")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
+
+            // A no-op ALTER SEQUENCE takes the AccessExclusiveLock. It changes
+            // nothing because the cache is set to its current value.
+            let locked = sqlx::query(&format!(
+                "ALTER SEQUENCE {qualified_sequence} CACHE {cache}"
             ))
-            .fetch_optional(&mut *session.connection())
-            .await
-            {
-                Ok(state) => state,
-                Err(error) if is_insufficient_privilege(&error) => {
+            .execute(&mut *session.connection())
+            .await;
+            if let Err(error) = locked {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
+                if is_lock_or_privilege(&error) {
                     unproven = true;
                     continue;
                 }
-                Err(error) => return Err(connection_error(error)),
-            };
+                return Err(connection_error(error));
+            }
 
+            let state = sqlx::query_as::<_, (i64, bool)>(&format!(
+                "SELECT last_value, is_called FROM {qualified_sequence}"
+            ))
+            .fetch_optional(&mut *session.connection())
+            .await;
+            let state = match state {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK")
+                        .execute(&mut *session.connection())
+                        .await;
+                    return Err(connection_error(error));
+                }
+            };
             let Some((last, is_called)) = state else {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
                 unproven = true;
                 continue;
             };
@@ -430,22 +468,30 @@ pub async fn reconcile_sequences(
             // An unused sequence is at its start value; treat it as below any
             // positive imported identity.
             let current = if is_called { last } else { 0 };
-            if current >= max {
-                continue;
+            if current < max {
+                // Raise only. `GREATEST` keeps the value we observed, and the
+                // lock guarantees no external writer moved it.
+                let set = sqlx::query(&format!(
+                    "SELECT setval($1::regclass, GREATEST($2::bigint, last_value), true)
+                     FROM {qualified_sequence}"
+                ))
+                .bind(&sequence)
+                .bind(max)
+                .execute(&mut *session.connection())
+                .await;
+                if let Err(error) = set {
+                    let _ = sqlx::query("ROLLBACK")
+                        .execute(&mut *session.connection())
+                        .await;
+                    return Err(connection_error(error));
+                }
+                raised = true;
             }
 
-            // Raise only. `GREATEST` keeps the value we observed, so this never
-            // knowingly lowers the sequence.
-            sqlx::query(&format!(
-                "SELECT setval($1::regclass, GREATEST($2::bigint, last_value), true)
-                 FROM {qualified_sequence}"
-            ))
-            .bind(&sequence)
-            .bind(max)
-            .execute(&mut *session.connection())
-            .await
-            .map_err(connection_error)?;
-            raised = true;
+            sqlx::query("COMMIT")
+                .execute(&mut *session.connection())
+                .await
+                .map_err(connection_error)?;
         }
     }
 
@@ -469,12 +515,13 @@ pub async fn reconcile_sequences(
     Ok(status.to_string())
 }
 
-/// True when a driver error is PostgreSQL `insufficient_privilege` (42501).
-fn is_insufficient_privilege(error: &sqlx::Error) -> bool {
+/// True when a driver error means the sequence lock or privilege was not
+/// available, so the safe action is to report `reconciliation_required`.
+fn is_lock_or_privilege(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
         .and_then(|database| database.code())
-        .map(|code| code == "42501")
+        .map(|code| matches!(code.as_ref(), "42501" | "55P03" | "57014"))
         .unwrap_or(false)
 }
 
@@ -894,5 +941,21 @@ mod tests {
         let rendered = format!("{:?} {} {:?}", core.code, core.message, core.detail);
         assert!(!rendered.contains(canary));
         assert!(core.message.contains("42501"));
+    }
+
+    #[test]
+    fn a_sequence_lock_or_privilege_error_is_reconciliation_required() {
+        for code in ["42501", "55P03", "57014"] {
+            let error = sqlx::Error::Database(Box::new(FakeDatabaseError {
+                message: "withheld".into(),
+                code: code.into(),
+            }));
+            assert!(is_lock_or_privilege(&error), "{code} must be unproven");
+        }
+        let other = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            message: "withheld".into(),
+            code: "42P01".into(),
+        }));
+        assert!(!is_lock_or_privilege(&other));
     }
 }
