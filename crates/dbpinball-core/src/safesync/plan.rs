@@ -234,8 +234,21 @@ impl DryRunPlan {
             },
             import: PlanImport {
                 conflict_policy: "refuse".to_string(),
-                mode: "single_transaction".to_string(),
-                sequence_adjustment: false,
+                // The row import is one transaction; identity sequences are
+                // reconciled after it commits, so the plan says so explicitly.
+                mode: if selection
+                    .rows
+                    .iter()
+                    .any(|table| table.identity.iter().any(|identity| *identity))
+                {
+                    "single_transaction_plus_sequence".to_string()
+                } else {
+                    "single_transaction".to_string()
+                },
+                sequence_adjustment: selection
+                    .rows
+                    .iter()
+                    .any(|table| table.identity.iter().any(|identity| *identity)),
             },
             constraints: PlanConstraints {
                 order: selection

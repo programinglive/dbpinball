@@ -303,6 +303,8 @@ async fn an_end_to_end_masked_import_succeeds() {
     let body = envelope(&output);
     assert_eq!(body["data"]["status"], "completed");
     assert_eq!(body["data"]["rowsWritten"], 1);
+    // A run with no identity column needs no sequence movement.
+    assert_eq!(body["data"]["sequenceStatus"], "not_required");
 
     let rows = destination_rows(&destination).await;
     assert_eq!(rows.len(), 1);
@@ -1696,4 +1698,113 @@ async fn two_overlapping_plans_do_not_corrupt_the_destination() {
     .await
     .unwrap();
     assert_eq!(broken.0, 0);
+}
+
+#[tokio::test]
+async fn an_identity_plan_reports_the_sequence_status() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_with(directory.path(), &[&source, &destination]);
+    reset_destination(&destination).await;
+
+    // Clear the identity tables and put the sequence behind the imported id.
+    let mut connection = connect(&destination).await;
+    sqlx::query("DELETE FROM public.identity_children")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM public.identity_parents")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    enroll(&config, &source, &destination);
+
+    let spec = config.join("identity-spec.yaml");
+    std::fs::write(
+        &spec,
+        r#"version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: eq
+          value: 0b9f4c3e-0000-0000-0000-0000000000c1
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 10
+  max_total_rows: 10
+  max_depth: 2
+  max_bytes: 1048576
+  timeout_ms: 10000
+masking:
+  policy: development-default@2
+"#,
+    )
+    .unwrap();
+
+    let plan_path = config.join("identity-plan.json");
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "plan",
+            "--spec",
+            &spec.to_string_lossy(),
+            "--out",
+            &plan_path.to_string_lossy(),
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "plan failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plan_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let fingerprint = plan_json["plan_fingerprint"].as_str().unwrap().to_string();
+
+    let output = cli(
+        &config,
+        &[
+            "safe-sync",
+            "execute",
+            "--plan",
+            &plan_path.to_string_lossy(),
+            "--spec",
+            &spec.to_string_lossy(),
+            "--ack",
+            &fingerprint,
+            "--yes",
+        ],
+        &source,
+        &destination,
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "execute failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // The owner can take the lock, so the sequence is raised and the run is
+    // reported as completed, not as an unreconciled success.
+    assert_eq!(envelope(&output)["data"]["sequenceStatus"], "completed");
 }

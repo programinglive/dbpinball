@@ -617,10 +617,11 @@ discovery and are marked `is_generated` in the plan.
 
 **Identity columns.** `GENERATED ALWAYS AS IDENTITY` values are inserted with
 `OVERRIDING SYSTEM VALUE` when the column is part of a key that other rows
-reference, and the owned sequence is advanced with `setval` in the same
-transaction. If the column is the table's only key and no other table references
-it, M4 omits it and lets the destination generate values, which is safer but
-changes the identity values; the plan states which choice was made.
+reference, and the owned sequence is raised with `setval` in a separate,
+idempotent step after the row transaction commits (see 12.4). If the column is
+the table's only key and no other table references it, M4 omits it and lets the
+destination generate values, which is safer but changes the identity values; the
+plan states which choice was made.
 
 **Unique constraints after masking.** Masking must be injective on the selected
 values for every unique key. A collision is `mask_collision` and refuses the run;
@@ -839,6 +840,14 @@ The destination role should hold only what the import needs:
 `USAGE` on their sequences. M4 records whether the destination role is a superuser
 and warns in the plan when it is; it does not refuse a legitimate local
 development superuser, because the destination is already enrolled and disposable.
+
+Identity preservation adds one requirement: the role must **own** the identity
+sequence, because the safe reconciliation takes an `AccessExclusiveLock` with a
+no-op `ALTER SEQUENCE ... CACHE` before it reads and raises the sequence. A role
+that can insert but does not own the sequence still imports the rows, but the
+run reports `sequence_status = reconciliation_required` and the sequence is left
+untouched. `setval` alone would need `UPDATE`; the lock needs ownership, and the
+lock is what makes the read-then-raise safe against external writers.
 
 ### 9.3 Default import behaviour
 
@@ -1129,12 +1138,24 @@ Consequences, fixed for M4:
   supplied by the application, not a `serial` or identity column, so no sequence is
   involved and the import is fully transactional.
 - **M4.6 default import mode is `single_transaction` and `sequence_adjustment:
-  false`.** The plan records both, and both are part of the fingerprint.
+  false`.** The plan records both, and both are part of the fingerprint. When the
+  selection contains an identity column, the plan records
+  `single_transaction_plus_sequence` and `sequence_adjustment: true` instead.
 - A later milestone that imports into `GENERATED ... AS IDENTITY` columns must treat
   the sequence step as an independent, idempotent operation: record the intended
   sequence value in the run table, apply it after a successful data commit, and
-  re-apply it on `status` if it did not complete. It must never claim that
-  `setval()` participated in the data transaction.
+  re-apply it on a re-run of `execute` if it did not complete. It must never claim
+  that `setval()` participated in the data transaction.
+- The safe reconciliation takes an `AccessExclusiveLock` on the sequence with a
+  no-op `ALTER SEQUENCE ... CACHE` inside the same transaction as the read and the
+  `setval`, so an external `nextval`, `setval` or `ALTER SEQUENCE` blocks while the
+  value is read and raised. The lock requires ownership of the sequence; a role
+  that does not own it reports `reconciliation_required` and leaves the sequence
+  untouched. A `reconciliation_required` or `pending` run is not full success: the
+  CLI prints the sequence status and exits non-zero, and the audit record carries
+  it. The retry is a re-run of `execute` with the same plan, which is idempotent
+  and re-runs reconciliation; `status` reports the persisted state but does not
+  re-apply it.
 - M4 must not claim "atomic import" for any run whose plan has
   `sequence_adjustment: true`. The correct description is "transactional row
   writes with a separate, idempotent sequence step".

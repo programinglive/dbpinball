@@ -609,6 +609,7 @@ pub async fn execute(
             } else {
                 "completed".to_string()
             },
+            sequence_status: sequence_status.clone(),
             started_at_ms: now_ms,
             finished_at_ms: now_ms,
         };

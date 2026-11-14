@@ -1878,3 +1878,117 @@ async fn a_sequence_ahead_of_the_data_is_not_required() {
         .unwrap();
     assert!(last >= 100, "an ahead sequence must not be lowered");
 }
+
+#[tokio::test]
+async fn a_non_owner_sequence_reports_reconciliation_required() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+        ("limited", "m4limited"),
+    ]);
+
+    // A non-owner role: it can insert and read, but it does not own the
+    // identity sequence, so it cannot take the AccessExclusiveLock.
+    let mut admin = connect(&destination).await;
+    let _ = sqlx::query("DROP OWNED BY m4limited")
+        .execute(&mut admin)
+        .await;
+    let _ = sqlx::query("DROP ROLE IF EXISTS m4limited")
+        .execute(&mut admin)
+        .await;
+    sqlx::query("CREATE ROLE m4limited LOGIN PASSWORD 'm4limited'")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query("GRANT CONNECT ON DATABASE dstdb TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query("GRANT USAGE, CREATE ON SCHEMA public TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "GRANT INSERT, SELECT, UPDATE, DELETE
+         ON public.identity_parents, public.identity_children TO m4limited",
+    )
+    .execute(&mut admin)
+    .await
+    .unwrap();
+    sqlx::query("GRANT USAGE ON SEQUENCE public.identity_parents_id_seq TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    // The limited role creates and owns the run table.
+    sqlx::query("DROP TABLE IF EXISTS public.dbpinball_safe_sync_runs")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+
+    reset(&destination).await;
+
+    let limited = Target {
+        connection: DbConnection {
+            id: "limited".to_string(),
+            name: "limited".to_string(),
+            engine: DbEngine::Postgres,
+            host: destination.connection.host.clone(),
+            port: destination.connection.port,
+            database: destination.connection.database.clone(),
+            username: "m4limited".to_string(),
+            use_ssl: false,
+            target: TargetClass::Unknown,
+        },
+        password: "m4limited".to_string(),
+    };
+    enroll(&limited, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+    plan_and_execute(&spec, &source, &limited, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut admin)
+    .await
+    .unwrap();
+    assert_eq!(status, "reconciliation_required");
+
+    // The sequence is untouched because the lock could not be taken.
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+    assert_eq!(before_last, after_last);
+    assert_eq!(before_called, after_called);
+
+    let _ = sqlx::query("DROP OWNED BY m4limited")
+        .execute(&mut admin)
+        .await;
+    let _ = sqlx::query("DROP ROLE IF EXISTS m4limited")
+        .execute(&mut admin)
+        .await;
+}

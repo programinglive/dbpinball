@@ -260,12 +260,25 @@ async fn execute(
     output::print_success(cli.json, &report, |report| {
         println!("Run:             {}", report.run_id);
         println!("Status:          {}", report.status);
+        println!("Sequence:        {}", report.sequence_status);
         println!("Rows written:    {}", report.rows_written);
         println!("Destination:     {}", report.destination_digest);
         if report.already_completed {
             println!("This plan already completed; nothing was written.");
         }
+        if report.sequence_status == "reconciliation_required"
+            || report.sequence_status == "pending"
+        {
+            println!(
+                "Sequence reconciliation is incomplete; re-run execute with the same plan to retry."
+            );
+        }
     });
+
+    // A committed row import with an unreconciled sequence is not full success.
+    if report.sequence_status == "reconciliation_required" || report.sequence_status == "pending" {
+        return Ok(9);
+    }
 
     Ok(0)
 }
@@ -284,9 +297,14 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
     output::print_success(cli.json, &report, |report| {
         println!("Run:             {}", report.run_id);
         println!("Status:          {}", report.status);
+        println!("Sequence:        {}", report.sequence_status);
         println!("Rows written:    {}", report.rows_written);
         println!("Finished at:     {}", report.finished_at);
     });
+
+    if report.sequence_status == "reconciliation_required" || report.sequence_status == "pending" {
+        return Ok(9);
+    }
 
     Ok(0)
 }
