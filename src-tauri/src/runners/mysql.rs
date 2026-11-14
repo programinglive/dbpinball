@@ -21,11 +21,33 @@ pub async fn run_query(
     database: String,
     sql: String,
     limit: Option<i64>,
+    read_only: bool,
 ) -> Result<QueryResult> {
     let target_db = resolve_database(&conn, &database)?;
     let pool = connect_to_mysql(&conn, &target_db).await?;
 
-    let mut rows = sqlx::query(&sql).fetch_all(&pool).await?;
+    // `SET TRANSACTION READ ONLY` applies to the next transaction on the same
+    // connection, so the statement must run on that connection. A pool would
+    // hand out a different connection and the mode would not apply.
+    //
+    // MySQL enforces this for transactional engines. DDL causes an implicit
+    // commit that ends the read-only transaction, which is why the classifier
+    // never sends DDL down the read-only path.
+    let mut connection = pool.acquire().await?;
+
+    if read_only {
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *connection)
+            .await?;
+    }
+
+    sqlx::query("START TRANSACTION")
+        .execute(&mut *connection)
+        .await?;
+    let mut rows = sqlx::query(&sql).fetch_all(&mut *connection).await?;
+    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    drop(connection);
+
     if let Some(max) = limit {
         if max >= 0 && rows.len() > max as usize {
             rows.truncate(max as usize);

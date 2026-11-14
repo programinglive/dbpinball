@@ -16,9 +16,11 @@ DBPinball asks the database what it is. Nothing is inferred from the profile.
 | Current user | `current_user` | `CURRENT_USER()` |
 | Read-only session | `transaction_read_only` | `@@read_only` |
 
-`pg_control_system()` requires elevated privileges. When it is unavailable the
-server identity is missing, and the policy treats the destination as
-**unverifiable** rather than inventing one.
+`pg_control_system()` requires elevated privileges. On PostgreSQL 18 a plain
+login role can run it, so the identity is practical for ordinary developer
+credentials. On older releases or hardened clusters it may be denied; when it is
+unavailable the server identity is missing, and the policy treats the destination
+as **unverifiable** rather than inventing one.
 
 ## The fingerprint
 

@@ -85,6 +85,11 @@ impl EnrollmentStore {
             )
         })?;
 
+        // Enrollment is a read-modify-write, exactly like the connection store,
+        // so it takes the same cross-process lock. Without it, a CLI enroll and
+        // a desktop enroll can lose each other's fingerprint.
+        let _guard = crate::store::lock::acquire(directory)?;
+
         let file = RegistryFile {
             version: VERSION,
             enrollments: registry.clone(),

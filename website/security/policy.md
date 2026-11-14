@@ -84,10 +84,32 @@ Every refusal is a stable code, so a script can branch on it.
 | --- | --- |
 | Core | `dbpinball_core::security::evaluate` |
 | CLI | `dbpinball security policy-check` |
-| Desktop | `security_status` and a pre-write check in the query path |
+| Desktop query | Classified before execution; writes need a verified destination |
+| Desktop restore | `authorize_write` before the client runs |
+| Desktop copy | `authorize_copy` verifies both sides before the dump starts |
+| Backup | Read-only export, unchanged |
 
 The desktop cannot bypass the policy: the query runner classifies the SQL and
-calls the core before executing anything that can write.
+calls the core before executing anything that can write, and restore and copy are
+gated at the same execution boundary. A command is not safe because its UI page
+is unrouted; the gate is on the command itself.
+
+## Read-only execution
+
+A statement the classifier calls read-only is executed inside a database-level
+read-only transaction:
+
+- **PostgreSQL**: `SET TRANSACTION READ ONLY`. The engine refuses DML and DDL
+  inside it.
+- **MySQL**: `SET TRANSACTION READ ONLY` on the same connection that runs the
+  statement. The engine refuses DML on transactional tables (error 1792).
+  **DDL is not covered**: MySQL performs an implicit commit before DDL, which
+  ends the read-only transaction. The classifier never sends DDL down this path,
+  but the engine guarantee is narrower than PostgreSQL's.
+
+The classifier is a risk signal; the engine is the boundary. Neither is a
+sandbox for functions with external side effects.
+
 
 ## Related
 

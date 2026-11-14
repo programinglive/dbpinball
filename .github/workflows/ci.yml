@@ -179,6 +179,13 @@ jobs:
           DBPINBALL_TEST_MYSQL_URL: mysql://dbpinball:dbpinball_test@127.0.0.1:3306/dbpinball_test
         run: cargo test -p dbpinball-core --features integration --test inspect_integration -- --nocapture
 
+      - name: Run M3 security verifier integration tests
+        env:
+          DBPINBALL_TEST_PG_URL: postgres://dbpinball:dbpinball_test@127.0.0.1:5432/dbpinball_test
+          DBPINBALL_TEST_MYSQL_URL: mysql://dbpinball:dbpinball_test@127.0.0.1:3306/dbpinball_test
+        # These must actually run: a skipped suite is not engine verification.
+        run: cargo test -p dbpinball-core --features integration --test security_integration -- --nocapture
+
       - name: Run CLI database integration tests
         env:
           DBPINBALL_TEST_PG_URL: postgres://dbpinball:dbpinball_test@127.0.0.1:5432/dbpinball_test

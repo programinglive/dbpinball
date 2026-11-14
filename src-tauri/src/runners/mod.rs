@@ -41,9 +41,14 @@ pub async fn run_query(
             .map_err(|message| anyhow::anyhow!(message))?;
     }
 
+    // A statement classified read-only is executed in a database-level
+    // read-only transaction. The classifier is a risk signal; the engine is the
+    // enforcement boundary.
+    let read_only = class == dbpinball_core::security::SqlClass::ReadOnly;
+
     match conn.engine {
-        DbEngine::Mysql => mysql::run_query(conn, database, sql, limit).await,
-        DbEngine::Postgres => postgres::run_query(conn, database, sql, limit).await,
+        DbEngine::Mysql => mysql::run_query(conn, database, sql, limit, read_only).await,
+        DbEngine::Postgres => postgres::run_query(conn, database, sql, limit, read_only).await,
     }
 }
 
@@ -64,6 +69,15 @@ pub async fn start_restore(
     file: String,
     opts: RestoreOptions,
 ) -> Result<String> {
+    // The page may not be routed in the UI, but the command is registered and
+    // callable. A restore writes, so it must pass the policy first.
+    crate::security::authorize_write(
+        &conn,
+        dbpinball_core::security::DatabaseOperation::DatabaseRestore,
+    )
+    .await
+    .map_err(|message| anyhow::anyhow!(message))?;
+
     match conn.engine {
         DbEngine::Mysql => mysql::restore(window, conn, file, opts).await,
         DbEngine::Postgres => postgres::restore(window, conn, file, opts).await,
@@ -76,6 +90,12 @@ pub async fn start_copy(
     dst: DbConnection,
     opts: CopyOptions,
 ) -> Result<String> {
+    // Copy reads one database and writes another. Verify both sides so a
+    // reversed or identical pair is refused before the dump starts.
+    crate::security::authorize_copy(&src, &dst)
+        .await
+        .map_err(|message| anyhow::anyhow!(message))?;
+
     if std::mem::discriminant(&src.engine) == std::mem::discriminant(&dst.engine) {
         match src.engine {
             DbEngine::Mysql => mysql::copy_same_engine(window, src, dst, opts).await,

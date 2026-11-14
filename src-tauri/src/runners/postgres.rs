@@ -32,11 +32,24 @@ pub async fn run_query(
     database: String,
     sql: String,
     limit: Option<i64>,
+    read_only: bool,
 ) -> Result<QueryResult> {
     let target_db = resolve_database(&conn, &database)?;
     let pool = connect_to_postgres(&conn, &target_db).await?;
 
-    let mut rows = sqlx::query(&sql).fetch_all(&pool).await?;
+    // A statement the classifier called read-only is executed inside a
+    // PostgreSQL READ ONLY transaction, so the engine refuses a write even if
+    // the classifier missed one.
+    let mut tx = pool.begin().await?;
+    if read_only {
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let mut rows = sqlx::query(&sql).fetch_all(&mut *tx).await?;
+    tx.rollback().await?;
+
     if let Some(max) = limit {
         if max >= 0 && rows.len() > max as usize {
             rows.truncate(max as usize);

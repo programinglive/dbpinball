@@ -36,6 +36,24 @@ local configuration directory.
 DBPinball is an application, not a sandbox. It does not restrict what a user can
 do with the database once connected.
 
+## Engine-specific read-only gaps
+
+- **MySQL**: a read-only transaction does not cover DDL, because MySQL performs
+  an implicit commit first. MyISAM tables ignore transactions entirely. The
+  classifier routes DDL to the write path, but the engine guarantee is narrower
+  than PostgreSQL's.
+- **PostgreSQL**: a read-only transaction covers DML and DDL. A function with
+  external side effects can still act outside the database.
+- **Both**: least-privilege credentials remain the only enforcement the engine
+  cannot be talked out of.
+
+## Enrollment concurrency
+
+The enrollment registry takes the same cross-process lock as the connection
+store. A corrupted registry is an error, never a silently empty one, so an
+enrolled destination cannot appear unenrolled after a partial write.
+
+
 ## Not implemented
 
 - Shared security policy and destination verification (M3).

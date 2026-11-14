@@ -181,7 +181,14 @@ impl Default for FreshnessPolicy {
 
 impl FreshnessPolicy {
     pub fn is_fresh(&self, observed_at_ms: u64, now_ms: u64) -> bool {
-        now_ms >= observed_at_ms && now_ms - observed_at_ms <= self.max_age_ms
+        if now_ms < observed_at_ms {
+            // The caller samples its clock before the verification round-trip,
+            // so the observation can legitimately be a few milliseconds later.
+            // Treat a small skew as fresh; a large one is still stale.
+            return observed_at_ms - now_ms <= 5_000;
+        }
+
+        now_ms - observed_at_ms <= self.max_age_ms
     }
 }
 

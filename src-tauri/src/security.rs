@@ -103,6 +103,52 @@ pub async fn authorize_write(
     .await
     .map_err(safe_error)?;
 
+    refuse_unless_allowed(decision, operation)
+}
+
+/// Authorize a copy from `source` into `destination`.
+///
+/// Both sides are verified, so a reversed or identical pair is refused before
+/// any dump starts.
+pub async fn authorize_copy(
+    source: &DbConnection,
+    destination: &DbConnection,
+) -> Result<(), String> {
+    use dbpinball_core::security::{evaluate, OperationContext};
+
+    let store = enrollment_store()?;
+
+    let source_identity = security::verify_destination(source, &KeyringCredentialProvider)
+        .await
+        .map_err(safe_error)?;
+    let destination_identity =
+        security::verify_destination(destination, &KeyringCredentialProvider)
+            .await
+            .map_err(safe_error)?;
+
+    let registry = store.load().map_err(safe_error)?;
+    let enrollment = registry.get(&destination.id);
+
+    let mut context = OperationContext::new(
+        dbpinball_core::security::DatabaseOperation::DatabaseCopy,
+        now_ms(),
+    )
+    .with_source(&source_identity)
+    .with_destination(&destination_identity)
+    .with_optional_enrollment(enrollment)
+    .with_declared_target(destination.target);
+    context.freshness = FreshnessPolicy::default();
+
+    refuse_unless_allowed(
+        evaluate(&context),
+        dbpinball_core::security::DatabaseOperation::DatabaseCopy,
+    )
+}
+
+fn refuse_unless_allowed(
+    decision: dbpinball_core::security::PolicyDecision,
+    operation: dbpinball_core::security::DatabaseOperation,
+) -> Result<(), String> {
     if decision.is_allowed() {
         return Ok(());
     }
@@ -118,8 +164,9 @@ pub async fn authorize_write(
 
     Err(format!(
         "Refused by the security policy ({code}): {reason}. \
-         Enroll this destination with `dbpinball security enroll --connection <id> --category development` \
-         before writing to it."
+         Enroll the destination with `dbpinball security enroll --connection <id> --category development` \
+         before running {}.",
+        operation.as_str()
     ))
 }
 
