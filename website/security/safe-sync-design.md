@@ -127,6 +127,71 @@ Within S2-a:
   table locks; the second refuses with a deterministic conflict instead of
   duplicating or overwriting rows.
 
+Within S2-b:
+
+- Generated columns are omitted from the insert and recomputed by the
+  destination. The generated expression is part of the schema hash, so a
+  destination with a different expression is refused before any row is written.
+- A restricted identity-preserve mode keeps single-column integer identity keys
+  with `OVERRIDING SYSTEM VALUE`; regenerating and remapping identities is not
+  supported. An integer column may be kept only when the catalogue proves it is
+  an identity column or a foreign key that carries a preserved identity value;
+  an ordinary integer is refused.
+- SQL NULL is preserved as a typed NULL for every strategy. It is never turned
+  into an empty string, so a nullable integer is never cast from `''`.
+- After the row transaction commits, identity sequences are reconciled in a
+  separate, idempotent step. The supported mode is deliberately restricted and
+  its safety is enforced, not assumed: an empty table or a `CACHE 1` sequence
+  that already covers the imported maximum needs no movement (`not_required`); a
+  sequence behind the data is raised to the imported maximum (`completed`); a sequence
+  whose state cannot be read, whose lock cannot be taken (missing privilege,
+  lock timeout) or whose cache preallocates values is not touched
+  (`reconciliation_required`). The read and the `setval` run inside one
+  transaction that first changes the sequence with an `ALTER SEQUENCE` whose
+  `CACHE` clause repeats the current value. PostgreSQL documents that
+  `ALTER SEQUENCE` blocks concurrent
+  `nextval`, `currval`, `lastval` and `setval`, and the backend takes a
+  `ShareRowExclusiveLock` on the sequence, so the observed `last_value` cannot
+  move between the read and the write. The raise is
+  `setval(seq, GREATEST(max, last_value), true)`, so it never lowers the value it
+  observed.
+- Only `CACHE 1` identity sequences are reconciled automatically. A larger cache
+  plans ahead by handing out a block of values that this session can neither see
+  nor revoke, and the PostgreSQL documentation says other backends keep using
+  their cached values until they notice a change; the mode therefore refuses
+  instead of depending on undocumented invalidation. Two sessions on PostgreSQL
+  18 were used to prove both halves: after a bare `setval` a cached backend still
+  returned `2` from its block, while the `ALTER`-based step made a blocked
+  `nextval` resume above the reconciled value. The refusal is a snapshot taken
+  before the lock, so a cache changed by an uncoordinated external writer
+  mid-run is outside the supported mode, which requires a **quiescent
+  destination**. The cache check runs before the value is compared, so a
+  `CACHE` greater than 1 is `reconciliation_required` even when the sequence is
+  already ahead of the imported maximum: "ahead" is not proof of safety while a
+  backend can hold an unobserved block. The lock also requires **ownership** of
+  the identity sequence. A role that can insert but does not own the sequence
+  still imports the rows, but the run reports `reconciliation_required` and the
+  sequence is left untouched. If the conditions cannot be established, the mode
+  fails closed instead of guessing.
+- An unreconciled sequence is never reported as success: the JSON envelope is
+  `ok: false` with `error.code = "sequence_reconciliation_required"`, `data`
+  still carries the committed run, and the CLI exits 6 (distinct from the
+  documented busy code 9).
+- The run table is migrated additively: an S1 or S2-a table gains
+  `sequence_status` under the DDL advisory lock, existing runs are preserved and
+  backfilled to `not_required` (those milestones did not import identity
+  columns), new runs default to `pending`, and any other missing column is an
+  incompatible schema and is refused.
+- Plans are format version 3. The plan carries an authorization envelope: an
+  HMAC over the content, the issuance time, the expiry, the run id and the key
+  id, produced with a key derived from the mask key under a separate domain.
+  Editing any field, including re-dating both timestamps, invalidates the MAC
+  even when the public fingerprint is recomputed. The expiry is bounded to 60
+  minutes and the issuance may not be more than 60 seconds ahead of the executor
+  clock. A version 1 or 2 plan has no authorization and is refused.
+- Database driver errors expose only the SQLSTATE on both the source and the
+  destination path; the server message is withheld.
+
 The plan carries the foreign-key graph, the requested depth, the import order,
 the canonical masking domains and the bounds, and all of them are bound to the
 plan fingerprint. A closure that a depth or a limit cannot complete is marked
@@ -138,7 +203,10 @@ incomplete and refused, never imported partially.
 - MySQL Safe Sync.
 - Desktop integration.
 - Batch import.
-- Generated and identity column import beyond the existing inspection.
+- Generated column values are not imported; they are recomputed by the
+  destination. Identity regeneration and remapping are not implemented, and
+  identity preservation is restricted to the single-column integer mode
+  described above.
 - Range filters and arbitrary transformation scripts.
 
 Safe Sync as a whole is **not** generally available, and this page should not be

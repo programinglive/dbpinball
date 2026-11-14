@@ -106,8 +106,14 @@ dbpinball schema inspect --connection <id> --database app --json
 
 ```json
 { "ok": true,  "data": { }, "error": null }
-{ "ok": false, "data": null, "error": { "code": "connection", "message": "..." } }
+{ "ok": false, "data": null, "error": { "code": "connection", "message": "...", "detail": null } }
+{ "ok": false, "data": { }, "error": { "code": "sequence_reconciliation_required", "message": "...", "detail": "..." } }
 ```
+
+The third shape is the only one that is `ok: false` and still carries `data`:
+Safe Sync committed the rows, so the run report is real, but the identity
+sequence was not reconciled and the run must not read as success. `detail` is
+always present; it is `null` when the error has no extra detail.
 
 - Exactly one object on stdout with `--json`.
 - Diagnostics and warnings go to stderr.
@@ -122,6 +128,7 @@ dbpinball schema inspect --connection <id> --database app --json
 | 3 | Connection or credential failure |
 | 4 | Policy refusal |
 | 5 | Operation or environment failure |
+| 6 | Safe Sync committed the rows but the identity sequence needs reconciliation; re-run execute |
 | 7 | Unknown connection profile |
 | 8 | Store conflict: another writer changed the store since it was read |
 | 9 | Store busy: the cross-process lock was not acquired within the bounded wait |

@@ -16,6 +16,12 @@ calls the core, and prints either human-readable text or one JSON object.
 | `src/exit.rs` | Maps `ErrorCode` to a process exit code |
 | `src/output.rs` | JSON envelope and human output |
 
+Exit code 6 is the one exception to the `ErrorCode` map: the Safe Sync command
+returns it directly when the row import committed but the identity sequence needs
+reconciliation. That envelope is `ok: false` with
+`error.code = "sequence_reconciliation_required"`, and `data` is still populated
+with the committed run so the rows are not hidden.
+
 ## Design rules
 
 - **No password flag.** The password is read from stdin, so it never appears in
@@ -33,6 +39,7 @@ calls the core, and prints either human-readable text or one JSON object.
 | 3 | Connection or credential failure |
 | 4 | Policy refusal |
 | 5 | Operation or environment failure |
+| 6 | Safe Sync committed the rows but the identity sequence needs reconciliation |
 | 7 | Unknown connection profile |
 | 8 | Store conflict |
 | 9 | Store busy |

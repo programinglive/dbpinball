@@ -51,14 +51,38 @@ struct Target {
 }
 
 fn target(variable: &str, id: &str) -> Option<Target> {
-    let url = std::env::var(variable).ok()?;
-    let parsed = url::Url::parse(&url).ok()?;
+    // A skipped database test is not a pass. CI always provides the URLs, so a
+    // missing one there is a configuration failure, not a skip.
+    let Ok(url) = std::env::var(variable) else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} must be set when CI is set: a skipped database test is not a pass"
+        );
+        return None;
+    };
+    let parsed = match url::Url::parse(&url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{variable} is not a valid URL when CI is set: {error}"
+            );
+            return None;
+        }
+    };
+    let Some(host) = parsed.host_str() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{variable} has no host when CI is set"
+        );
+        return None;
+    };
     Some(Target {
         connection: DbConnection {
             id: id.to_string(),
             name: id.to_string(),
             engine: DbEngine::Postgres,
-            host: parsed.host_str()?.to_string(),
+            host: host.to_string(),
             port: parsed.port().unwrap_or(5432),
             database: parsed.path().trim_start_matches('/').to_string(),
             username: parsed.username().to_string(),
@@ -152,6 +176,7 @@ async fn reset(destination: &Target) {
         .execute(&mut connection)
         .await;
     for table in [
+        "accounts",
         "shipment_events",
         "shipments",
         "orders",
@@ -163,6 +188,10 @@ async fn reset(destination: &Target) {
         "cycle_y",
         "rls_children",
         "rls_parents",
+        "identity_children",
+        "identity_parents",
+        "identity_optional",
+        "sensitive_metrics",
     ] {
         let _ = sqlx::query(&format!("DELETE FROM public.{table}"))
             .execute(&mut connection)
@@ -1247,4 +1276,936 @@ async fn a_cancelled_run_writes_nothing() {
     assert_eq!(count(&destination, "orders").await, 0);
     assert_eq!(count(&destination, "customers").await, 0);
     assert_eq!(run_marker_count(&destination).await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Identity and generated columns
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn identity_values_are_preserved_and_the_sequence_is_reconciled() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let yaml = r#"
+version: 1
+source: source
+destination: destination
+selection:
+  roots:
+    - table: public.identity_children
+      filter:
+        - column: id
+          op: in
+          value:
+            - 0b9f4c3e-0000-0000-0000-0000000000c1
+            - 0b9f4c3e-0000-0000-0000-0000000000c2
+  relationships:
+    depth: 1
+limits:
+  max_rows_per_table: 100
+  max_total_rows: 100
+  max_depth: 3
+  max_bytes: 1048576
+  timeout_ms: 15000
+masking:
+  policy: development-default@2
+"#;
+    let first = SafeSyncSpec::parse_yaml(yaml).unwrap();
+    plan_and_execute(&first, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the identity parents should import");
+
+    assert_eq!(count(&destination, "identity_children").await, 2);
+    assert_eq!(count(&destination, "identity_parents").await, 2);
+
+    let mut connection = connect(&destination).await;
+    let parents: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, code, full_label FROM public.identity_parents ORDER BY id")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    // The identity values are preserved, not regenerated.
+    assert_eq!(
+        parents.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    for (id, code, label) in &parents {
+        // The generated column is recomputed by the destination from masked values.
+        assert_eq!(label, &format!("{code}:{id}"));
+        assert_ne!(code, "A");
+        assert_ne!(code, "B");
+    }
+
+    let broken: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM public.identity_children c
+         LEFT JOIN public.identity_parents p ON p.id = c.parent_id
+         WHERE p.id IS NULL",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(broken.0, 0);
+
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(last >= 2, "the sequence must cover the imported identities");
+
+    // Force the sequence behind the data, then replay the completed plan. The
+    // reconciliation must raise it without duplicating rows.
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let replay = plan_and_execute(&first, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the repeat should reconcile and not duplicate");
+    assert!(replay.complete);
+    assert_eq!(count(&destination, "identity_parents").await, 2);
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        last >= 2,
+        "reconciliation must raise a sequence that is behind"
+    );
+}
+
+#[tokio::test]
+async fn the_unguarded_extraction_helper_is_refused_for_a_table_with_fks() {
+    use dbpinball_core::safesync::{
+        extract_table, graph::inspect_table, BoundSession, Limits, Masker, MaskingPolicy,
+        QualifiedName, RootSelection, SessionRole,
+    };
+
+    let _guard = serial().lock().await;
+    let Some(source) = target("DBPINBALL_TEST_PG_SOURCE_URL", "source") else {
+        eprintln!("skipped: DBPINBALL_TEST_PG_SOURCE_URL is not set");
+        return;
+    };
+    let provider = MapProvider::new(&[("source", &source.password)]);
+    let mut session = BoundSession::open(
+        SessionRole::Source,
+        &source.connection,
+        &provider,
+        &Limits::default(),
+    )
+    .await
+    .expect("open");
+
+    let info = inspect_table(
+        &mut session,
+        &QualifiedName::parse("public.orders").unwrap(),
+    )
+    .await
+    .expect("inspect");
+    let masker = Masker::new(
+        MaskingPolicy::builtin_v2(),
+        MaskKey::from_bytes("k-test", [7u8; 32]),
+    )
+    .unwrap();
+    let root = RootSelection {
+        table: "public.orders".into(),
+        filter: vec![dbpinball_core::safesync::FilterPredicate {
+            column: "id".into(),
+            op: dbpinball_core::safesync::FilterOp::Eq,
+            value: dbpinball_core::safesync::FilterValue::Text(
+                "0b9f4c3e-0000-0000-0000-000000000001".into(),
+            ),
+        }],
+    };
+
+    let error = extract_table(&mut session, &info, &root, &masker, &Limits::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.detail.as_deref(),
+        Some("unguarded_extraction_refused")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// S2-b defect remediation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_nullable_identity_reference_keeps_null() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.identity_optional",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000d1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the nullable identity reference should import");
+
+    let mut connection = connect(&destination).await;
+    let (parent,): (Option<i64>,) = sqlx::query_as(
+        "SELECT parent_id FROM public.identity_optional
+         WHERE id = '0b9f4c3e-0000-0000-0000-0000000000d1'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    // SQL NULL is preserved as NULL, never as an empty string.
+    assert_eq!(parent, None);
+}
+
+#[tokio::test]
+async fn an_ordinary_integer_cannot_be_kept() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.sensitive_metrics",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000e1",
+        0,
+    );
+    let error = plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.detail.as_deref(),
+        Some("integer_keep_requires_identity")
+    );
+}
+
+#[tokio::test]
+async fn the_run_table_is_migrated_from_s2a() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // A pre-S2-b run table: no sequence_status column.
+    let mut connection = connect(&destination).await;
+    sqlx::query("DROP TABLE IF EXISTS public.dbpinball_safe_sync_runs")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE public.dbpinball_safe_sync_runs (
+           run_id uuid PRIMARY KEY,
+           plan_fingerprint text NOT NULL,
+           spec_hash text NOT NULL,
+           source_identity_key text,
+           destination_identity_key text,
+           schema_hash text NOT NULL,
+           masking_policy text NOT NULL,
+           mask_key_id text NOT NULL,
+           conflict_policy text NOT NULL,
+           import_mode text NOT NULL,
+           destination_digest text NOT NULL,
+           rows_written bigint NOT NULL,
+           status text NOT NULL,
+           finished_at timestamptz NOT NULL DEFAULT now()
+         )",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO public.dbpinball_safe_sync_runs
+           (run_id, plan_fingerprint, spec_hash, schema_hash, masking_policy,
+            mask_key_id, conflict_policy, import_mode, destination_digest,
+            rows_written, status)
+         VALUES ('0b9f4c3e-0000-0000-0000-0000000000f1', 'historical', 'old',
+                 'old', 'old', 'old', 'refuse', 'single_transaction', 'old', 0,
+                 'completed')",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let spec = spec(
+        "public.accounts",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        0,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the run table should be migrated and the import should succeed");
+
+    let has_column: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+           SELECT 1 FROM pg_attribute a
+           JOIN pg_class c ON c.oid = a.attrelid
+           WHERE c.relname = 'dbpinball_safe_sync_runs'
+             AND a.attname = 'sequence_status' AND NOT a.attisdropped)",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert!(has_column, "the migration must add sequence_status");
+
+    let historical: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.dbpinball_safe_sync_runs
+         WHERE plan_fingerprint = 'historical'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(historical, 1, "the migration must preserve existing runs");
+
+    // A pre-S2-b run did not import identity columns, so it needs no sequence
+    // movement; it must not surface as pending.
+    let historical_status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         WHERE plan_fingerprint = 'historical'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(historical_status, "not_required");
+
+    // New runs must still start pending, so the default is load-bearing.
+    let default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'dbpinball_safe_sync_runs'
+           AND column_name = 'sequence_status'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(default.as_deref(), Some("'pending'::text"));
+}
+
+#[tokio::test]
+async fn a_run_without_identity_reports_not_required() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.accounts",
+        "id",
+        "0b9f4c3e-0000-0000-0000-000000000001",
+        0,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the import should succeed");
+
+    let mut connection = connect(&destination).await;
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "not_required");
+}
+
+#[tokio::test]
+async fn an_empty_identity_table_needs_no_setval() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // A filter that matches no identity row: the destination identity table
+    // stays empty, so no setval is required and setval(0) is never attempted.
+    let spec = spec("public.identity_parents", "code", "ZZZ", 0);
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("an empty identity selection should succeed");
+
+    let mut connection = connect(&destination).await;
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "not_required");
+}
+
+#[tokio::test]
+async fn a_changed_generated_expression_is_refused() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    let store = security::store_for(directory.path());
+    let plan = service::plan(
+        &spec,
+        &source.connection,
+        &destination.connection,
+        &provider,
+        &store,
+        &key_store(),
+        now_ms(),
+        true,
+        false,
+    )
+    .await
+    .expect("plan");
+
+    // Change the destination generated expression after the plan was made.
+    let mut connection = connect(&destination).await;
+    sqlx::query("ALTER TABLE public.identity_parents DROP COLUMN full_label")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE public.identity_parents
+         ADD COLUMN full_label text GENERATED ALWAYS AS (code || '#' || id) STORED",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let store = security::store_for(directory.path());
+    let error = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &spec,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &source.connection,
+            destination: &destination.connection,
+        },
+        &provider,
+        &store,
+        &key_store(),
+        Some(directory.path()),
+        now_ms(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.detail.as_deref(), Some("schema_drift"));
+
+    // Restore the fixture expression for the other tests.
+    sqlx::query("ALTER TABLE public.identity_parents DROP COLUMN full_label")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE public.identity_parents
+         ADD COLUMN full_label text GENERATED ALWAYS AS (code || ':' || id) STORED",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Sequence reconciliation safety
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_sequence_lock_blocks_external_writers() {
+    let _guard = serial().lock().await;
+    let Some(destination) = target("DBPINBALL_TEST_PG_DEST_URL", "destination") else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+
+    let mut holder = connect(&destination).await;
+    let mut writer = connect(&destination).await;
+
+    sqlx::query("DROP TABLE IF EXISTS public.lock_probe")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE public.lock_probe (
+           id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+         )",
+    )
+    .execute(&mut holder)
+    .await
+    .unwrap();
+
+    // Hold the ShareRowExclusiveLock the reconciliation takes.
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    sqlx::query("ALTER SEQUENCE public.lock_probe_id_seq CACHE 1")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    // An external nextval must block while the lock is held.
+    sqlx::query("SET statement_timeout = '1500'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let blocked = sqlx::query("SELECT nextval('public.lock_probe_id_seq')")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    let code = blocked
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_default();
+    assert_eq!(code, "57014", "nextval must block on the sequence lock");
+
+    // An external setval must block too.
+    let blocked = sqlx::query("SELECT setval('public.lock_probe_id_seq', 50, true)")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    let code = blocked
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.to_string())
+        .unwrap_or_default();
+    assert_eq!(code, "57014", "setval must block on the sequence lock");
+
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    // After the lock is released, the writer proceeds.
+    sqlx::query("SET statement_timeout = '5000'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let value: i64 = sqlx::query_scalar("SELECT nextval('public.lock_probe_id_seq')")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert!(value >= 1);
+
+    sqlx::query("DROP TABLE IF EXISTS public.lock_probe")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_sequence_ahead_of_the_data_is_not_required() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // Put the destination sequence well ahead of the imported identity.
+    let mut connection = connect(&destination).await;
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 100, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "not_required");
+
+    let (last,): (i64,) = sqlx::query_as("SELECT last_value FROM public.identity_parents_id_seq")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert!(last >= 100, "an ahead sequence must not be lowered");
+}
+
+#[tokio::test]
+async fn a_non_owner_sequence_reports_reconciliation_required() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+        ("limited", "m4limited"),
+    ]);
+
+    // A non-owner role: it can insert and read, but it does not own the
+    // identity sequence, so it cannot take the ShareRowExclusiveLock.
+    let mut admin = connect(&destination).await;
+    let _ = sqlx::query("DROP OWNED BY m4limited")
+        .execute(&mut admin)
+        .await;
+    let _ = sqlx::query("DROP ROLE IF EXISTS m4limited")
+        .execute(&mut admin)
+        .await;
+    sqlx::query("CREATE ROLE m4limited LOGIN PASSWORD 'm4limited'")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query("GRANT CONNECT ON DATABASE dstdb TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query("GRANT USAGE, CREATE ON SCHEMA public TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "GRANT INSERT, SELECT, UPDATE, DELETE
+         ON public.identity_parents, public.identity_children TO m4limited",
+    )
+    .execute(&mut admin)
+    .await
+    .unwrap();
+    sqlx::query("GRANT USAGE ON SEQUENCE public.identity_parents_id_seq TO m4limited")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    // The limited role creates and owns the run table.
+    sqlx::query("DROP TABLE IF EXISTS public.dbpinball_safe_sync_runs")
+        .execute(&mut admin)
+        .await
+        .unwrap();
+
+    reset(&destination).await;
+
+    let limited = Target {
+        connection: DbConnection {
+            id: "limited".to_string(),
+            name: "limited".to_string(),
+            engine: DbEngine::Postgres,
+            host: destination.connection.host.clone(),
+            port: destination.connection.port,
+            database: destination.connection.database.clone(),
+            username: "m4limited".to_string(),
+            use_ssl: false,
+            target: TargetClass::Unknown,
+        },
+        password: "m4limited".to_string(),
+    };
+    enroll(&limited, &provider, &directory.path().to_path_buf()).await;
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+    plan_and_execute(&spec, &source, &limited, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut admin)
+    .await
+    .unwrap();
+    assert_eq!(status, "reconciliation_required");
+
+    // The sequence is untouched because the lock could not be taken.
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+    assert_eq!(before_last, after_last);
+    assert_eq!(before_called, after_called);
+
+    let _ = sqlx::query("DROP OWNED BY m4limited")
+        .execute(&mut admin)
+        .await;
+    let _ = sqlx::query("DROP ROLE IF EXISTS m4limited")
+        .execute(&mut admin)
+        .await;
+}
+
+#[tokio::test]
+async fn a_cached_identity_sequence_is_not_reconciled_automatically() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    let mut connection = connect(&destination).await;
+    // Put the sequence behind the imported identity and give it a preallocated
+    // block. Another backend can hold values from that block, and PostgreSQL
+    // documents that it keeps using them, so the mode must refuse.
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1, false)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(status, "reconciliation_required");
+
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        (before_last, before_called),
+        (after_last, after_called),
+        "a refused reconciliation must not move the sequence"
+    );
+    let cache: i64 = sqlx::query_scalar(
+        "SELECT seqcache FROM pg_sequence
+         WHERE seqrelid = 'public.identity_parents_id_seq'::regclass",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        cache, 10,
+        "a refused reconciliation must not rewrite the sequence"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_ahead_cached_sequence_is_still_reported_as_requiring_reconciliation() {
+    let _guard = serial().lock().await;
+    let (Some(source), Some(destination)) = (
+        target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
+        target("DBPINBALL_TEST_PG_DEST_URL", "destination"),
+    ) else {
+        eprintln!("skipped: the test database URLs are not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let provider = MapProvider::new(&[
+        ("source", &source.password),
+        ("destination", &destination.password),
+    ]);
+    reset(&destination).await;
+    enroll(&destination, &provider, &directory.path().to_path_buf()).await;
+
+    // The sequence is far ahead of the imported maximum, but a backend can hold
+    // a preallocated block. "Ahead" is not proof of safety: the cache check runs
+    // before the value is compared, so the run reports reconciliation_required.
+    let mut connection = connect(&destination).await;
+    sqlx::query("SELECT setval('public.identity_parents_id_seq', 1000, true)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 10")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (before_last, before_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+
+    let spec = spec(
+        "public.identity_children",
+        "id",
+        "0b9f4c3e-0000-0000-0000-0000000000c1",
+        1,
+    );
+    plan_and_execute(&spec, &source, &destination, &provider, directory.path())
+        .await
+        .expect("the row import should succeed");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT sequence_status FROM public.dbpinball_safe_sync_runs
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "reconciliation_required",
+        "the cache precondition precedes the ahead check"
+    );
+
+    // Prove the premise: the sequence really is ahead of what was imported.
+    let imported_max: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM public.identity_parents")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert!(
+        before_last > imported_max,
+        "the test premise is that the sequence is ahead of the imported maximum"
+    );
+
+    let (after_last, after_called): (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM public.identity_parents_id_seq")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        (before_last, before_called),
+        (after_last, after_called),
+        "a refused reconciliation must not move an ahead cached sequence"
+    );
+
+    // Restore the ordinary identity cache for the tests that follow.
+    sqlx::query("ALTER SEQUENCE public.identity_parents_id_seq CACHE 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
 }

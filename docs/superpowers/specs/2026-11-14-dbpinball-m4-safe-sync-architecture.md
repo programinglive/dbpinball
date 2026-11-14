@@ -617,10 +617,13 @@ discovery and are marked `is_generated` in the plan.
 
 **Identity columns.** `GENERATED ALWAYS AS IDENTITY` values are inserted with
 `OVERRIDING SYSTEM VALUE` when the column is part of a key that other rows
-reference, and the owned sequence is advanced with `setval` in the same
-transaction. If the column is the table's only key and no other table references
-it, M4 omits it and lets the destination generate values, which is safer but
-changes the identity values; the plan states which choice was made.
+reference, and the owned sequence is raised with `setval` in a separate,
+idempotent step after the row transaction commits (see 12.4). The sequence must
+use `CACHE 1` and the destination role must own it; otherwise the rows still
+import but the run reports `reconciliation_required`. If the column is the table's
+only key and no other table references it, M4 omits it and lets the destination
+generate values, which is safer but changes the identity values; the plan states
+which choice was made.
 
 **Unique constraints after masking.** Masking must be injective on the selected
 values for every unique key. A collision is `mask_collision` and refuses the run;
@@ -839,6 +842,17 @@ The destination role should hold only what the import needs:
 `USAGE` on their sequences. M4 records whether the destination role is a superuser
 and warns in the plan when it is; it does not refuse a legitimate local
 development superuser, because the destination is already enrolled and disposable.
+
+Identity preservation adds two requirements. The role must **own** the identity
+sequence, because the safe reconciliation locks it with `ALTER SEQUENCE ... CACHE
+<current>` before it reads and raises the sequence; and the sequence must use
+**`CACHE 1`**, because a larger cache hands out a preallocated block that this
+session can neither see nor revoke. A role that can insert but does not own the
+sequence, or a sequence with a larger cache, still imports the rows, but the run
+reports `sequence_status = reconciliation_required` and the sequence is left
+untouched. `setval` alone would need `UPDATE`; ownership is what allows the lock,
+and the lock plus the absence of a preallocated block is what makes the
+read-then-raise safe against external writers.
 
 ### 9.3 Default import behaviour
 
@@ -1129,12 +1143,38 @@ Consequences, fixed for M4:
   supplied by the application, not a `serial` or identity column, so no sequence is
   involved and the import is fully transactional.
 - **M4.6 default import mode is `single_transaction` and `sequence_adjustment:
-  false`.** The plan records both, and both are part of the fingerprint.
+  false`.** The plan records both, and both are part of the fingerprint. When the
+  selection contains an identity column, the plan records
+  `single_transaction_plus_sequence` and `sequence_adjustment: true` instead.
 - A later milestone that imports into `GENERATED ... AS IDENTITY` columns must treat
   the sequence step as an independent, idempotent operation: record the intended
   sequence value in the run table, apply it after a successful data commit, and
-  re-apply it on `status` if it did not complete. It must never claim that
-  `setval()` participated in the data transaction.
+  re-apply it on a re-run of `execute` if it did not complete. It must never claim
+  that `setval()` participated in the data transaction.
+- The safe reconciliation locks the sequence with `ALTER SEQUENCE ... CACHE
+  <current>` inside the same transaction as the read and the `setval`, so an
+  external `nextval`, `setval` or `ALTER SEQUENCE` blocks while the value is read
+  and raised. The backend takes a `ShareRowExclusiveLock` on the sequence;
+  PostgreSQL documents that `ALTER SEQUENCE` blocks those calls.
+- Only `CACHE 1` sequences are reconciled. A larger cache preallocates a block
+  that this session cannot see or revoke, and the PostgreSQL documentation says
+  other backends keep using their cached values, so automatic reconciliation is
+  refused for them instead of relying on undocumented invalidation. A two-session
+  test on PostgreSQL 18 recorded both halves: after a bare `setval` a cached
+  backend still returned `2`, while the `ALTER`-based step made a blocked
+  `nextval` resume above the reconciled value. The check is a snapshot taken
+  before the lock, so a cache changed by an uncoordinated writer mid-run is
+  outside the supported mode. The cache check runs before the value is compared,
+  so a `CACHE` greater than 1 is `reconciliation_required` even when the sequence
+  is already ahead of the imported maximum. The lock also requires ownership of
+  the sequence; a role that does not own it reports `reconciliation_required` and
+  leaves the sequence untouched.
+- A `reconciliation_required` or `pending` run is not full success: the JSON
+  envelope is `ok: false` with `error.code = "sequence_reconciliation_required"`,
+  `data` still carries the committed run so the rows are not hidden, the CLI
+  exits 6, and the audit record carries the status. The retry is a re-run of
+  `execute` with the same plan, which is idempotent and re-runs reconciliation;
+  `status` reports the persisted state but does not re-apply it.
 - M4 must not claim "atomic import" for any run whose plan has
   `sequence_adjustment: true`. The correct description is "transactional row
   writes with a separate, idempotent sequence step".
@@ -1201,17 +1241,23 @@ Every command reuses the existing envelope:
 ```json
 { "ok": true, "data": { ... }, "error": null }
 { "ok": false, "data": null, "error": { "code": "policy_refusal", "message": "..." } }
+{ "ok": false, "data": { ... }, "error": { "code": "sequence_reconciliation_required", ... } }
 ```
+
+The third shape is the only one that is `ok: false` and carries `data`: the row
+import committed, so the report is real, but the sequence step did not complete
+and the run must not read as success.
 
 Exit codes reuse the documented map:
 
 | Code | Meaning | Typical Safe Sync cause |
 | --- | --- | --- |
-| 0 | success | plan produced, execute committed, already completed |
+| 0 | success | plan produced, execute committed with sequence reconciliation complete or not required, already completed |
 | 2 | usage | invalid spec, missing argument |
 | 3 | connection | source/destination unreachable, auth expired |
 | 4 | policy refusal | destination not enrolled or not writable |
 | 5 | operation | incomplete plan, limit exceeded, mask collision, schema drift, cyclic FK, source privileged |
+| 6 | committed, sequence reconciliation required | rows committed but the identity sequence could not be raised (non-owner, lock timeout, missing privilege, `CACHE` greater than 1); re-run execute to retry |
 | 7 | not found | unknown run id or connection id |
 | 8 | conflict | destination not empty, schema drift, plan expired or already used differently |
 | 9 | busy | concurrent run lock |

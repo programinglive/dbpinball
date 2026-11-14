@@ -12,6 +12,12 @@
 | `not_found` | 7 | Unknown connection profile |
 | `conflict` | 8 | The store changed since it was read |
 | `busy` | 9 | The store lock was not acquired in time |
+| `sequence_reconciliation_required` | 6 | Safe Sync committed the rows but the identity sequence needs reconciliation |
+
+`sequence_reconciliation_required` is the one error that still carries `data`:
+the rows are committed, so the report is real, but the run is not a success.
+Re-run `execute` with the same plan after fixing the sequence (it must use
+`CACHE 1` and the destination role must own it).
 
 ## Common messages
 

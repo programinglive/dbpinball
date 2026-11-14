@@ -136,6 +136,9 @@ pub async fn plan(
         plan.plan_fingerprint = plan.fingerprint();
     }
 
+    // Authenticate the final document, including its issuance time and expiry.
+    plan.seal(&masker);
+
     Ok(plan)
 }
 
@@ -151,6 +154,9 @@ pub async fn validate(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
+    plan.check_version()?;
+    plan.check_expiry_contract(now_ms)?;
+
     if plan.fingerprint() != plan.plan_fingerprint {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -159,6 +165,9 @@ pub async fn validate(
         ));
     }
 
+    let masker = masker_for(spec, keys)?;
+    plan.verify_authorization(&masker)?;
+
     if plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
             ErrorCode::Conflict,
@@ -166,8 +175,6 @@ pub async fn validate(
             "plan_expired",
         ));
     }
-
-    let masker = masker_for(spec, keys)?;
 
     if masker.policy().hash != plan.masking.policy_hash {
         return Err(CoreError::with_detail(
@@ -331,6 +338,8 @@ pub struct RunReport {
     pub rows_written: u64,
     pub destination_digest: String,
     pub tables: Vec<TableImport>,
+    /// completed | not_required | pending (post-commit sequence reconciliation).
+    pub sequence_status: String,
     pub status: String,
 }
 
@@ -343,6 +352,7 @@ pub struct RunStatus {
     pub status: String,
     pub rows_written: u64,
     pub destination_digest: String,
+    pub sequence_status: String,
     pub finished_at: String,
 }
 
@@ -358,6 +368,8 @@ pub async fn execute(
     cancel: Arc<AtomicBool>,
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
+    request.plan.check_version()?;
+    request.plan.check_expiry_contract(now_ms)?;
 
     // The plan file is the reviewed contract. Recompute its fingerprint so a
     // hand-edited plan cannot silently change the schema hash, key id or
@@ -369,6 +381,25 @@ pub async fn execute(
             "plan_tampered",
         ));
     }
+
+    let masker = masker_for(request.spec, keys)?;
+
+    // A plan is bound to one mask key. Running it with a rotated key would
+    // produce different pseudonyms for the same rows, so refuse instead. This
+    // is checked before the authorization MAC so a rotation is reported as a
+    // key change, not as tampering.
+    if masker.key_id() != request.plan.masking.key_id {
+        return Err(CoreError::with_detail(
+            ErrorCode::Conflict,
+            "the masking key changed since the plan was made",
+            "mask_key_changed",
+        ));
+    }
+
+    // The authorization envelope binds the content, the issuance time, the
+    // expiry, the run id and the key id. A re-dated plan fails here even when
+    // its public fingerprint was recomputed.
+    request.plan.verify_authorization(&masker)?;
 
     if request.plan.is_expired(now_ms) {
         return Err(CoreError::with_detail(
@@ -391,18 +422,6 @@ pub async fn execute(
             ErrorCode::Usage,
             "the acknowledgement does not match the plan fingerprint",
             "acknowledgement_mismatch",
-        ));
-    }
-
-    let masker = masker_for(request.spec, keys)?;
-
-    // A plan is bound to one mask key. Running it with a rotated key would
-    // produce different pseudonyms for the same rows, so refuse instead.
-    if masker.key_id() != request.plan.masking.key_id {
-        return Err(CoreError::with_detail(
-            ErrorCode::Conflict,
-            "the masking key changed since the plan was made",
-            "mask_key_changed",
         ));
     }
 
@@ -544,6 +563,19 @@ pub async fn execute(
     )
     .await?;
 
+    // Sequence adjustment is not part of the row transaction. It runs here,
+    // after the commit, and is idempotent. On failure the persisted status is
+    // read back, so a replay of a completed run is not mislabelled pending.
+    let sequence_status =
+        match import::reconcile_sequences(&mut destination_session, &extracted, &report.run_id)
+            .await
+        {
+            Ok(status) => status,
+            Err(_) => import::persisted_sequence_status(&mut destination_session, &report.run_id)
+                .await
+                .unwrap_or_else(|_| "pending".to_string()),
+        };
+
     if let Some(directory) = audit_dir {
         let record = AuditRecord {
             run_id: report.run_id.clone(),
@@ -577,6 +609,7 @@ pub async fn execute(
             } else {
                 "completed".to_string()
             },
+            sequence_status: sequence_status.clone(),
             started_at_ms: now_ms,
             finished_at_ms: now_ms,
         };
@@ -595,6 +628,7 @@ pub async fn execute(
         } else {
             "completed".to_string()
         },
+        sequence_status,
     })
 }
 
@@ -609,7 +643,7 @@ pub async fn status(
         BoundSession::open(SessionRole::Destination, destination, credentials, limits).await?;
 
     let statement = format!(
-        "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, finished_at::text
+        "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, sequence_status, finished_at::text
          FROM {}
          WHERE run_id = $1::uuid",
         crate::safesync::import::RUN_TABLE
@@ -620,9 +654,11 @@ pub async fn status(
         .fetch_optional(&mut *session.connection())
         .await
         .map_err(|error| {
-            CoreError::redacted(
+            crate::safesync::database_error(
                 ErrorCode::Connection,
-                format!("the run state could not be read: {error}"),
+                "the run state read",
+                "run_state_unreadable",
+                error,
             )
         })?;
 
@@ -641,7 +677,8 @@ pub async fn status(
         status: row.try_get(2).unwrap_or_default(),
         rows_written: row.try_get::<i64, _>(3).unwrap_or(0) as u64,
         destination_digest: row.try_get(4).unwrap_or_default(),
-        finished_at: row.try_get(5).unwrap_or_default(),
+        sequence_status: row.try_get(5).unwrap_or_else(|_| "pending".to_string()),
+        finished_at: row.try_get(6).unwrap_or_default(),
     })
 }
 

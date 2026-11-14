@@ -14,7 +14,28 @@ use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
 use crate::security::DestinationCategory;
 
 /// The plan format version.
-pub const PLAN_VERSION: u32 = 1;
+///
+/// Version 3 adds the authenticated authorization envelope. A version 1 or 2
+/// plan has no authorization and is refused rather than trusted.
+pub const PLAN_VERSION: u32 = 3;
+
+/// A plan may not be valid for longer than this, whatever the spec asks for.
+pub const MAX_PLAN_TTL_MS: u64 = 60 * 60 * 1_000;
+
+/// How far the issuer clock may run ahead of the executor clock.
+///
+/// The issuance time is authenticated, so this only bounds a clock that is
+/// wrong in the future; it never extends the maximum lifetime.
+pub const CLOCK_SKEW_MS: u64 = 60 * 1_000;
+
+/// Domain for deriving the plan-authorization key from the mask key.
+///
+/// This is an explicit key-separation step: the authorization MAC never uses
+/// the masking key directly, and the derived key is never used for masking.
+pub const PLAN_AUTH_KEY_DOMAIN: &str = "dbpinball/safesync/plan-authorization-key/v1";
+
+/// Domain for the plan-authorization MAC itself.
+pub const PLAN_AUTH_DOMAIN: &str = "dbpinball/safesync/plan-authorization/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanIdentity {
@@ -94,6 +115,18 @@ pub struct PlanCheck {
     pub ok: bool,
 }
 
+/// The authorization envelope over the whole plan document.
+///
+/// The MAC covers the content, the issuance time, the expiry, the run id and
+/// the key id. It is produced with a key derived from the mask key under a
+/// separate domain, so editing any field invalidates it and a recomputed public
+/// fingerprint does not restore authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanAuthorization {
+    pub key_id: String,
+    pub mac: String,
+}
+
 /// The whole plan document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DryRunPlan {
@@ -114,6 +147,7 @@ pub struct DryRunPlan {
     pub limits: Limits,
     pub checks: Vec<PlanCheck>,
     pub complete: bool,
+    pub authorization: PlanAuthorization,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,7 +174,8 @@ impl DryRunPlan {
             plan_version: PLAN_VERSION,
             run_id: uuid::Uuid::new_v4().to_string(),
             created_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(spec.execution.acknowledgement_ttl_ms),
+            expires_at_ms: now_ms
+                .saturating_add(spec.execution.acknowledgement_ttl_ms.min(MAX_PLAN_TTL_MS)),
             spec_hash: String::new(),
             plan_fingerprint: String::new(),
             source: PlanIdentity::from_session(source),
@@ -199,8 +234,21 @@ impl DryRunPlan {
             },
             import: PlanImport {
                 conflict_policy: "refuse".to_string(),
-                mode: "single_transaction".to_string(),
-                sequence_adjustment: false,
+                // The row import is one transaction; identity sequences are
+                // reconciled after it commits, so the plan says so explicitly.
+                mode: if selection
+                    .rows
+                    .iter()
+                    .any(|table| table.identity.iter().any(|identity| *identity))
+                {
+                    "single_transaction_plus_sequence".to_string()
+                } else {
+                    "single_transaction".to_string()
+                },
+                sequence_adjustment: selection
+                    .rows
+                    .iter()
+                    .any(|table| table.identity.iter().any(|identity| *identity)),
             },
             constraints: PlanConstraints {
                 order: selection
@@ -232,6 +280,10 @@ impl DryRunPlan {
                 })
                 .collect(),
             complete: selection.complete,
+            authorization: PlanAuthorization {
+                key_id: masker.key_id().to_string(),
+                mac: String::new(),
+            },
         };
 
         plan.spec_hash = spec_hash(spec, selection);
@@ -239,7 +291,17 @@ impl DryRunPlan {
         Ok(plan)
     }
 
-    /// Canonical SHA-256 over everything except per-execution metadata.
+    /// Canonical SHA-256 over the plan content.
+    ///
+    /// The content hash covers the graph, selection, limits, policy, key and
+    /// import mode, so an acknowledgement cannot be reused for changed plan
+    /// content, and a repeated identical plan keeps the same fingerprint for
+    /// idempotency. `created_at_ms`, `expires_at_ms` and `run_id` are execution
+    /// metadata; the expiry is authenticated separately by the authorization
+    /// envelope, which covers them.
+    ///
+    /// This is an integrity check, not a MAC. The authorization envelope is the
+    /// authenticity check.
     pub fn fingerprint(&self) -> String {
         let mut value = serde_json::to_value(self).expect("the plan always serializes");
         if let Some(object) = value.as_object_mut() {
@@ -248,6 +310,7 @@ impl DryRunPlan {
                 "created_at_ms",
                 "expires_at_ms",
                 "plan_fingerprint",
+                "authorization",
             ] {
                 object.remove(key);
             }
@@ -257,8 +320,95 @@ impl DryRunPlan {
         hex_lower(&digest(canonical.as_bytes()))
     }
 
+    /// The canonical material the authorization MAC covers.
+    ///
+    /// Everything except the MAC itself is included, so the content, the
+    /// issuance time, the expiry, the run id and the key id are all bound.
+    fn authorization_material(&self) -> String {
+        let mut value = serde_json::to_value(self).expect("the plan always serializes");
+        if let Some(object) = value.as_object_mut() {
+            if let Some(authorization) = object
+                .get_mut("authorization")
+                .and_then(|value| value.as_object_mut())
+            {
+                authorization.remove("mac");
+            }
+        }
+        serde_json::to_string(&value).expect("the plan always serializes")
+    }
+
+    /// Seal the plan with the authorization MAC.
+    ///
+    /// Called once, after the plan is final. The MAC is produced with a key
+    /// derived from the mask key under a separate domain, so the masking key is
+    /// never used directly as a signing key.
+    pub fn seal(&mut self, masker: &Masker) {
+        self.authorization.key_id = masker.key_id().to_string();
+        let material = self.authorization_material();
+        self.authorization.mac = masker.authorization_mac(material.as_bytes());
+    }
+
+    /// Verify the authorization envelope.
+    ///
+    /// A plan whose content, issuance time, expiry, run id or key id changed
+    /// after issuance fails here, even if its public fingerprint was recomputed.
+    pub fn verify_authorization(&self, masker: &Masker) -> Result<(), CoreError> {
+        if self.authorization.key_id != masker.key_id() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                "the plan was authorized with a different masking key",
+                "plan_tampered",
+            ));
+        }
+        let material = self.authorization_material();
+        if !masker.verify_authorization_mac(material.as_bytes(), &self.authorization.mac) {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                "the plan authorization is invalid; regenerate the plan",
+                "plan_tampered",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn is_expired(&self, now_ms: u64) -> bool {
         now_ms >= self.expires_at_ms
+    }
+
+    /// Refuse a plan from a different format version.
+    pub fn check_version(&self) -> Result<(), CoreError> {
+        if self.plan_version != PLAN_VERSION {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                format!(
+                    "plan version {} is not supported; regenerate the plan",
+                    self.plan_version
+                ),
+                "unsupported_plan_version",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse an expiry that is malformed, too long, or issued in the future.
+    ///
+    /// The issuance time is authenticated by the authorization envelope, so
+    /// this bounds the lifetime without trusting an editable field: a plan may
+    /// not live longer than `MAX_PLAN_TTL_MS`, and its issuance may not be more
+    /// than `CLOCK_SKEW_MS` ahead of the executor clock. Re-dating the plan
+    /// breaks the MAC, so this contract cannot be bypassed by editing the file.
+    pub fn check_expiry_contract(&self, now_ms: u64) -> Result<(), CoreError> {
+        if self.expires_at_ms <= self.created_at_ms
+            || self.expires_at_ms.saturating_sub(self.created_at_ms) > MAX_PLAN_TTL_MS
+            || self.created_at_ms > now_ms.saturating_add(CLOCK_SKEW_MS)
+        {
+            return Err(CoreError::with_detail(
+                ErrorCode::Conflict,
+                "the plan expiry is outside the permitted window; regenerate the plan",
+                "plan_expiry_invalid",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -426,6 +576,9 @@ mod tests {
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
             rls_active: false,
+            generated: vec![false],
+            identity: vec![false],
+            identity_always: vec![false],
             rows: vec![vec![crate::safesync::mask::MaskedValue::Text("x".into())]],
             total_bytes: 1,
         }
@@ -566,6 +719,67 @@ mod tests {
         second.created_at_ms += 5_000;
         second.expires_at_ms += 5_000;
         assert_eq!(first.plan_fingerprint, second.plan_fingerprint);
+    }
+
+    #[test]
+    fn an_overlong_expiry_is_refused() {
+        let mut plan = plan();
+        plan.expires_at_ms = plan.created_at_ms + MAX_PLAN_TTL_MS + 1;
+        let error = plan.check_expiry_contract(plan.created_at_ms).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_expiry_invalid"));
+
+        plan.expires_at_ms = plan.created_at_ms + MAX_PLAN_TTL_MS;
+        plan.check_expiry_contract(plan.created_at_ms).unwrap();
+    }
+
+    #[test]
+    fn a_future_issuance_is_refused() {
+        let mut plan = plan();
+        let now = plan.created_at_ms;
+        plan.created_at_ms = now + CLOCK_SKEW_MS + 1;
+        plan.expires_at_ms = plan.created_at_ms + 1_000;
+        let error = plan.check_expiry_contract(now).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_expiry_invalid"));
+    }
+
+    #[test]
+    fn the_authorization_binds_the_expiry() {
+        let mut first = plan();
+        first.seal(&masker());
+        let mut second = first.clone();
+        second.expires_at_ms += 1;
+        assert!(first.verify_authorization(&masker()).is_ok());
+        let error = second.verify_authorization(&masker()).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_tampered"));
+    }
+
+    #[test]
+    fn a_redated_plan_is_refused_even_with_a_recomputed_fingerprint() {
+        let mut plan = plan();
+        plan.seal(&masker());
+        // Shift both timestamps forward and recompute the public fingerprint.
+        plan.created_at_ms += 5_000;
+        plan.expires_at_ms += 5_000;
+        plan.plan_fingerprint = plan.fingerprint();
+        let error = plan.verify_authorization(&masker()).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_tampered"));
+    }
+
+    #[test]
+    fn a_plan_authorized_with_another_key_is_refused() {
+        let mut plan = plan();
+        plan.seal(&masker());
+        let other = Masker::from_builtin(MaskKey::from_bytes("k-other", [9u8; 32])).unwrap();
+        let error = plan.verify_authorization(&other).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("plan_tampered"));
+    }
+
+    #[test]
+    fn an_old_plan_version_is_refused() {
+        let mut old = plan();
+        old.plan_version = 1;
+        let error = old.check_version().unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("unsupported_plan_version"));
     }
 
     #[test]

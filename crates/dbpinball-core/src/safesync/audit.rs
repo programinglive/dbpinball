@@ -33,6 +33,8 @@ pub struct AuditRecord {
     pub policy: String,
     pub key_id: String,
     pub outcome: String,
+    /// completed | not_required | reconciliation_required | pending.
+    pub sequence_status: String,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
 }
@@ -97,6 +99,7 @@ mod tests {
             policy: "development-default@1".into(),
             key_id: "k-test".into(),
             outcome: "completed".into(),
+            sequence_status: "not_required".into(),
             started_at_ms: 1,
             finished_at_ms: 2,
         };
@@ -120,6 +123,7 @@ mod tests {
             policy: "development-default@1".into(),
             key_id: "k-test".into(),
             outcome: "completed".into(),
+            sequence_status: "not_required".into(),
             started_at_ms: 1,
             finished_at_ms: 2,
         };

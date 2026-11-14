@@ -22,6 +22,14 @@ pub struct ColumnInfo {
     pub is_primary_key: bool,
     pub is_generated: bool,
     pub is_identity: bool,
+    /// True for GENERATED ALWAYS AS IDENTITY, which needs OVERRIDING SYSTEM VALUE.
+    pub identity_always: bool,
+    /// The canonical generated expression, when the column is generated.
+    ///
+    /// It is part of the schema hash, so a destination with a different
+    /// expression is refused before any row is written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_expression: Option<String>,
     /// A declared length limit (`varchar(n)`), when present.
     pub max_len: Option<usize>,
 }
@@ -51,7 +59,11 @@ impl TableInfo {
     }
 
     /// The shape the masking engine consumes.
-    pub fn column_shapes(&self) -> Vec<ColumnShape> {
+    ///
+    /// `is_identity_reference` is derived from the discovered foreign-key graph:
+    /// a child column that references an identity parent column carries a
+    /// preserved identity value.
+    pub fn column_shapes(&self, graph: &SchemaGraph) -> Vec<ColumnShape> {
         self.columns
             .iter()
             .map(|column| ColumnShape {
@@ -59,10 +71,40 @@ impl TableInfo {
                 type_name: column.type_name.clone(),
                 nullable: column.nullable,
                 is_primary_key: column.is_primary_key,
+                is_identity: column.is_identity,
+                is_identity_reference: references_identity(graph, self, &column.name),
                 max_len: column.max_len,
             })
             .collect()
     }
+}
+
+/// True when `column` is a child foreign-key column whose parent column is an
+/// identity column.
+fn references_identity(graph: &SchemaGraph, child: &TableInfo, column: &str) -> bool {
+    for edge in graph.edges.iter().filter(|edge| edge.child == child.name()) {
+        let Some(position) = edge
+            .child_columns
+            .iter()
+            .position(|candidate| candidate == column)
+        else {
+            continue;
+        };
+        let Some(parent_column) = edge.parent_columns.get(position) else {
+            continue;
+        };
+        let Some(parent) = graph.table(&edge.parent) else {
+            continue;
+        };
+        if parent
+            .columns
+            .iter()
+            .any(|candidate| &candidate.name == parent_column && candidate.is_identity)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// A foreign key from `child` to `parent`, in column order.
@@ -322,7 +364,13 @@ pub async fn inspect_table(
                 NOT a.attnotnull,
                 (a.attgenerated <> ''),
                 (a.attidentity <> ''),
-                a.atttypmod
+                (a.attidentity = 'a'),
+                a.atttypmod,
+                CASE WHEN a.attgenerated <> '' THEN
+                  (SELECT pg_get_expr(d.adbin, d.adrelid)::text
+                   FROM pg_attrdef d
+                   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum)
+                ELSE NULL END
          FROM pg_attribute a
          JOIN pg_class c ON c.oid = a.attrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -339,7 +387,7 @@ pub async fn inspect_table(
     let mut columns = Vec::with_capacity(rows.len());
     for row in rows {
         let raw_type: String = row.try_get(1).unwrap_or_default();
-        let atttypmod: i32 = row.try_get(5).unwrap_or(-1);
+        let atttypmod: i32 = row.try_get(6).unwrap_or(-1);
         let (type_name, max_len) = split_type(&raw_type, atttypmod);
         let name: String = row.try_get(0).unwrap_or_default();
 
@@ -350,6 +398,8 @@ pub async fn inspect_table(
             nullable: row.try_get(2).unwrap_or(true),
             is_generated: row.try_get(3).unwrap_or(false),
             is_identity: row.try_get(4).unwrap_or(false),
+            identity_always: row.try_get(5).unwrap_or(false),
+            generated_expression: row.try_get(7).ok(),
             max_len,
         });
     }
@@ -440,7 +490,7 @@ async fn unique_columns(
          JOIN pg_namespace n ON n.oid = c.relnamespace
          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey::int2[])
          WHERE n.nspname = $1 AND c.relname = $2
-           AND i.indisunique AND NOT i.indisprimary
+           AND i.indisunique AND NOT i.indisprimary AND i.indisvalid AND i.indisready AND i.indimmediate
            AND i.indpred IS NULL AND i.indexprs IS NULL
            AND i.indexrelid = (
              SELECT i2.indexrelid
@@ -448,7 +498,7 @@ async fn unique_columns(
              JOIN pg_class c2 ON c2.oid = i2.indrelid
              JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
              WHERE n2.nspname = $1 AND c2.relname = $2
-               AND i2.indisunique AND NOT i2.indisprimary
+               AND i2.indisunique AND NOT i2.indisprimary AND i2.indisvalid AND i2.indisready AND i2.indimmediate
                AND i2.indpred IS NULL AND i2.indexprs IS NULL
              ORDER BY i2.indexrelid
              LIMIT 1)
@@ -504,9 +554,11 @@ fn schema_hash(
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
-    CoreError::redacted(
+    crate::safesync::database_error(
         ErrorCode::Connection,
-        format!("catalogue inspection failed: {error}"),
+        "catalogue inspection",
+        "catalogue_error",
+        error,
     )
 }
 
@@ -533,6 +585,8 @@ mod tests {
             is_primary_key: true,
             is_generated: false,
             is_identity: false,
+            identity_always: false,
+            generated_expression: None,
             max_len: None,
         }];
         let first = schema_hash("public", "accounts", "r", &columns, &["id".into()], &[]).unwrap();
@@ -559,13 +613,18 @@ mod tests {
                 is_primary_key: false,
                 is_generated: false,
                 is_identity: false,
+                identity_always: false,
+                generated_expression: None,
                 max_len: None,
             }],
             primary_key: vec!["id".into()],
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
         };
-        let shapes = info.column_shapes();
+        let shapes = info.column_shapes(&SchemaGraph {
+            tables: Vec::new(),
+            edges: Vec::new(),
+        });
         assert_eq!(shapes.len(), 1);
         assert_eq!(shapes[0].type_name, "text");
     }

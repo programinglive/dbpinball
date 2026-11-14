@@ -257,17 +257,57 @@ async fn execute(
     )
     .await?;
 
-    output::print_success(cli.json, &report, |report| {
-        println!("Run:             {}", report.run_id);
-        println!("Status:          {}", report.status);
-        println!("Rows written:    {}", report.rows_written);
-        println!("Destination:     {}", report.destination_digest);
-        if report.already_completed {
-            println!("This plan already completed; nothing was written.");
-        }
-    });
+    let exit = sequence_exit_code(&report.sequence_status);
+    if exit == 0 {
+        output::print_success(cli.json, &report, render_run);
+    } else {
+        // The rows are committed, so the report is real, but the run is not a
+        // success: `ok` is false, the error names the incomplete step, and the
+        // exit code is distinct from the busy code.
+        output::print_incomplete(
+            cli.json,
+            &report,
+            "sequence_reconciliation_required",
+            "the rows committed but the identity sequence was not reconciled",
+            SEQUENCE_DETAIL,
+            render_run,
+        );
+    }
+    Ok(exit)
+}
 
-    Ok(0)
+fn render_run(report: &safesync::RunReport) {
+    println!("Run:             {}", report.run_id);
+    println!("Status:          {}", report.status);
+    println!("Sequence:        {}", report.sequence_status);
+    println!("Rows written:    {}", report.rows_written);
+    println!("Destination:     {}", report.destination_digest);
+    if report.already_completed {
+        println!("This plan already completed; nothing was written.");
+    }
+    if sequence_exit_code(&report.sequence_status) != 0 {
+        println!(
+            "Sequence reconciliation is incomplete; re-run execute with the same plan to retry."
+        );
+    }
+}
+
+/// Exit code for a committed row import whose sequence reconciliation is
+/// incomplete. It is distinct from the documented "busy" code (9) so a script
+/// can tell "nothing happened" from "rows committed, sequence not reconciled".
+const EXIT_SEQUENCE_RECONCILIATION_REQUIRED: i32 = 6;
+
+/// Remediation shown for any incomplete reconciliation. The status does not say
+/// which precondition failed, so the detail names every supported cause instead
+/// of blaming the cache alone.
+const SEQUENCE_DETAIL: &str = "re-run execute with the same plan to retry; reconciliation needs a destination role that owns the sequence, a sequence with CACHE 1, and a lock it can take";
+
+fn sequence_exit_code(status: &str) -> i32 {
+    match status {
+        "completed" | "not_required" => 0,
+        // Any other value means the sequence was not proven reconciled.
+        _ => EXIT_SEQUENCE_RECONCILIATION_REQUIRED,
+    }
 }
 
 async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i32, CoreError> {
@@ -281,14 +321,28 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
     let report =
         safesync::status(run_id, &connection, provider.as_ref(), &Limits::default()).await?;
 
-    output::print_success(cli.json, &report, |report| {
-        println!("Run:             {}", report.run_id);
-        println!("Status:          {}", report.status);
-        println!("Rows written:    {}", report.rows_written);
-        println!("Finished at:     {}", report.finished_at);
-    });
+    let exit = sequence_exit_code(&report.sequence_status);
+    if exit == 0 {
+        output::print_success(cli.json, &report, render_status);
+    } else {
+        output::print_incomplete(
+            cli.json,
+            &report,
+            "sequence_reconciliation_required",
+            "the rows committed but the identity sequence was not reconciled",
+            SEQUENCE_DETAIL,
+            render_status,
+        );
+    }
+    Ok(exit)
+}
 
-    Ok(0)
+fn render_status(report: &safesync::RunStatus) {
+    println!("Run:             {}", report.run_id);
+    println!("Status:          {}", report.status);
+    println!("Sequence:        {}", report.sequence_status);
+    println!("Rows written:    {}", report.rows_written);
+    println!("Finished at:     {}", report.finished_at);
 }
 
 fn key_rotate(cli: &Cli) -> Result<i32, CoreError> {
@@ -415,5 +469,21 @@ mod tests {
         let path = directory.path().join("plan.json");
         write_private(&path, "{}").unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn an_unreconciled_sequence_is_not_full_success() {
+        assert_eq!(sequence_exit_code("completed"), 0);
+        assert_eq!(sequence_exit_code("not_required"), 0);
+        assert_eq!(
+            sequence_exit_code("reconciliation_required"),
+            EXIT_SEQUENCE_RECONCILIATION_REQUIRED
+        );
+        assert_eq!(
+            sequence_exit_code("pending"),
+            EXIT_SEQUENCE_RECONCILIATION_REQUIRED
+        );
+        // The code must not collide with the documented "busy" code.
+        assert_ne!(EXIT_SEQUENCE_RECONCILIATION_REQUIRED, 9);
     }
 }
