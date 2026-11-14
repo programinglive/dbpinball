@@ -231,6 +231,27 @@ async fn count(destination: &Target, table: &str) -> i64 {
     row.0
 }
 
+/// The run-marker count, or zero when the run table has not been created yet.
+///
+/// The existence check is a separate statement: a subquery over the missing
+/// relation would still fail at parse time inside a CASE.
+async fn run_marker_count(destination: &Target) -> i64 {
+    let mut connection = connect(destination).await;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.dbpinball_safe_sync_runs')::text")
+            .fetch_one(&mut connection)
+            .await
+            .expect("existence check");
+    if exists.is_none() {
+        return 0;
+    }
+    let row: (i64,) = sqlx::query_as("SELECT count(*) FROM public.dbpinball_safe_sync_runs")
+        .fetch_one(&mut connection)
+        .await
+        .expect("run marker count");
+    row.0
+}
+
 async fn fk_violations(destination: &Target, sql: &str) -> i64 {
     let mut connection = connect(destination).await;
     let row: (i64,) = sqlx::query_as(sql)
@@ -843,11 +864,11 @@ async fn a_destination_constraint_failure_rolls_back_every_row() {
 
     assert_eq!(count(&destination, "customers").await, 0);
     assert_eq!(count(&destination, "orders").await, 0);
-    let runs: (i64,) = sqlx::query_as("SELECT CASE WHEN to_regclass('public.dbpinball_safe_sync_runs') IS NULL THEN 0::bigint ELSE (SELECT count(*)::bigint FROM public.dbpinball_safe_sync_runs) END")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(runs.0, 0, "no run marker for a rolled-back import");
+    assert_eq!(
+        run_marker_count(&destination).await,
+        0,
+        "no run marker for a rolled-back import"
+    );
     // The source is untouched.
     let source_rows: (i64,) = {
         let mut source_connection = connect(&source).await;
@@ -1225,9 +1246,5 @@ async fn a_cancelled_run_writes_nothing() {
     assert_eq!(error.detail.as_deref(), Some("cancelled"));
     assert_eq!(count(&destination, "orders").await, 0);
     assert_eq!(count(&destination, "customers").await, 0);
-    let runs: (i64,) = sqlx::query_as("SELECT CASE WHEN to_regclass('public.dbpinball_safe_sync_runs') IS NULL THEN 0::bigint ELSE (SELECT count(*)::bigint FROM public.dbpinball_safe_sync_runs) END")
-        .fetch_one(&mut connect(&destination).await)
-        .await
-        .unwrap();
-    assert_eq!(runs.0, 0);
+    assert_eq!(run_marker_count(&destination).await, 0);
 }
