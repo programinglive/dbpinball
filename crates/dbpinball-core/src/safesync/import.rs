@@ -608,19 +608,43 @@ async fn ensure_run_table(session: &mut BoundSession) -> Result<(), CoreError> {
     if !existing.iter().any(|column| column == "sequence_status") {
         // Additive migration for an S1 or S2-a run table. Those milestones did
         // not import identity columns, so their historical runs need no
-        // sequence movement; new runs still start `pending`.
-        sqlx::query(&format!(
-            "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'not_required'"
-        ))
-        .execute(&mut *session.connection())
-        .await
-        .map_err(connection_error)?;
-        sqlx::query(&format!(
-            "ALTER TABLE {RUN_TABLE} ALTER COLUMN sequence_status SET DEFAULT 'pending'"
-        ))
-        .execute(&mut *session.connection())
-        .await
-        .map_err(connection_error)?;
+        // sequence movement; new runs still start `pending`. Both statements
+        // run in one transaction so a partial failure cannot leave the unsafe
+        // default in place.
+        sqlx::query("BEGIN")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+        let migrated = async {
+            sqlx::query(&format!(
+                "ALTER TABLE {RUN_TABLE} ADD COLUMN sequence_status text NOT NULL DEFAULT 'not_required'"
+            ))
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            sqlx::query(&format!(
+                "ALTER TABLE {RUN_TABLE} ALTER COLUMN sequence_status SET DEFAULT 'pending'"
+            ))
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+            Ok::<(), CoreError>(())
+        }
+        .await;
+        match migrated {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *session.connection())
+                    .await
+                    .map_err(connection_error)?;
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK")
+                    .execute(&mut *session.connection())
+                    .await;
+                return Err(error);
+            }
+        }
     }
 
     let missing: Vec<&str> = RUN_TABLE_COLUMNS

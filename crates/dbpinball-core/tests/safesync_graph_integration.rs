@@ -1592,6 +1592,17 @@ async fn the_run_table_is_migrated_from_s2a() {
     .await
     .unwrap();
     assert_eq!(historical_status, "not_required");
+
+    // New runs must still start pending, so the default is load-bearing.
+    let default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'dbpinball_safe_sync_runs'
+           AND column_name = 'sequence_status'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(default.as_deref(), Some("'pending'::text"));
 }
 
 #[tokio::test]

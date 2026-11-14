@@ -16,6 +16,11 @@ calls the core, and prints either human-readable text or one JSON object.
 | `src/exit.rs` | Maps `ErrorCode` to a process exit code |
 | `src/output.rs` | JSON envelope and human output |
 
+Exit code 6 is the one exception to the `ErrorCode` map: the Safe Sync command
+returns it directly when the row import committed but the identity sequence needs
+reconciliation, so the envelope stays `ok: true` and `data.sequenceStatus` carries
+the state.
+
 ## Design rules
 
 - **No password flag.** The password is read from stdin, so it never appears in

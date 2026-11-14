@@ -157,8 +157,10 @@ Within S2-b:
   exits 6. If the lock cannot be taken, the mode fails closed instead of
   guessing.
 - The run table is migrated additively: an S1 or S2-a table gains
-  `sequence_status` under the DDL advisory lock, existing runs are preserved,
-  and any other missing column is an incompatible schema and is refused.
+  `sequence_status` under the DDL advisory lock, existing runs are preserved and
+  backfilled to `not_required` (those milestones did not import identity
+  columns), new runs default to `pending`, and any other missing column is an
+  incompatible schema and is refused.
 - Plans are format version 3. The plan carries an authorization envelope: an
   HMAC over the content, the issuance time, the expiry, the run id and the key
   id, produced with a key derived from the mask key under a separate domain.

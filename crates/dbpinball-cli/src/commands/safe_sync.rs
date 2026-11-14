@@ -285,10 +285,10 @@ async fn execute(
 const EXIT_SEQUENCE_RECONCILIATION_REQUIRED: i32 = 6;
 
 fn sequence_exit_code(status: &str) -> i32 {
-    if status == "reconciliation_required" || status == "pending" {
-        EXIT_SEQUENCE_RECONCILIATION_REQUIRED
-    } else {
-        0
+    match status {
+        "completed" | "not_required" => 0,
+        // Any other value means the sequence was not proven reconciled.
+        _ => EXIT_SEQUENCE_RECONCILIATION_REQUIRED,
     }
 }
 
@@ -311,11 +311,7 @@ async fn status(cli: &Cli, run_id: &str, destination: Option<&str>) -> Result<i3
         println!("Finished at:     {}", report.finished_at);
     });
 
-    if report.sequence_status == "reconciliation_required" || report.sequence_status == "pending" {
-        return Ok(EXIT_SEQUENCE_RECONCILIATION_REQUIRED);
-    }
-
-    Ok(0)
+    Ok(sequence_exit_code(&report.sequence_status))
 }
 
 fn key_rotate(cli: &Cli) -> Result<i32, CoreError> {

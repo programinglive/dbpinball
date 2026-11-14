@@ -12,7 +12,10 @@
 | `not_found` | 7 | Unknown connection profile |
 | `conflict` | 8 | The store changed since it was read |
 | `busy` | 9 | The store lock was not acquired in time |
-| `sequence_reconciliation_required` | 6 | Safe Sync committed the rows but the identity sequence needs reconciliation; re-run execute |
+
+Safe Sync also exits **6** when the row import committed but the identity
+sequence needs reconciliation. That is an exit code, not an error code: the
+envelope is still `ok: true` and `data.sequenceStatus` carries the state.
 
 ## Common messages
 
