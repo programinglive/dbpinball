@@ -97,6 +97,37 @@ session.
 - If the plan is replayed after a successful run, it is a no-op, not a duplicate.
 - If the import is interrupted, the destination transaction rolls back.
 
+## What is implemented so far
+
+Safe Sync is still not generally available, but part of it exists on `main`:
+
+- **Slice 1:** one PostgreSQL table, a bounded root filter, mandatory masking,
+  bound source and destination sessions, a value-free fingerprinted plan, a
+  single transactional destination import, and idempotency verified by a digest
+  of the destination rows.
+- **S2-a:** foreign-key discovery from the PostgreSQL catalogs, composite and
+  self-referencing keys, bounded parent traversal up to a declared depth, stable
+  deduplication of parents, canonical key masking so a masked parent key and its
+  child foreign key still join, cycle detection with deferrable-only deferral,
+  and parent-first import order.
+
+The plan carries the foreign-key graph, the requested depth, the import order,
+the canonical masking domains and the bounds, and all of them are bound to the
+plan fingerprint. A closure that a depth or a limit cannot complete is marked
+incomplete and refused, never imported partially.
+
+## What is not implemented
+
+- Child traversal (only parent direction is supported).
+- MySQL Safe Sync.
+- Desktop integration.
+- Batch import.
+- Generated and identity column import beyond the existing inspection.
+- Range filters and arbitrary transformation scripts.
+
+Safe Sync as a whole is **not** generally available, and this page should not be
+read as a promise of completeness.
+
 ## How it will be available
 
 Safe Sync will be built in the Rust core first and exposed through the CLI, so it

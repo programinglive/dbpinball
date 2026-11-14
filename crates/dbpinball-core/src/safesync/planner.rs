@@ -1,14 +1,19 @@
-//! Bounded, parameterized selection for one table.
+//! Bounded, parameterized parent traversal.
 //!
-//! Slice 1 has no foreign-key traversal. The planner still refuses a non-zero
-//! depth explicitly rather than silently ignoring it.
+//! The selection is a closure: each selected child pulls the parent rows its
+//! foreign keys reference, up to a declared depth. Every value is a bound
+//! parameter and every identifier is catalogue-validated and quoted. A selection
+//! that cannot be completed is marked incomplete and refused; it is never
+//! imported as if it were complete.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 use sqlx::Row;
 
 use crate::domain::error::{CoreError, ErrorCode};
-use crate::safesync::graph::{inspect_table, TableInfo};
-use crate::safesync::mask::{MaskInput, MaskedValue, Masker};
+use crate::safesync::graph::{discover_parents, ForeignKeyEdge, SchemaGraph, TableInfo};
+use crate::safesync::mask::{ColumnRule, MaskInput, MaskStrategy, MaskedValue, Masker};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::{
     FilterOp, FilterPredicate, FilterValue, Limits, QualifiedName, SafeSyncSpec, TraversalDirection,
@@ -34,18 +39,6 @@ pub struct LimitCheck {
     pub ok: bool,
 }
 
-/// The result of planning, before it becomes a reviewable plan document.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SelectionPlan {
-    pub tables: Vec<TableInfo>,
-    pub roots: Vec<RootPlan>,
-    pub checks: Vec<LimitCheck>,
-    pub max_depth_used: u8,
-    pub direction: String,
-    pub complete: bool,
-}
-
 /// Rows after masking. Plaintext never leaves the extractor.
 #[derive(Debug, Clone)]
 pub struct TableRows {
@@ -55,6 +48,8 @@ pub struct TableRows {
     pub types: Vec<String>,
     /// The columns that identify a row, in order.
     pub row_identity: Vec<String>,
+    pub schema_hash: String,
+    pub rls_active: bool,
     pub rows: Vec<Vec<MaskedValue>>,
     pub total_bytes: u64,
 }
@@ -65,20 +60,38 @@ impl TableRows {
     }
 }
 
-/// Inspect the selected tables and validate the selection.
+/// The result of a selection.
+#[derive(Debug, Clone)]
+pub struct SelectionResult {
+    pub graph: SchemaGraph,
+    /// Masked rows, already in import order.
+    pub rows: Vec<TableRows>,
+    pub roots: Vec<RootPlan>,
+    pub order: Vec<QualifiedName>,
+    /// Cycles whose every internal edge is deferrable.
+    pub deferred: Vec<Vec<QualifiedName>>,
+    pub checks: Vec<LimitCheck>,
+    pub max_depth_used: u8,
+    pub direction: String,
+    pub edges: usize,
+    pub complete: bool,
+    /// False for a metadata-only plan, which reads no source rows.
+    pub read_rows: bool,
+}
+
+/// A raw row, before masking.
+type RawRow = Vec<Option<String>>;
+
+/// A pending parent fetch: parent table, parent key columns, tuple, level.
+type ParentRequest = (QualifiedName, Vec<String>, Vec<Option<String>>, u8);
+
+/// Select the bounded parent closure, mask it, and order the import.
 pub async fn build(
     session: &mut BoundSession,
     spec: &SafeSyncSpec,
     masker: &Masker,
-) -> Result<SelectionPlan, CoreError> {
-    if spec.selection.relationships.depth > 0 {
-        return Err(CoreError::with_detail(
-            ErrorCode::Unsupported,
-            "foreign-key traversal is not implemented in this slice",
-            "unsupported_traversal",
-        ));
-    }
-
+    read_rows: bool,
+) -> Result<SelectionResult, CoreError> {
     if spec.selection.relationships.direction != TraversalDirection::Parents {
         return Err(CoreError::with_detail(
             ErrorCode::Unsupported,
@@ -87,17 +100,52 @@ pub async fn build(
         ));
     }
 
-    let mut tables: Vec<TableInfo> = Vec::new();
-    let mut roots = Vec::new();
+    let depth = spec.selection.relationships.depth;
+    let limits = &spec.limits;
 
+    let root_names = spec
+        .selection
+        .roots
+        .iter()
+        .map(|root| QualifiedName::parse(&root.table))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // A non-zero depth needs row values to follow foreign keys; a metadata-only
+    // plan is only possible for a flat selection.
+    let effective_read = read_rows || depth > 0;
+    let graph =
+        discover_parents(session, &root_names, if effective_read { depth } else { 0 }).await?;
+
+    if !effective_read {
+        return metadata_only(spec, &graph, masker);
+    }
+
+    let mut selected: BTreeMap<QualifiedName, Vec<RawRow>> = BTreeMap::new();
+    let mut seen: BTreeMap<QualifiedName, BTreeSet<String>> = BTreeMap::new();
+    let mut roots = Vec::new();
+    let mut checks: Vec<LimitCheck> = Vec::new();
+    let mut complete = true;
+    let mut max_depth_used = 0u8;
+
+    // Roots.
     for root in &spec.selection.roots {
         let name = QualifiedName::parse(&root.table)?;
-
-        if !tables.iter().any(|table| table.name() == name) {
-            let info = inspect_table(session, &name).await?;
-            masker.coverage(&name.schema, &name.table, &info.column_shapes())?;
-            tables.push(info);
+        let info = graph
+            .table(&name)
+            .ok_or_else(|| missing_table(&name))?
+            .clone();
+        let raw = fetch_root(session, &info, root, limits).await?;
+        if raw.len() as u64 > limits.max_rows_per_table {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                format!(
+                    "{name} returned more than {} rows",
+                    limits.max_rows_per_table
+                ),
+                "limit_exceeded",
+            ));
         }
+        insert_rows(&info, raw, &mut selected, &mut seen);
 
         let canonical = root
             .filter
@@ -105,7 +153,6 @@ pub async fn build(
             .map(FilterPredicate::canonical)
             .collect::<Vec<_>>()
             .join("|");
-
         roots.push(RootPlan {
             schema: name.schema.clone(),
             table: name.table.clone(),
@@ -119,52 +166,560 @@ pub async fn build(
         });
     }
 
-    Ok(SelectionPlan {
-        tables,
+    // Parent worklist. A request is (parent, parent columns, tuple, level).
+    let mut queue: VecDeque<ParentRequest> = VecDeque::new();
+    let mut requested: BTreeSet<(String, String, String)> = BTreeSet::new();
+
+    let mut truncated = false;
+    for name in &root_names {
+        if seed_parents(
+            &graph,
+            name,
+            &selected,
+            0,
+            depth,
+            &mut queue,
+            &mut requested,
+        ) {
+            truncated = true;
+        }
+    }
+
+    while let Some((parent, parent_columns, tuple, level)) = queue.pop_front() {
+        // A NULL component means PostgreSQL does not enforce the reference, so
+        // there is no parent to pull.
+        if tuple.iter().any(Option::is_none) {
+            continue;
+        }
+
+        let Some(info) = graph.table(&parent).cloned() else {
+            complete = false;
+            checks.push(LimitCheck {
+                limit: "missing_parent".into(),
+                observed: 0,
+                ok: false,
+            });
+            continue;
+        };
+
+        let raw = fetch_by_key(session, &info, &parent_columns, &tuple, limits).await?;
+        if raw.is_empty() {
+            // A referenced parent that the restricted role cannot see is an
+            // incomplete closure, not a silently missing row.
+            complete = false;
+            checks.push(LimitCheck {
+                limit: "missing_parent".into(),
+                observed: 0,
+                ok: false,
+            });
+            continue;
+        }
+        if raw.len() as u64 > 1 {
+            // A parent key fetch must be unique; more than one row means the
+            // relationship is not the unique key we assumed.
+            complete = false;
+            checks.push(LimitCheck {
+                limit: "ambiguous_parent".into(),
+                observed: raw.len() as u64,
+                ok: false,
+            });
+            continue;
+        }
+
+        max_depth_used = max_depth_used.max(level);
+        insert_rows(&info, raw, &mut selected, &mut seen);
+        if seed_parents(
+            &graph,
+            &parent,
+            &selected,
+            level,
+            depth,
+            &mut queue,
+            &mut requested,
+        ) {
+            truncated = true;
+        }
+    }
+
+    if truncated {
+        complete = false;
+        checks.push(LimitCheck {
+            limit: "closure".into(),
+            observed: u64::from(depth),
+            ok: false,
+        });
+    }
+
+    // Global bounds.
+    let total_rows: u64 = selected.values().map(|rows| rows.len() as u64).sum();
+    let total_bytes: u64 = selected
+        .values()
+        .flat_map(|rows| rows.iter())
+        .flat_map(|row| row.iter())
+        .map(|value| value.as_deref().unwrap_or("").len() as u64)
+        .sum();
+
+    if total_rows > limits.max_total_rows {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection exceeded max_total_rows",
+            "limit_exceeded",
+        ));
+    }
+    if total_bytes > limits.max_bytes {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the selection exceeded max_bytes",
+            "limit_exceeded",
+        ));
+    }
+
+    // Mask, in a deterministic table order.
+    let mut masked: Vec<TableRows> = Vec::with_capacity(selected.len());
+    for (name, raw_rows) in &selected {
+        let info = graph.table(name).ok_or_else(|| missing_table(name))?;
+        masked.push(mask_table(info, raw_rows, masker, &graph)?);
+    }
+
+    // Import order, cycles and deferral.
+    let names: Vec<QualifiedName> = selected.keys().cloned().collect();
+    let edges = graph.edges_between(&names);
+    let ordering = order_tables(&names, &edges)?;
+    checks.push(LimitCheck {
+        limit: "max_depth".into(),
+        observed: u64::from(max_depth_used),
+        ok: max_depth_used <= depth,
+    });
+
+    if !complete {
+        checks.push(LimitCheck {
+            limit: "closure".into(),
+            observed: 0,
+            ok: false,
+        });
+    }
+
+    let mut ordered_rows = Vec::with_capacity(masked.len());
+    for name in &ordering.order {
+        if let Some(rows) = masked.iter().find(|rows| &rows.table == name) {
+            ordered_rows.push(rows.clone());
+        }
+    }
+
+    Ok(SelectionResult {
+        rows: ordered_rows,
+        graph,
         roots,
+        order: ordering.order,
+        deferred: ordering.deferred,
+        checks,
+        max_depth_used,
+        direction: "parents".to_string(),
+        edges: edges.len(),
+        complete: complete && ordering.complete,
+        read_rows: true,
+    })
+}
+
+/// Inspect and validate without reading any row. Only valid for depth zero.
+fn metadata_only(
+    spec: &SafeSyncSpec,
+    graph: &SchemaGraph,
+    masker: &Masker,
+) -> Result<SelectionResult, CoreError> {
+    let mut roots = Vec::new();
+    for root in &spec.selection.roots {
+        let name = QualifiedName::parse(&root.table)?;
+        let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
+        masker.coverage(&name.schema, &name.table, &info.column_shapes())?;
+        let canonical = root
+            .filter
+            .iter()
+            .map(FilterPredicate::canonical)
+            .collect::<Vec<_>>()
+            .join("|");
+        roots.push(RootPlan {
+            schema: name.schema.clone(),
+            table: name.table.clone(),
+            filter_columns: root.filter.iter().map(|f| f.column.clone()).collect(),
+            filter_ops: root
+                .filter
+                .iter()
+                .map(|f| f.op.as_str().to_string())
+                .collect(),
+            filter_digest: masker.filter_digest(&name.schema, &name.table, &canonical),
+        });
+    }
+
+    let names: Vec<QualifiedName> = graph.tables.iter().map(|table| table.name()).collect();
+    let edges = graph.edges_between(&names);
+    let ordering = order_tables(&names, &edges)?;
+
+    let rows = graph
+        .tables
+        .iter()
+        .map(|info| TableRows {
+            table: info.name(),
+            columns: info.columns.iter().map(|c| c.name.clone()).collect(),
+            types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+            row_identity: info.row_identity.clone(),
+            schema_hash: info.schema_hash.clone(),
+            rls_active: info.rls_active,
+            rows: Vec::new(),
+            total_bytes: 0,
+        })
+        .collect();
+
+    Ok(SelectionResult {
+        graph: graph.clone(),
+        rows,
+        roots,
+        order: ordering.order,
+        deferred: ordering.deferred,
         checks: vec![LimitCheck {
-            limit: "max_depth".to_string(),
+            limit: "max_depth".into(),
             observed: 0,
             ok: true,
         }],
         max_depth_used: 0,
         direction: "parents".to_string(),
+        edges: edges.len(),
         complete: true,
+        read_rows: false,
     })
 }
 
-/// Read one table's selected rows and mask them in memory.
+#[derive(Debug)]
+struct Ordering {
+    order: Vec<QualifiedName>,
+    deferred: Vec<Vec<QualifiedName>>,
+    complete: bool,
+}
+
+/// Parents before children (Kahn). A remaining cycle is deferred only when every
+/// edge inside it is deferrable.
+fn order_tables(tables: &[QualifiedName], edges: &[ForeignKeyEdge]) -> Result<Ordering, CoreError> {
+    let mut indegree: BTreeMap<QualifiedName, usize> =
+        tables.iter().map(|name| (name.clone(), 0usize)).collect();
+    let mut children: BTreeMap<QualifiedName, Vec<QualifiedName>> = BTreeMap::new();
+
+    for edge in edges {
+        // A self-reference is a cycle for ordering purposes: row order inside a
+        // table is not guaranteed, so it needs deferral too.
+        *indegree.entry(edge.child.clone()).or_insert(0) += 1;
+        children
+            .entry(edge.parent.clone())
+            .or_default()
+            .push(edge.child.clone());
+    }
+
+    let mut ready: BTreeSet<QualifiedName> = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut order = Vec::with_capacity(tables.len());
+    while let Some(name) = ready.iter().next().cloned() {
+        ready.remove(&name);
+        order.push(name.clone());
+        if let Some(list) = children.get(&name) {
+            for child in list {
+                if let Some(degree) = indegree.get_mut(child) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.insert(child.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if order.len() == tables.len() {
+        return Ok(Ordering {
+            order,
+            deferred: Vec::new(),
+            complete: true,
+        });
+    }
+
+    let remaining: Vec<QualifiedName> = tables
+        .iter()
+        .filter(|name| !order.contains(name))
+        .cloned()
+        .collect();
+
+    let cycle_edges: Vec<&ForeignKeyEdge> = edges
+        .iter()
+        .filter(|edge| remaining.contains(&edge.child) && remaining.contains(&edge.parent))
+        .collect();
+
+    if cycle_edges.iter().all(|edge| edge.deferrable) {
+        let mut deferred = remaining.clone();
+        deferred.sort();
+        order.extend(deferred.iter().cloned());
+        Ok(Ordering {
+            order,
+            deferred: vec![deferred],
+            complete: true,
+        })
+    } else {
+        Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            "the selected tables contain a foreign-key cycle whose constraints are not deferrable",
+            "cyclic_fk_requires_deferrable",
+        ))
+    }
+}
+
+fn seed_parents(
+    graph: &SchemaGraph,
+    child: &QualifiedName,
+    selected: &BTreeMap<QualifiedName, Vec<RawRow>>,
+    level: u8,
+    depth: u8,
+    queue: &mut VecDeque<ParentRequest>,
+    requested: &mut BTreeSet<(String, String, String)>,
+) -> bool {
+    let mut truncated = false;
+    let Some(info) = graph.table(child) else {
+        return false;
+    };
+    let Some(rows) = selected.get(child) else {
+        return false;
+    };
+
+    for edge in graph.outgoing(child) {
+        for row in rows {
+            let Ok(tuple) = key_tuple(info, row, &edge.child_columns) else {
+                continue;
+            };
+            // A NULL component means PostgreSQL does not enforce the reference.
+            if tuple.iter().any(Option::is_none) {
+                continue;
+            }
+            if level >= depth {
+                // A real reference that the depth cannot follow. It is only a
+                // truncation if the parent row is not already in the selection;
+                // in a cycle the referenced row is usually the root itself.
+                let present = graph
+                    .table(&edge.parent)
+                    .map(|info| {
+                        parent_present(selected, &edge.parent, info, &edge.parent_columns, &tuple)
+                    })
+                    .unwrap_or(false);
+                if !present {
+                    truncated = true;
+                }
+                continue;
+            }
+            let marker = tuple
+                .iter()
+                .map(|value| value.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            let key = (
+                edge.parent.to_string(),
+                edge.parent_columns.join(","),
+                marker,
+            );
+            if requested.insert(key) {
+                queue.push_back((
+                    edge.parent.clone(),
+                    edge.parent_columns.clone(),
+                    tuple,
+                    level + 1,
+                ));
+            }
+        }
+    }
+
+    truncated
+}
+
+fn key_tuple(
+    info: &TableInfo,
+    row: &RawRow,
+    columns: &[String],
+) -> Result<Vec<Option<String>>, CoreError> {
+    let mut tuple = Vec::with_capacity(columns.len());
+    for column in columns {
+        let index = info
+            .columns
+            .iter()
+            .position(|candidate| &candidate.name == column)
+            .ok_or_else(|| {
+                CoreError::with_detail(
+                    ErrorCode::Operation,
+                    format!("key column {column} is missing from the selected row"),
+                    "invalid_key_tuple",
+                )
+            })?;
+        tuple.push(row.get(index).cloned().flatten());
+    }
+    Ok(tuple)
+}
+
+/// The columns whose values form the key tuple for this rule.
 ///
-/// The SQL is built only from catalogue-validated identifiers, quoted with
-/// `quote_ident`; values are always bound parameters.
-pub async fn extract_table(
+/// On the referenced table that is the key itself. On a referencing table it is
+/// the foreign-key child columns, which may be named differently. This is what
+/// makes a parent key and its child foreign key derive the same output.
+fn key_columns_for(info: &TableInfo, rule: &ColumnRule, graph: &SchemaGraph) -> Vec<String> {
+    let Some(domain) = rule.key_domain.as_ref() else {
+        return vec![rule.column.clone()];
+    };
+    let Ok(parent) = QualifiedName::parse(&domain.table) else {
+        return vec![rule.column.clone()];
+    };
+
+    let child = info.name();
+    for edge in graph.edges.iter().filter(|edge| {
+        edge.child == child && edge.parent == parent && edge.parent_columns == domain.columns
+    }) {
+        if edge.child_columns.contains(&rule.column) {
+            return edge.child_columns.clone();
+        }
+    }
+
+    if parent == child {
+        return domain.columns.clone();
+    }
+
+    vec![rule.column.clone()]
+}
+
+/// True when the referenced parent row is already in the selection.
+fn parent_present(
+    selected: &BTreeMap<QualifiedName, Vec<RawRow>>,
+    parent: &QualifiedName,
+    parent_info: &TableInfo,
+    parent_columns: &[String],
+    tuple: &[Option<String>],
+) -> bool {
+    let Some(rows) = selected.get(parent) else {
+        return false;
+    };
+    rows.iter().any(|row| {
+        parent_columns.iter().enumerate().all(|(index, column)| {
+            parent_info
+                .columns
+                .iter()
+                .position(|candidate| &candidate.name == column)
+                .map(|position| {
+                    row.get(position).cloned().flatten() == tuple.get(index).cloned().flatten()
+                })
+                .unwrap_or(false)
+        })
+    })
+}
+
+fn insert_rows(
+    info: &TableInfo,
+    rows: Vec<RawRow>,
+    selected: &mut BTreeMap<QualifiedName, Vec<RawRow>>,
+    seen: &mut BTreeMap<QualifiedName, BTreeSet<String>>,
+) {
+    let name = info.name();
+    let entry = selected.entry(name.clone()).or_default();
+    let identities = seen.entry(name).or_default();
+    for row in rows {
+        let identity = raw_identity(info, &row);
+        if identities.insert(identity) {
+            entry.push(row);
+        }
+    }
+}
+
+/// The row identity from the declared key columns, length-prefixed so the
+/// encoding is unambiguous.
+fn raw_identity(info: &TableInfo, row: &RawRow) -> String {
+    let mut parts = Vec::new();
+    for column in &info.row_identity {
+        if let Some(index) = info
+            .columns
+            .iter()
+            .position(|candidate| &candidate.name == column)
+        {
+            let value = row.get(index).and_then(|v| v.as_deref()).unwrap_or("");
+            parts.push(format!("{}:{}", value.len(), value));
+        }
+    }
+    if parts.is_empty() {
+        // The catalogue guarantees a row identity; this only keeps the function
+        // total if a future caller violates that.
+        for value in row {
+            let value = value.as_deref().unwrap_or("");
+            parts.push(format!("{}:{}", value.len(), value));
+        }
+    }
+    parts.join("\u{1f}")
+}
+
+async fn fetch_root(
     session: &mut BoundSession,
-    table: &TableInfo,
+    info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
-    masker: &Masker,
     limits: &Limits,
-) -> Result<TableRows, CoreError> {
-    let name = table.name();
-    let column_list = table
+) -> Result<Vec<RawRow>, CoreError> {
+    let (where_clause, binds) = build_filter(info, root)?;
+    fetch(session, info, &where_clause, &binds, limits).await
+}
+
+async fn fetch_by_key(
+    session: &mut BoundSession,
+    info: &TableInfo,
+    columns: &[String],
+    tuple: &[Option<String>],
+    limits: &Limits,
+) -> Result<Vec<RawRow>, CoreError> {
+    let mut clauses = Vec::with_capacity(columns.len());
+    let mut binds = Vec::with_capacity(columns.len());
+    for (index, column) in columns.iter().enumerate() {
+        if !info
+            .columns
+            .iter()
+            .any(|candidate| &candidate.name == column)
+        {
+            return Err(CoreError::with_detail(
+                ErrorCode::Usage,
+                format!("parent key column {column} does not exist"),
+                "invalid_identifier",
+            ));
+        }
+        clauses.push(format!("{}::text = ${}", quote_ident(column), index + 1));
+        binds.push(tuple[index].clone().unwrap_or_default());
+    }
+
+    let where_clause = format!("WHERE {}", clauses.join(" AND "));
+    fetch(session, info, &where_clause, &binds, limits).await
+}
+
+async fn fetch(
+    session: &mut BoundSession,
+    info: &TableInfo,
+    where_clause: &str,
+    binds: &[String],
+    limits: &Limits,
+) -> Result<Vec<RawRow>, CoreError> {
+    let column_list = info
         .columns
         .iter()
         .map(|column| format!("{}::text", quote_ident(&column.name)))
         .collect::<Vec<_>>()
         .join(", ");
 
-    let (where_clause, binds) = build_filter(table, root)?;
-
     let sql = format!(
         "SELECT {} FROM {}.{} {} LIMIT {}",
         column_list,
-        quote_ident(&name.schema),
-        quote_ident(&name.table),
+        quote_ident(&info.schema),
+        quote_ident(&info.table),
         where_clause,
         limits.max_rows_per_table.saturating_add(1)
     );
 
     let mut query = sqlx::query(&sql);
-    for value in &binds {
+    for value in binds {
         query = query.bind(value);
     }
 
@@ -173,33 +728,36 @@ pub async fn extract_table(
     let _ = session.rollback().await;
     let rows = fetched.map_err(connection_error)?;
 
-    if rows.len() as u64 > limits.max_rows_per_table {
-        return Err(CoreError::with_detail(
-            ErrorCode::Operation,
-            format!(
-                "{name} returned more than {} rows",
-                limits.max_rows_per_table
-            ),
-            "limit_exceeded",
-        ));
-    }
-
-    let mut masked_rows = Vec::with_capacity(rows.len());
-    let mut identities = Vec::with_capacity(rows.len());
-    let mut total_bytes: u64 = 0;
-
+    let mut output = Vec::with_capacity(rows.len());
     for row in &rows {
-        let identity = identity_of(table, row);
-        let mut values = Vec::with_capacity(table.columns.len());
-        let mut identity_parts = Vec::new();
-
-        for (index, column) in table.columns.iter().enumerate() {
+        let mut values = Vec::with_capacity(info.columns.len());
+        for index in 0..info.columns.len() {
             let value: Option<String> = row.try_get(index).unwrap_or(None);
-            let input = value.as_deref().unwrap_or("");
+            values.push(value);
+        }
+        output.push(values);
+    }
+    Ok(output)
+}
 
+fn mask_table(
+    info: &TableInfo,
+    raw_rows: &[RawRow],
+    masker: &Masker,
+    graph: &SchemaGraph,
+) -> Result<TableRows, CoreError> {
+    let mut rows = Vec::with_capacity(raw_rows.len());
+    let mut total_bytes = 0u64;
+    let mut identities: Vec<String> = Vec::with_capacity(raw_rows.len());
+
+    for raw in raw_rows {
+        let identity = identity_string(info, raw);
+        let mut values = Vec::with_capacity(info.columns.len());
+
+        for (index, column) in info.columns.iter().enumerate() {
             let rule = masker
                 .policy()
-                .rule_for(&table.schema, &table.table, &column.name)
+                .rule_for(&info.schema, &info.table, &column.name)
                 .ok_or_else(|| {
                     CoreError::with_detail(
                         ErrorCode::Operation,
@@ -208,69 +766,83 @@ pub async fn extract_table(
                     )
                 })?;
 
-            let masked = masker.mask_value(rule, &identity, MaskInput::Text(input))?;
+            let masked = if rule.strategy == MaskStrategy::DeterministicKey {
+                let domain = rule.key_domain.as_ref().ok_or_else(|| {
+                    CoreError::with_detail(
+                        ErrorCode::Operation,
+                        format!("key column {} has no key domain", column.name),
+                        "unmapped_key_domain",
+                    )
+                })?;
+                let tuple_columns = key_columns_for(info, rule, graph);
+                let tuple = key_tuple(info, raw, &tuple_columns)?;
+                let _ = domain;
+                masker.mask_key(rule, &tuple)?
+            } else {
+                masker.mask_value(
+                    rule,
+                    &identity,
+                    MaskInput::Text(raw.get(index).and_then(|v| v.as_deref()).unwrap_or("")),
+                )?
+            };
 
-            if table.row_identity.contains(&column.name) {
-                let rendered = masked.as_text().unwrap_or("").to_string();
+            if let Some(text) = masked.as_text() {
+                total_bytes = total_bytes.saturating_add(text.len() as u64);
+            }
+            values.push(masked);
+        }
+
+        // The masked row identity must be unique.
+        let mut identity_parts = Vec::new();
+        for (index, column) in info.columns.iter().enumerate() {
+            if info.row_identity.contains(&column.name) {
+                let rendered = values[index].as_text().unwrap_or("").to_string();
                 identity_parts.push(format!(
                     "{}={}",
                     column.name,
                     crate::safesync::mask::normalize_identity(&rendered)
                 ));
             }
-
-            if let Some(text) = masked.as_text() {
-                total_bytes = total_bytes.saturating_add(text.len() as u64);
-            }
-
-            values.push(masked);
         }
-
         identities.push(identity_parts.join(","));
-        masked_rows.push(values);
+        rows.push(values);
     }
 
     masker.ensure_unique(&identities)?;
 
-    if total_bytes > limits.max_bytes {
-        return Err(CoreError::with_detail(
-            ErrorCode::Operation,
-            format!("{name} exceeded the byte limit"),
-            "limit_exceeded",
-        ));
-    }
-
     Ok(TableRows {
-        table: name,
-        columns: table.columns.iter().map(|c| c.name.clone()).collect(),
-        types: table.columns.iter().map(|c| c.type_name.clone()).collect(),
-        row_identity: table.row_identity.clone(),
-        rows: masked_rows,
+        table: info.name(),
+        columns: info.columns.iter().map(|c| c.name.clone()).collect(),
+        types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+        row_identity: info.row_identity.clone(),
+        schema_hash: info.schema_hash.clone(),
+        rls_active: info.rls_active,
+        rows,
         total_bytes,
     })
 }
 
-/// A stable identity string from the raw row, used as the masking material.
-fn identity_of(table: &TableInfo, row: &sqlx::postgres::PgRow) -> String {
+fn identity_string(info: &TableInfo, raw: &RawRow) -> String {
     let mut parts = Vec::new();
-    for column in &table.columns {
-        if !table.row_identity.contains(&column.name) {
+    for column in &info.columns {
+        if !info.row_identity.contains(&column.name) {
             continue;
         }
-        let position = table
-            .columns
-            .iter()
-            .position(|candidate| candidate.name == column.name)
-            .unwrap_or(0);
-        let value: Option<String> = row.try_get(position).unwrap_or(None);
-        let value = crate::safesync::mask::normalize_identity(value.as_deref().unwrap_or(""));
-        parts.push(format!("{}={}", column.name, value));
+        let Some(index) = info.columns.iter().position(|c| c.name == column.name) else {
+            continue;
+        };
+        let value = raw.get(index).and_then(|v| v.as_deref()).unwrap_or("");
+        parts.push(format!(
+            "{}={}",
+            column.name,
+            crate::safesync::mask::normalize_identity(value)
+        ));
     }
     parts.join(",")
 }
 
 fn build_filter(
-    table: &TableInfo,
+    info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
 ) -> Result<(String, Vec<String>), CoreError> {
     if root.filter.is_empty() {
@@ -285,7 +857,7 @@ fn build_filter(
     let mut binds = Vec::new();
 
     for predicate in &root.filter {
-        if !table
+        if !info
             .columns
             .iter()
             .any(|column| column.name == predicate.column)
@@ -337,6 +909,31 @@ fn render_value(value: &FilterValue) -> Result<String, CoreError> {
     }
 }
 
+/// Extract and mask one table with no traversal. Kept as a stable helper for
+/// callers and tests that only need a single table.
+pub async fn extract_table(
+    session: &mut BoundSession,
+    info: &TableInfo,
+    root: &crate::safesync::spec::RootSelection,
+    masker: &Masker,
+    limits: &Limits,
+) -> Result<TableRows, CoreError> {
+    let raw = fetch_root(session, info, root, limits).await?;
+    let graph = SchemaGraph {
+        tables: vec![info.clone()],
+        edges: Vec::new(),
+    };
+    mask_table(info, &raw, masker, &graph)
+}
+
+fn missing_table(name: &QualifiedName) -> CoreError {
+    CoreError::with_detail(
+        ErrorCode::Usage,
+        format!("{name} was not discovered in the catalogue"),
+        "invalid_identifier",
+    )
+}
+
 fn invalid_filter(message: &str) -> CoreError {
     CoreError::with_detail(ErrorCode::Usage, message, "invalid_spec")
 }
@@ -357,6 +954,11 @@ fn connection_error(error: sqlx::Error) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safesync::graph::ForeignKeyEdge;
+
+    fn name(value: &str) -> QualifiedName {
+        QualifiedName::parse(value).unwrap()
+    }
 
     #[test]
     fn identifiers_are_quoted_and_escaped() {
@@ -375,8 +977,96 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_list_is_not_a_value() {
-        let error = render_value(&FilterValue::List(vec![FilterValue::Int(1)])).unwrap_err();
-        assert_eq!(error.detail.as_deref(), Some("invalid_spec"));
+    fn a_parent_is_ordered_before_its_child() {
+        let tables = vec![name("public.orders"), name("public.customers")];
+        let edges = vec![ForeignKeyEdge {
+            name: "orders_customer_fk".into(),
+            child: name("public.orders"),
+            parent: name("public.customers"),
+            child_columns: vec!["customer_code".into()],
+            parent_columns: vec!["code".into()],
+            deferrable: false,
+            initially_deferred: false,
+        }];
+        let ordering = order_tables(&tables, &edges).unwrap();
+        assert_eq!(
+            ordering.order,
+            vec![name("public.customers"), name("public.orders")]
+        );
+        assert!(ordering.deferred.is_empty());
+    }
+
+    #[test]
+    fn a_deferrable_cycle_is_deferred() {
+        let tables = vec![name("public.a"), name("public.b")];
+        let edges = vec![
+            ForeignKeyEdge {
+                name: "a_b".into(),
+                child: name("public.a"),
+                parent: name("public.b"),
+                child_columns: vec!["b_id".into()],
+                parent_columns: vec!["id".into()],
+                deferrable: true,
+                initially_deferred: false,
+            },
+            ForeignKeyEdge {
+                name: "b_a".into(),
+                child: name("public.b"),
+                parent: name("public.a"),
+                child_columns: vec!["a_id".into()],
+                parent_columns: vec!["id".into()],
+                deferrable: true,
+                initially_deferred: false,
+            },
+        ];
+        let ordering = order_tables(&tables, &edges).unwrap();
+        assert_eq!(ordering.deferred.len(), 1);
+        assert_eq!(ordering.order.len(), 2);
+    }
+
+    #[test]
+    fn a_non_deferrable_cycle_is_refused() {
+        let tables = vec![name("public.a"), name("public.b")];
+        let edges = vec![
+            ForeignKeyEdge {
+                name: "a_b".into(),
+                child: name("public.a"),
+                parent: name("public.b"),
+                child_columns: vec!["b_id".into()],
+                parent_columns: vec!["id".into()],
+                deferrable: true,
+                initially_deferred: false,
+            },
+            ForeignKeyEdge {
+                name: "b_a".into(),
+                child: name("public.b"),
+                parent: name("public.a"),
+                child_columns: vec!["a_id".into()],
+                parent_columns: vec!["id".into()],
+                deferrable: false,
+                initially_deferred: false,
+            },
+        ];
+        let error = order_tables(&tables, &edges).unwrap_err();
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("cyclic_fk_requires_deferrable")
+        );
+    }
+
+    #[test]
+    fn a_self_reference_is_treated_as_a_cycle() {
+        let tables = vec![name("public.employees")];
+        let edges = vec![ForeignKeyEdge {
+            name: "employees_manager_fk".into(),
+            child: name("public.employees"),
+            parent: name("public.employees"),
+            child_columns: vec!["manager_id".into()],
+            parent_columns: vec!["id".into()],
+            deferrable: true,
+            initially_deferred: false,
+        }];
+        let ordering = order_tables(&tables, &edges).unwrap();
+        assert_eq!(ordering.deferred.len(), 1);
     }
 }

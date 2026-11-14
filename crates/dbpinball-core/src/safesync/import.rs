@@ -243,6 +243,14 @@ async fn run_inner(
         }
     }
 
+    // Defer only when the plan proved every edge in the cycle is deferrable.
+    if !plan.constraints.deferred.is_empty() {
+        sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
+    }
+
     let mut written = Vec::new();
     for table in tables {
         let mut rows = 0u64;
@@ -258,6 +266,15 @@ async fn run_inner(
             table: table.table.table.clone(),
             rows,
         });
+    }
+
+    // Force every deferred constraint to be checked before the run row is
+    // written, so an inconsistent graph aborts the whole transaction.
+    if !plan.constraints.deferred.is_empty() {
+        sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+            .execute(&mut *session.connection())
+            .await
+            .map_err(connection_error)?;
     }
 
     let (digest, total) = destination_digest(session, tables).await?;

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::mask::{digest, hex_lower, Masker};
-use crate::safesync::planner::SelectionPlan;
+use crate::safesync::planner::SelectionResult;
 use crate::safesync::session::SessionIdentity;
 use crate::safesync::spec::{Limits, QualifiedName, SafeSyncSpec};
 use crate::security::DestinationCategory;
@@ -129,9 +129,9 @@ impl DryRunPlan {
         source: &SessionIdentity,
         destination: &SessionIdentity,
         _destination_category: DestinationCategory,
-        selection: &SelectionPlan,
+        selection: &SelectionResult,
         masker: &Masker,
-        estimates: &[(QualifiedName, u64)],
+        _estimates: &[(QualifiedName, u64)],
         now_ms: u64,
     ) -> Result<Self, CoreError> {
         let mut plan = Self {
@@ -157,26 +157,29 @@ impl DryRunPlan {
                     })
                     .collect(),
                 direction: selection.direction.clone(),
-                depth: selection.max_depth_used,
+                // The requested depth, not just the depth the closure used, so a
+                // changed traversal limit invalidates the plan.
+                depth: spec.selection.relationships.depth,
             },
             tables: selection
-                .tables
+                .rows
                 .iter()
                 .map(|table| PlanTable {
-                    schema: table.schema.clone(),
-                    table: table.table.clone(),
+                    schema: table.table.schema.clone(),
+                    table: table.table.table.clone(),
                     schema_hash: table.schema_hash.clone(),
                     row_identity: table.row_identity.clone(),
-                    rows_estimated: estimates
-                        .iter()
-                        .find(|(name, _)| *name == table.name())
-                        .map(|(_, rows)| *rows),
+                    rows_estimated: if selection.read_rows {
+                        Some(table.row_count())
+                    } else {
+                        None
+                    },
                     rls_active: table.rls_active,
                 })
                 .collect(),
             graph: PlanGraph {
-                edges: 0,
-                cycles: 0,
+                edges: selection.edges as u64,
+                cycles: selection.deferred.len() as u64,
                 max_depth_used: selection.max_depth_used,
                 direction: selection.direction.clone(),
             },
@@ -185,7 +188,7 @@ impl DryRunPlan {
                 policy_hash: masker.policy().hash.clone(),
                 key_id: masker.key_id().to_string(),
                 columns: selection
-                    .tables
+                    .rows
                     .iter()
                     .map(|table| table.columns.len() as u64)
                     .sum(),
@@ -198,11 +201,21 @@ impl DryRunPlan {
             },
             constraints: PlanConstraints {
                 order: selection
-                    .tables
+                    .order
                     .iter()
-                    .map(|table| format!("{}.{}", table.schema, table.table))
+                    .map(|name| name.to_string())
                     .collect(),
-                deferred: Vec::new(),
+                deferred: selection
+                    .deferred
+                    .iter()
+                    .map(|group| {
+                        group
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect(),
                 cyclic_refused: Vec::new(),
             },
             limits: spec.limits.clone(),
@@ -247,13 +260,13 @@ impl DryRunPlan {
 }
 
 /// A hash of the selection shape that never includes a raw filter value.
-pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionPlan) -> String {
+pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionResult) -> String {
     let document = serde_json::json!({
         "version": spec.version,
         "source": spec.source,
         "destination": spec.destination,
         "roots": selection.roots,
-        "depth": selection.max_depth_used,
+        "depth": spec.selection.relationships.depth,
         "direction": selection.direction,
         "limits": spec.limits,
         "policy": spec.masking.policy,
@@ -263,13 +276,11 @@ pub fn spec_hash(spec: &SafeSyncSpec, selection: &SelectionPlan) -> String {
 }
 
 /// Refuse a plan whose schema has drifted from the live catalogue.
-pub fn check_schema_drift(plan: &DryRunPlan, selection: &SelectionPlan) -> Result<(), CoreError> {
+pub fn check_schema_drift(plan: &DryRunPlan, selection: &SelectionResult) -> Result<(), CoreError> {
     for planned in &plan.tables {
-        let Some(live) = selection
-            .tables
-            .iter()
-            .find(|table| table.schema == planned.schema && table.table == planned.table)
-        else {
+        let Some(live) = selection.rows.iter().find(|table| {
+            table.table.schema == planned.schema && table.table.table == planned.table
+        }) else {
             return Err(schema_drift(&planned.table));
         };
 
@@ -292,9 +303,9 @@ fn schema_drift(table: &str) -> CoreError {
 mod tests {
     use super::*;
     use crate::domain::connection::{DbEngine, TargetClass};
-    use crate::safesync::graph::{ColumnInfo, TableInfo};
     use crate::safesync::key::MaskKey;
     use crate::safesync::mask::Masker;
+    use crate::safesync::planner::TableRows;
     use crate::safesync::planner::{LimitCheck, RootPlan};
     use crate::safesync::spec::{
         ExecutionOptions, FilterOp, FilterPredicate, FilterValue, MaskingSelection,
@@ -350,30 +361,28 @@ mod tests {
         }
     }
 
-    fn table() -> TableInfo {
-        TableInfo {
-            schema: "public".into(),
-            table: "accounts".into(),
-            relkind: "r".into(),
-            rls_active: false,
-            columns: vec![ColumnInfo {
-                name: "id".into(),
-                type_name: "uuid".into(),
-                nullable: false,
-                is_primary_key: true,
-                is_generated: false,
-                is_identity: false,
-                max_len: None,
-            }],
-            primary_key: vec!["id".into()],
+    fn table_rows() -> TableRows {
+        TableRows {
+            table: QualifiedName::parse("public.accounts").unwrap(),
+            columns: vec!["id".into()],
+            types: vec!["uuid".into()],
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
+            rls_active: false,
+            rows: vec![vec![crate::safesync::mask::MaskedValue::Text("x".into())]],
+            total_bytes: 1,
         }
     }
 
-    fn selection() -> SelectionPlan {
-        SelectionPlan {
-            tables: vec![table()],
+    fn selection() -> SelectionResult {
+        let rows = vec![table_rows()];
+        let order = vec![QualifiedName::parse("public.accounts").unwrap()];
+        SelectionResult {
+            graph: crate::safesync::graph::SchemaGraph {
+                tables: Vec::new(),
+                edges: Vec::new(),
+            },
+            rows,
             roots: vec![RootPlan {
                 schema: "public".into(),
                 table: "accounts".into(),
@@ -381,6 +390,8 @@ mod tests {
                 filter_ops: vec!["eq".into()],
                 filter_digest: "hmac-sha256:abc".into(),
             }],
+            order,
+            deferred: Vec::new(),
             checks: vec![LimitCheck {
                 limit: "max_depth".into(),
                 observed: 0,
@@ -388,7 +399,9 @@ mod tests {
             }],
             max_depth_used: 0,
             direction: "parents".into(),
+            edges: 0,
             complete: true,
+            read_rows: true,
         }
     }
 
@@ -489,7 +502,7 @@ mod tests {
     fn schema_drift_is_detected() {
         let plan = plan();
         let mut drifted = selection();
-        drifted.tables[0].schema_hash = "other".into();
+        drifted.rows[0].schema_hash = "other".into();
         let error = check_schema_drift(&plan, &drifted).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("schema_drift"));
     }

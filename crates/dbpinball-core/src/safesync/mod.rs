@@ -26,16 +26,18 @@ pub mod session;
 pub mod spec;
 
 pub use audit::{AuditRecord, TableAudit};
-pub use graph::{inspect_table, ColumnInfo, TableInfo};
+pub use graph::{
+    discover_parents, inspect_table, ColumnInfo, ForeignKeyEdge, SchemaGraph, TableInfo,
+};
 pub use import::{ConflictPolicy, ImportReport, TableImport};
 pub use key::{key_id_for, InMemoryMaskKeyStore, KeyringMaskKeyStore, MaskKey, MaskKeyStore};
 pub use mask::{
     base32_lower, hex_lower, normalize_identity, ColumnClass, ColumnCoverage, ColumnRule,
-    ColumnShape, CoverageReport, MaskInput, MaskStrategy, MaskedValue, Masker, MaskingPolicy,
-    EMAIL_DOMAIN, FILTER_DOMAIN, MASK_DOMAIN,
+    ColumnShape, CoverageReport, KeyDomain, MaskInput, MaskStrategy, MaskedValue, Masker,
+    MaskingPolicy, EMAIL_DOMAIN, FILTER_DOMAIN, MASK_DOMAIN,
 };
 pub use plan::{DryRunPlan, PlanIdentity, PLAN_VERSION};
-pub use planner::{extract_table, TableRows};
+pub use planner::{extract_table, quote_ident, LimitCheck, RootPlan, SelectionResult, TableRows};
 pub use service::{
     execute, inspect, masker_for, plan as build_plan, resolve_policy, status, validate,
     ExecuteRequest, RunReport, RunStatus, ValidationReport,
