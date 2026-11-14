@@ -843,7 +843,7 @@ async fn a_destination_constraint_failure_rolls_back_every_row() {
 
     assert_eq!(count(&destination, "customers").await, 0);
     assert_eq!(count(&destination, "orders").await, 0);
-    let runs: (i64,) = sqlx::query_as("SELECT count(*) FROM public.dbpinball_safe_sync_runs")
+    let runs: (i64,) = sqlx::query_as("SELECT CASE WHEN to_regclass('public.dbpinball_safe_sync_runs') IS NULL THEN 0::bigint ELSE (SELECT count(*)::bigint FROM public.dbpinball_safe_sync_runs) END")
         .fetch_one(&mut connection)
         .await
         .unwrap();
@@ -1225,7 +1225,7 @@ async fn a_cancelled_run_writes_nothing() {
     assert_eq!(error.detail.as_deref(), Some("cancelled"));
     assert_eq!(count(&destination, "orders").await, 0);
     assert_eq!(count(&destination, "customers").await, 0);
-    let runs: (i64,) = sqlx::query_as("SELECT count(*) FROM public.dbpinball_safe_sync_runs")
+    let runs: (i64,) = sqlx::query_as("SELECT CASE WHEN to_regclass('public.dbpinball_safe_sync_runs') IS NULL THEN 0::bigint ELSE (SELECT count(*)::bigint FROM public.dbpinball_safe_sync_runs) END")
         .fetch_one(&mut connect(&destination).await)
         .await
         .unwrap();
