@@ -49,6 +49,13 @@ pub async fn inspect_mariadb_triggers(
 }
 
 /// Inspect triggers on a MariaDB table using an existing pinned connection.
+///
+/// MariaDB documents that `information_schema.TRIGGERS` returns a row for every
+/// table even when the account lacks `SELECT` or `TRIGGER`; only
+/// `ACTION_CONDITION`, `ACTION_STATEMENT` and `DEFINER` are withheld. MySQL
+/// filters the rows instead. This check therefore reads only the always-visible
+/// columns and is sound on MariaDB; a future MySQL destination must prove the
+/// privilege before trusting an empty result.
 pub async fn inspect_mariadb_triggers_conn(
     conn: &mut MySqlConnection,
     table: &QualifiedName,
