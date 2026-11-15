@@ -19,7 +19,7 @@ The project is being rebuilt around a **core-first, CLI-first** architecture: a 
 - **Local-first.** Connections and credentials stay on your machine. Passwords go to the OS keyring.
 - **Engine-level, not framework-level.** DBPinball talks to MySQL and PostgreSQL directly, so it works with any application built on them.
 - **Headless by design.** The roadmap moves all database logic into a reusable Rust core so the same capability can run from a CLI, a desktop app, or CI.
-- **Safe Sync as a first-class goal.** Reproducing production data for debugging should be selective, sanitized, and impossible to point at production by accident. That capability is planned, not shipped.
+- **Safe Sync as a first-class goal.** Reproducing production data for debugging should be selective, sanitized, and impossible to point at production by accident. It is implemented for PostgreSQL and MariaDB 10.11+ InnoDB.
 
 ## Current features
 
@@ -63,7 +63,7 @@ These exist in the codebase but are **not reachable from the current UI**, or ar
 | MySQL Safe Sync | M6 |
 | Advanced snapshots and relational dependency resolution | M7 |
 
-Safe Sync is **not available**. No command in this README should be assumed to exist until the corresponding milestone ships.
+Safe Sync is available for PostgreSQL and MariaDB 10.11+ InnoDB through `dbpinball safe-sync` and the Desktop Safe Sync page. The milestone table above is the original plan and is kept for history; see the [Safe Sync design](https://dbpinball.programinglive.com/security/safe-sync-design) for the supported types and the refusals.
 
 ## Monorepo Packages
 
@@ -110,7 +110,7 @@ The design separates two things that are easy to confuse:
 - **Administrative operations** — raw backup, restore, copy, and database management. Byte-faithful, unsanitized.
 - **Safe Sync** — policy-controlled, selective, sanitized reproduction of production data into a verified development target.
 
-**A raw database copy is not sanitized and is not safe to share.** Safe Sync is the only capability intended to produce shareable development data, and it is not implemented yet.
+**A raw database copy is not sanitized and is not safe to share.** Safe Sync is the only capability intended to produce shareable development data. It is implemented for PostgreSQL and MariaDB 10.11+ InnoDB; see the [Safe Sync design](https://dbpinball.programinglive.com/security/safe-sync-design) for the supported types and the refusals.
 
 ## Supported database engines
 
@@ -129,7 +129,30 @@ A **Laravel adapter** ships in this repository at [`packages/laravel-adapter`](d
 
 No other framework-specific adapter ships here. There is no Rails, Django, or Prisma integration, and none is claimed.
 
-## Desktop quick start
+## Install
+
+DBPinball ships as a desktop application with an optional command-line
+interface. Installing it does not require Rust, Cargo, Node.js or a source
+checkout.
+
+| Platform | Desktop | CLI |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `dbpinball_<version>_x64-setup.exe` | `dbpinball-cli-<version>-x64.zip` |
+| Linux (x64) | `.deb` or `.AppImage` | `dbpinball-cli-<version>-x64-linux.tar.gz` |
+| macOS | Build from source | Build from source |
+
+Artifacts are produced by the `Package` workflow and attached to a release once
+one is authorized. Until then, download them from the workflow run.
+
+**Windows CLI:** extract the archive and run
+`powershell -ExecutionPolicy Bypass -File .\install-cli.ps1`. It installs to
+`%LOCALAPPDATA%\dbpinball\bin` and adds that folder to your user `PATH`, so a
+new terminal resolves `dbpinball` with no manual editing. `-Uninstall` reverses
+it and leaves other `PATH` entries untouched.
+
+Full instructions: <https://dbpinball.programinglive.com/guide/installation>.
+
+## Desktop quick start (from source)
 
 ### Prerequisites
 
@@ -153,7 +176,9 @@ npm run tauri dev
 npm run tauri build
 ```
 
-Installers are written to `src-tauri/target/release/bundle/`.
+Installers are written to `src-tauri/target/release/bundle/`. To produce the
+same artifacts CI publishes, including the CLI archive, checksums and
+provenance, run `scripts/package-windows.ps1` on Windows.
 
 ### First connection
 
@@ -308,10 +333,10 @@ Dependency status is tracked in [`docs/security/DEPENDENCY_VULNERABILITY_REPORT.
 | M1 | Incremental core extraction with desktop compatibility | Complete |
 | M2 | CLI foundation and contract tests | Complete |
 | M2.1 | Desktop import of `localStorage` profiles into the shared store | Complete |
-| M3 | Shared security policy and destination verification | Planned |
-| M4 | PostgreSQL Safe Sync through the CLI | Planned |
-| M5 | Desktop Safe Sync integration | Planned |
-| M6 | MySQL Safe Sync | Planned |
+| M3 | Shared security policy and destination verification | Complete |
+| M4 | PostgreSQL Safe Sync through the CLI | Complete |
+| M5 | Desktop Safe Sync integration | Complete |
+| M6 | MariaDB Safe Sync (non-MariaDB MySQL is refused) | Complete |
 | M7 | Advanced snapshots and relational dependency resolution | Planned |
 
 Deferred: cross-engine copy, SSH tunnels, scheduled backups, cloud storage.

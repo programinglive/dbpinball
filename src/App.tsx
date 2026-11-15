@@ -26,7 +26,7 @@ function App() {
               <img src="/logo_dbpinball.png" alt="DB Pinball logo" className="nav-rail__logo" />
               <div className="nav-rail__text">
                 <h1 className="nav-rail__title">DB Pinball</h1>
-                <p className="nav-rail__subtitle">Version 0.1.4 (preview)</p>
+                <p className="nav-rail__subtitle">Version {__APP_VERSION__}</p>
               </div>
             </div>
 

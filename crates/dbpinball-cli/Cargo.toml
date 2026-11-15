@@ -23,5 +23,8 @@ tempfile = "3"
 url = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres"] }
 
+[build-dependencies]
+winresource = "0.1"
+
 [features]
 integration = []

@@ -3,6 +3,26 @@
 The `dbpinball` CLI is a standalone binary over the same Rust core as the
 desktop. It is designed for scripted and headless inspection.
 
+## Install the CLI
+
+The CLI is a separate download from the desktop application. On Windows, extract
+`dbpinball-cli-<version>-x64.zip` and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-cli.ps1
+```
+
+That installs to `%LOCALAPPDATA%\dbpinball\bin` and adds the folder to your user
+`PATH`, so a new terminal resolves `dbpinball` with no manual editing. On Linux,
+extract the tarball and install the binary:
+
+```bash
+sudo install -m 0755 dbpinball /usr/local/bin/dbpinball
+```
+
+See [Installation](/guide/installation) for the full procedure, including
+uninstall.
+
 ## Global flags
 
 | Flag | Meaning |

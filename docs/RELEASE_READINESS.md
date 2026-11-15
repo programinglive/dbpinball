@@ -112,3 +112,22 @@ Publication is blocked on:
 4. A first successful CI run on GitHub.
 
 Everything else in this checklist is green.
+
+## 9. Distribution status (current)
+
+The checklist above predates the M4/MariaDB work and the packaging pipeline.
+Current state:
+
+| Item | State |
+| --- | --- |
+| Rust unit tests | 248 in `dbpinball-core`, plus CLI, Desktop and integration suites |
+| CI on GitHub | Running; required checks green on the current heads |
+| Windows Desktop installer | Built with Tauri NSIS, per-user install, Start Menu entry, uninstaller |
+| Windows CLI archive | `dbpinball-cli-<version>-x64.zip` with `install-cli.ps1` (user PATH, no admin) |
+| Linux packages | CLI tarball, `.deb` and AppImage built by the `Package` workflow |
+| Checksums and provenance | `SHA256SUMS.txt` and `provenance.json` per build |
+| Code signing | **Not in place.** Windows SmartScreen warns, and heuristic antivirus scanners can quarantine an unsigned binary. The release binary embeds a version resource and an `asInvoker` manifest, which removes the most common false positive, but signing is the permanent fix. |
+| Public release | **Not published.** No tag and no GitHub release exists; artifacts are workflow artifacts only. |
+
+Publication additionally requires an authorized release decision and, for a
+frictionless Windows install, a code-signing certificate.

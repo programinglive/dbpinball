@@ -81,3 +81,6 @@ website/node_modules/
 website/.vitepress/dist/
 website/.vitepress/cache/
 website/.vitepress/.temp/
+
+# Release artifacts produced by scripts/package-windows.ps1
+artifacts/

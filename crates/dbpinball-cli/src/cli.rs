@@ -71,7 +71,7 @@ pub enum Command {
         #[command(subcommand)]
         command: SecurityCommand,
     },
-    /// Bounded, masked PostgreSQL production-to-local sync.
+    /// Bounded, masked PostgreSQL and MariaDB production-to-local sync.
     SafeSync {
         #[command(subcommand)]
         command: SafeSyncCommand,

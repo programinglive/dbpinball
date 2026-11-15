@@ -124,6 +124,7 @@ export default defineConfig({
           text: "Development",
           items: [
             { text: "Local setup", link: "/development/" },
+            { text: "Building from source", link: "/development/building" },
             { text: "Repository structure", link: "/development/repository-structure" },
             { text: "Testing", link: "/development/testing" },
             { text: "CI checks", link: "/development/ci" },

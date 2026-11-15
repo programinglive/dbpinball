@@ -1,12 +1,22 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { env } from "process";
+import { readFileSync } from "node:fs";
 
 const host = env.TAURI_DEV_HOST;
+
+// The single source of truth for the version the UI displays. Reading it here
+// keeps the sidebar in step with package.json, tauri.conf.json and the CLI.
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       "@": "/src",

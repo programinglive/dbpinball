@@ -157,7 +157,7 @@ These are the most consequential findings for open-source publication, because t
 | F6 | `run_query` executes arbitrary SQL from the frontend. | `mysql.rs:73`, `postgres.rs:87` | Medium (code) |
 | F7 | `use_ssl` is declared but never read. | `models.rs:13`; only occurrence | Medium (code) |
 | F8 | Passwords are interpolated into connection URLs. | `mysql.rs:22,38,189,326`; `postgres.rs:21,37,172,309` | Medium (code) |
-| F10 | Version drift: `App.tsx` shows 0.1.4, `package.json` 0.1.6, `tauri.conf.json` 0.1.0, `Cargo.toml` 0.1.0. | four files | Low |
+| F10 | Version drift: `App.tsx` showed 0.1.4, `package.json` 0.1.6, `tauri.conf.json` 0.1.0, `Cargo.toml` 0.1.0. | four files | **Resolved**: the UI reads the version from `package.json` through Vite, and `scripts/check-versions.cjs` fails the build when the manifests disagree. |
 | F12 | `npm run format` calls Prettier, which is not installed. | `package.json` script; `node_modules/prettier` absent | Low |
 | F13 | `GITHUB_SETUP_SUMMARY.md` and `COMMITER_SETUP.md` reference the removed `scripts/release.js` and commiter v1.1.6. | both files | Low |
 | F11 | `index.html` title is the Tauri template default. | `index.html:7` | Low |
