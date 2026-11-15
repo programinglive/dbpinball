@@ -386,6 +386,69 @@ for (const id of [...needed].sort()) {
 }
 
 const target = path.join(root, "THIRD_PARTY_LICENSES.md");
+
+/* ------------------------------------------------------------------ */
+/* --verify                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Verify the committed bundle without regenerating it.
+ *
+ * Regenerating and diffing would compare an artifact that depends on the
+ * installed npm tree, which differs between platforms. Verification instead
+ * checks the guarantees that matter: every shipped package appears in the
+ * bundle, every package's required license text is present, and no package was
+ * left unresolved.
+ */
+if (process.argv.includes("--verify")) {
+  if (!fs.existsSync(target)) {
+    console.error("THIRD_PARTY_LICENSES.md is missing");
+    process.exit(1);
+  }
+  const committed = fs.readFileSync(target, "utf8");
+  const committedLines = new Set(committed.split(/\r?\n/));
+  const failures = [];
+
+  for (const problem of problems) {
+    failures.push(problem);
+  }
+
+  // Compare the exact license-table rows. Those rows come from the lockfiles and
+  // the parser, so they are identical on every platform; the notice table does
+  // not participate in this check.
+  for (const entry of shipped) {
+    const ids = resolved.get(`${entry.name}@${entry.version}`) || [];
+    const row = `| \`${entry.name}\` | ${entry.version} | ${entry.license} | ${ids.join(", ")} |`;
+    if (!committedLines.has(row)) {
+      failures.push(
+        `${entry.name} ${entry.version} is missing or wrong in the bundle (expected: ${row})`,
+      );
+    }
+  }
+
+  for (const license of needed) {
+    if (!committedLines.has(`### ${license}`)) {
+      failures.push(`license text for ${license} is missing from the bundle`);
+    }
+    if (!fs.existsSync(path.join(textDir, `${license}.txt`))) {
+      failures.push(`canonical text file for ${license} is missing`);
+    }
+  }
+
+  if (failures.length > 0) {
+    console.error("license bundle verification failed:");
+    for (const failure of failures) {
+      console.error(`  - ${failure}`);
+    }
+    process.exit(1);
+  }
+
+  console.log(
+    `license bundle verified: ${shipped.length} packages, ${needed.size} license text(s)`,
+  );
+  process.exit(0);
+}
+
 fs.writeFileSync(target, `${lines.join("\n")}\n`, "utf8");
 console.log(`wrote ${target}`);
 console.log(`licenses supplied: ${[...needed].sort().join(", ")}`);
