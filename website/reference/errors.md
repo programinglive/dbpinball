@@ -5,9 +5,10 @@
 | Code | CLI exit | Meaning |
 | --- | --- | --- |
 | `usage` | 2 | Invalid arguments or an invalid profile |
+| `validation` | 2 | Invalid Safe Sync spec, typed range filter (`invalid_filter`), or `acknowledgement_mismatch` |
 | `connection` | 3 | Connection or credential failure |
 | `policy_refusal` | 4 | A safety rule refused the action |
-| `operation` | 5 | Filesystem or environment failure |
+| `operation` | 5 | Filesystem, environment, or Safe Sync check failure (including `limit_exceeded` when a root filter exceeds 8 predicates) |
 | `unsupported` | 5 | Unsupported store version |
 | `not_found` | 7 | Unknown connection profile |
 | `conflict` | 8 | The store changed since it was read |

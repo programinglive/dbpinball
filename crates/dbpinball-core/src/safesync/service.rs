@@ -154,6 +154,7 @@ pub async fn validate(
     keys: &dyn MaskKeyStore,
     now_ms: u64,
 ) -> Result<ValidationReport, CoreError> {
+    spec.validate()?;
     plan.check_version()?;
     plan.check_expiry_contract(now_ms)?;
 
@@ -183,6 +184,7 @@ pub async fn validate(
             "mask_policy_changed",
         ));
     }
+    check_filter_digests(plan, spec, &masker)?;
     let root_tables = root_tables(spec)?;
 
     let mut source_session =
@@ -225,6 +227,9 @@ pub async fn validate(
     let selection = planner::build(&mut source_session, spec, &masker, true).await?;
     check_schema_drift(plan, &selection)?;
     assert_graph_matches(plan, &selection)?;
+    if crate::safesync::plan::spec_hash(spec, &selection) != plan.spec_hash {
+        return Err(filter_mismatch("the specification does not match the plan"));
+    }
     if !selection.complete {
         return Err(CoreError::with_detail(
             ErrorCode::Operation,
@@ -256,7 +261,39 @@ pub fn check_filter_digests(
     }
 
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter);
+        let root_name = crate::safesync::spec::QualifiedName::parse(&root.table)?;
+        if root_name.schema != planned.schema || root_name.table != planned.table {
+            return Err(filter_mismatch(
+                "the specification does not match the plan's root table",
+            ));
+        }
+        if planned.filter_columns.len() != planned.filter_types.len() {
+            return Err(filter_mismatch(
+                "the plan is missing filter column types for the specification",
+            ));
+        }
+        let mut types = std::collections::BTreeMap::new();
+        for (col, ty) in planned
+            .filter_columns
+            .iter()
+            .zip(planned.filter_types.iter())
+        {
+            if let Some(existing) = types.insert(col.clone(), ty.clone()) {
+                if existing != *ty {
+                    return Err(filter_mismatch(
+                        "the plan contains conflicting filter column types",
+                    ));
+                }
+            }
+        }
+        for predicate in &root.filter {
+            if !types.contains_key(&predicate.column) {
+                return Err(filter_mismatch(
+                    "the specification does not match the plan's filter columns",
+                ));
+            }
+        }
+        let canonical = crate::safesync::spec::canonical_filter(&root.filter, &types)?;
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
@@ -444,6 +481,7 @@ pub async fn execute(
         ));
     }
 
+    check_filter_digests(request.plan, request.spec, &masker)?;
     let root_tables = root_tables(request.spec)?;
 
     let mut source_session = BoundSession::open(
@@ -720,5 +758,110 @@ mod tests {
     fn an_unknown_policy_is_refused() {
         let error = resolve_policy("production-safe@7").unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("mask_policy_invalid"));
+    }
+
+    #[test]
+    fn check_filter_digests_refuses_changed_root_table() {
+        use crate::safesync::key::MaskKey;
+        use crate::safesync::plan::{
+            PlanAuthorization, PlanConstraints, PlanGraph, PlanIdentity, PlanImport, PlanMasking,
+            PlanRoot, PlanSelection,
+        };
+        use crate::safesync::spec::{
+            ExecutionOptions, FilterOp, FilterPredicate, FilterValue, Limits, MaskingSelection,
+            RelationshipSpec, RootSelection, Selection,
+        };
+
+        let masker = Masker::from_builtin(MaskKey::from_bytes("k-test", [7u8; 32])).unwrap();
+        let mut types = std::collections::BTreeMap::new();
+        types.insert("id".to_string(), "integer".to_string());
+        let predicate = FilterPredicate {
+            column: "id".to_string(),
+            op: FilterOp::Eq,
+            value: FilterValue::Int(1),
+        };
+        let canonical =
+            crate::safesync::spec::canonical_filter(std::slice::from_ref(&predicate), &types)
+                .unwrap();
+        let digest = masker.filter_digest("public", "orders", &canonical);
+        let plan_id = PlanIdentity {
+            identity_key: None,
+            current_user: "dev".into(),
+            engine: "postgres".into(),
+        };
+        let plan = DryRunPlan {
+            plan_version: 3,
+            run_id: "run-1".into(),
+            created_at_ms: 1,
+            expires_at_ms: 2,
+            spec_hash: "hash".into(),
+            plan_fingerprint: "fp".into(),
+            source: plan_id.clone(),
+            destination: plan_id,
+            selection: PlanSelection {
+                roots: vec![PlanRoot {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    filter_columns: vec!["id".into()],
+                    filter_ops: vec!["eq".into()],
+                    filter_types: vec!["integer".into()],
+                    filter_digest: digest,
+                    contains_values: false,
+                }],
+                direction: "parents".into(),
+                depth: 0,
+            },
+            tables: vec![],
+            graph: PlanGraph {
+                edges: 0,
+                cycles: 0,
+                max_depth_used: 0,
+                direction: "parents".into(),
+                fingerprint: "gf".into(),
+            },
+            masking: PlanMasking {
+                policy: "development-default@1".into(),
+                policy_hash: "ph".into(),
+                key_id: "k-test".into(),
+                columns: 0,
+                unmapped: 0,
+            },
+            import: PlanImport {
+                conflict_policy: "skip".into(),
+                mode: "insert".into(),
+                sequence_adjustment: false,
+            },
+            constraints: PlanConstraints {
+                order: vec![],
+                deferred: vec![],
+                cyclic_refused: vec![],
+            },
+            limits: Limits::default(),
+            checks: vec![],
+            complete: true,
+            authorization: PlanAuthorization {
+                key_id: "k-test".into(),
+                mac: "mac".into(),
+            },
+        };
+        let spec = SafeSyncSpec {
+            version: 1,
+            source: "prod".into(),
+            destination: "dev".into(),
+            selection: Selection {
+                roots: vec![RootSelection {
+                    table: "public.other_orders".into(),
+                    filter: vec![predicate],
+                }],
+                relationships: RelationshipSpec::default(),
+            },
+            limits: Limits::default(),
+            masking: MaskingSelection {
+                policy: "development-default@1".into(),
+            },
+            execution: ExecutionOptions::default(),
+        };
+        let err = check_filter_digests(&plan, &spec, &masker).unwrap_err();
+        assert_eq!(err.detail.as_deref(), Some("spec_plan_mismatch"));
     }
 }

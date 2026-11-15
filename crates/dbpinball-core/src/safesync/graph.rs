@@ -515,7 +515,14 @@ async fn unique_columns(
 
 /// Split `character varying(64)` into `character varying` and `Some(64)`.
 fn split_type(raw: &str, atttypmod: i32) -> (String, Option<usize>) {
-    let base = raw.split('(').next().unwrap_or(raw).trim().to_string();
+    let base = match (raw.find('('), raw.find(')')) {
+        (Some(start), Some(end)) if end > start => {
+            format!("{}{}", raw[..start].trim_end(), &raw[end + 1..])
+                .trim()
+                .to_string()
+        }
+        _ => raw.trim().to_string(),
+    };
     let limit = if atttypmod > 4
         && (base == "character varying" || base == "character" || base == "bit varying")
     {

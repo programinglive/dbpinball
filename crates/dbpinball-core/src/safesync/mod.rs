@@ -25,6 +25,7 @@ pub mod planner;
 pub mod service;
 pub mod session;
 pub mod spec;
+pub mod typed;
 
 pub use audit::{AuditRecord, TableAudit};
 pub use graph::{

@@ -478,8 +478,7 @@ execution:
 - `source` and `destination` are connection ids that must already exist in the
   connection store. They must differ.
 - `selection.roots` must be non-empty. There is no "all tables" form.
-- Filters are `eq`, `in`, `gte`, `lte` only. `in` takes a list (bounded to 100
-  values). Values are always bound parameters.
+- Filters are `eq`, `in`, `gte`, `lte` only (up to 8 predicates per root, combined with `AND`). `in` takes a non-empty list (bounded to 100 values). `gte` and `lte` are inclusive bounds allowed only on catalog-verified ordered PostgreSQL types (`smallint`, `integer`, `bigint`, `numeric`/`decimal` parsed and normalized without floating-point conversion, `date`, `timestamp without time zone` without an offset, and `timestamp with time zone` with a mandatory numeric offset or `Z` normalized to UTC microseconds). Values are always bound parameters with explicit casts.
 - Identifiers are validated against the catalog: the schema and table must exist
   and be allowed by §4.3; the filter column must exist and be of a comparable type.
   A validated identifier is emitted with `quote_ident`. No other user string reaches
@@ -918,7 +917,7 @@ them so the fingerprint binds the exact selection without storing it.
   "selection": {
     "roots": [
       { "schema": "public", "table": "accounts",
-        "filter_columns": ["id"], "filter_ops": ["eq"],
+        "filter_columns": ["id"], "filter_ops": ["eq"], "filter_types": ["uuid"],
         "filter_digest": "hmac-sha256:...", "contains_values": false }
     ],
     "direction": "parents",

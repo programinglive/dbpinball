@@ -60,6 +60,8 @@ pub struct PlanRoot {
     pub table: String,
     pub filter_columns: Vec<String>,
     pub filter_ops: Vec<String>,
+    #[serde(default)]
+    pub filter_types: Vec<String>,
     pub filter_digest: String,
     /// Always `false` in M4; a future version cannot add values silently.
     pub contains_values: bool,
@@ -189,6 +191,7 @@ impl DryRunPlan {
                         table: root.table.clone(),
                         filter_columns: root.filter_columns.clone(),
                         filter_ops: root.filter_ops.clone(),
+                        filter_types: root.filter_types.clone(),
                         filter_digest: root.filter_digest.clone(),
                         contains_values: false,
                     })
@@ -598,6 +601,7 @@ mod tests {
                 table: "accounts".into(),
                 filter_columns: vec!["id".into()],
                 filter_ops: vec!["eq".into()],
+                filter_types: vec!["uuid".into()],
                 filter_digest: "hmac-sha256:abc".into(),
             }],
             order,
