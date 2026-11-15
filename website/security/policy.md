@@ -25,11 +25,12 @@ Every operation is classified before it runs.
 | `DatabaseCopy` | **yes** | Copying one database into another |
 | `SchemaMutation` | **yes** | DDL |
 | `DataMutation` | **yes** | DML |
-| `SafeSyncPrepare` | reads a source | M4, not implemented |
-| `SafeSyncExecute` | **yes** | M4, not implemented |
+| `SafeSyncPrepare` | reads a source | Implemented |
+| `SafeSyncExecute` | **yes** | Implemented |
 
-`SafeSyncPrepare` and `SafeSyncExecute` are refused with `unsupported` until M4
-ships.
+`SafeSyncPrepare` reads a source and never writes. `SafeSyncExecute` writes to
+an enrolled local destination and requires a signed plan plus an explicit
+acknowledgement of the plan fingerprint.
 
 ## SQL classification
 

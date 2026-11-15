@@ -4,10 +4,17 @@ DBPinball is distributed under the MIT License (see [`LICENSE`](LICENSE)). It
 includes third-party software whose licenses require attribution when the
 compiled application is distributed.
 
-This file lists **direct** dependencies. The full transitive set is larger
-(646 Rust crates and the npm tree). Before publishing a binary release, generate
-a complete notice bundle with a tool such as `cargo about` or `cargo-deny`, and
-include it with the installer.
+This file lists **direct** dependencies. The full transitive set is larger (the
+Rust workspace resolves several hundred crates, and the frontend has its own
+tree). Before a release, generate a complete notice bundle with a tool such as
+`cargo about` or `cargo-deny` and ship it with the artifacts.
+
+## Status of published releases
+
+- **v0.1.7** was published without a bundled notice file. The notices below and
+  the repository's `LICENSE` are the attribution record for that release.
+- The packaging scripts now include this file in the CLI archive and the desktop
+  installer, so later releases carry it directly.
 
 ## Rust runtime dependencies
 
@@ -17,6 +24,7 @@ include it with the installer.
 | `tauri-plugin-opener` | Apache-2.0 OR MIT |
 | `serde` | MIT OR Apache-2.0 |
 | `serde_json` | MIT OR Apache-2.0 |
+| `serde_yaml` | MIT OR Apache-2.0 |
 | `tokio` | MIT |
 | `sqlx` | MIT OR Apache-2.0 |
 | `anyhow` | MIT OR Apache-2.0 |
@@ -27,8 +35,16 @@ include it with the installer.
 | `which` | MIT |
 | `dirs` | MIT OR Apache-2.0 |
 | `uuid` | Apache-2.0 OR MIT |
+| `sha2` | MIT OR Apache-2.0 |
+| `hmac` | MIT OR Apache-2.0 |
+| `getrandom` | MIT OR Apache-2.0 |
+| `unicode-normalization` | MIT OR Apache-2.0 |
+| `clap` | MIT OR Apache-2.0 |
+| `rpassword` | Apache-2.0 |
+| `tempfile` | MIT OR Apache-2.0 |
+| `url` | MIT OR Apache-2.0 |
 
-Build-time only: `tauri-build` (Apache-2.0 OR MIT).
+Build-time only: `tauri-build` (Apache-2.0 OR MIT), `winresource` (MIT).
 
 ## npm runtime dependencies
 
@@ -77,4 +93,10 @@ distributed application, but their licenses are recorded in `package-lock.json`.
 - Five transitive Rust crates use MPL-2.0. MPL-2.0 is file-level copyleft and is
   compatible with distributing this application under MIT, provided the
   MPL-covered files are not modified and their notices are retained.
-- `dlopen2` and `dlopen2_derive` are MIT. The current resolution is `dlopen2 0.8.2` (declares `license = "MIT"`) and `dlopen2_derive 0.4.3`. The earlier `dlopen2 0.8.0` used a `LICENSE` file instead of an SPDX field; that file is the MIT License, Copyright (c) 2017 Szymon Wieloch.
+- `dlopen2` and `dlopen2_derive` are MIT. The current resolution is `dlopen2 0.8.2`
+  (declares `license = "MIT"`) and `dlopen2_derive 0.4.3`. The earlier
+  `dlopen2 0.8.0` used a `LICENSE` file instead of an SPDX field; that file is the
+  MIT License, Copyright (c) 2017 Szymon Wieloch.
+- The project logo's ownership is not established in the repository. It is
+  recorded here rather than assumed; the maintainer must confirm it before any
+  redistribution outside this project.

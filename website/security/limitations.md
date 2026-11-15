@@ -62,7 +62,9 @@ call, and the identity includes the server and database, so a changed server or
 database is detected. The freshness window bounds, but does not remove, the gap
 between verification and execution: a DNS change, tunnel redirect, or a malicious
 server that lies about its identity between the two round-trips is not detected.
-A same-session identity assertion is planned for M4.
+The Safe Sync path re-asserts the destination identity on the same session it
+writes with, so the gap described here applies to the query, restore and copy
+paths rather than to Safe Sync.
 
 ## MySQL executable comments
 
@@ -72,19 +74,23 @@ ordinary `/* ... */` comment is still stripped normally.
 
 ## What is implemented and what is not
 
-Implemented in M3:
+Implemented:
 
 - Shared security policy and destination verification in the Rust core.
 - Enrollment with a cross-process lock and no secret persistence.
 - Desktop enforcement at the execution boundary for queries, restore and copy.
 - Read-only execution inside a database-level read-only transaction.
+- Safe Sync for PostgreSQL and MariaDB 10.11+ InnoDB, with signed plans,
+  destination-scoped locking and transactional import.
 
 Not implemented:
 
-- Safe Sync (M4 and later).
 - Restore and copy from the desktop UI: the commands are gated but their pages
   are not routed.
 - TLS enforcement (`useSsl` is stored but not applied).
+- Safe Sync for non-MariaDB MySQL.
+- `deterministic_phone`, `date_shift`, `amount_jitter` and `fixed` masking
+  strategies.
 
 ## Related
 

@@ -97,6 +97,10 @@ try {
         Copy-Item -LiteralPath $cliExe -Destination (Join-Path $stage 'dbpinball.exe')
         Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts\install-cli.ps1') -Destination $stage
         Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts\CLI-README.txt') -Destination $stage
+        # MIT and Apache-2.0 both require the notices to travel with a binary
+        # distribution, so the archive carries them.
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') -Destination $stage
 
         $zip = Join-Path $outDir "dbpinball-cli-$Version-$arch.zip"
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

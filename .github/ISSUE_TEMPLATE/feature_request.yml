@@ -6,8 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check the README first. The CLI, Safe Sync, and masking are planned but not implemented.
-        Proposals that conflict with the documented architecture will be discussed before implementation.
+        Check the README first. Some capabilities are deliberately refused rather
+        than missing — Safe Sync rejects non-MariaDB MySQL, non-InnoDB tables,
+        triggers, foreign-key cycles and four unimplemented masking strategies.
+
+        Proposals that conflict with the documented safety model will be discussed
+        before implementation.
   - type: textarea
     id: problem
     attributes:
@@ -33,10 +37,12 @@ body:
         - Desktop UI
         - Connection management
         - Query workspace
-        - Backup / restore / copy
         - CLI
-        - Safe Sync
+        - Safe Sync (PostgreSQL)
+        - Safe Sync (MariaDB)
+        - Masking policy
         - Documentation
+        - Packaging and distribution
         - Other
     validations:
       required: true
@@ -45,7 +51,7 @@ body:
     attributes:
       label: Confirmations
       options:
-        - label: I have read the README capability states.
+        - label: I have read the README known limitations.
           required: true
         - label: This request does not require real production data to demonstrate.
           required: true

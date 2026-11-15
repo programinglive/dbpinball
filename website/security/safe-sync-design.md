@@ -1,10 +1,10 @@
-# Safe Sync design (planned)
+# Safe Sync design
 
-Safe Sync is **planned for M4 and is not available**. There is no command, page,
-or binary surface for it yet. This page records the approved design so that it can
-be reviewed before any runtime code exists.
+Safe Sync is **implemented** for PostgreSQL and MariaDB 10.11+ InnoDB. It is
+available as dbpinball safe-sync and as the desktop Safe Sync page. This page
+records the design and the boundaries the implementation enforces.
 
-If you are looking for what exists today, see the
+For the supported types and the refusals, see the
 [security policy](/security/policy) and the [roadmap](/roadmap).
 
 ## What it is meant to do
@@ -226,17 +226,18 @@ incomplete and refused, never imported partially.
 ## What is not implemented
 
 - Child traversal (only parent direction is supported).
-- MySQL Safe Sync.
-- Desktop integration.
+- Safe Sync for non-MariaDB MySQL.
 - Batch import.
 - Generated column values are not imported; they are recomputed by the
   destination. Identity regeneration and remapping are not implemented, and
   identity preservation is restricted to the single-column integer mode
   described above.
 - Arbitrary transformation scripts.
+- `deterministic_phone`, `date_shift`, `amount_jitter` and `fixed` masking
+  strategies. A policy that selects one is refused.
 
-Safe Sync as a whole is **not** generally available, and this page should not be
-read as a promise of completeness.
+This page describes the boundaries the implementation enforces. It is not a
+promise of completeness beyond them.
 
 ## How it will be available
 

@@ -59,12 +59,11 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement.
-
-This project does not publish a dedicated conduct email address. Until one is
-configured, report incidents through GitHub's private reporting channel on the
-repository, or contact the maintainer through their GitHub profile. Do not
-include sensitive personal information in a public issue.
+reported to the community leaders responsible for enforcement at the
+repository's private reporting channel:
+<https://github.com/programinglive/dbpinball/security/advisories/new>.
+This project does not publish a dedicated conduct email address; do not include
+sensitive personal information in a public issue.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
