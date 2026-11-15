@@ -75,11 +75,13 @@ fn version_exits_zero() {
 
     assert_eq!(code, 0);
     // Read the crate version instead of a literal, so a release bump cannot
-    // leave a stale expectation behind.
-    let expected = env!("CARGO_PKG_VERSION");
-    assert!(
-        stdout.contains(expected),
-        "unexpected version output: {stdout} (expected {expected})"
+    // leave a stale expectation behind. Compare the whole line so a wrong
+    // version that merely contains the right digits still fails.
+    let expected = format!("dbpinball {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        stdout.trim(),
+        expected,
+        "unexpected version output: {stdout}"
     );
 }
 

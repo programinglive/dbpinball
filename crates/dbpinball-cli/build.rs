@@ -13,12 +13,18 @@ fn main() {
 
     #[cfg(windows)]
     {
-        let mut resource = winresource::WindowsResource::new();
-        resource
-            .set_manifest(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        // The assembly identity needs a four-part version, and it must follow
+        // the crate version so a release bump cannot leave a stale manifest.
+        let version = env!("CARGO_PKG_VERSION");
+        let assembly_version = if version.matches('.').count() == 2 {
+            format!("{version}.0")
+        } else {
+            version.to_string()
+        };
+        let manifest = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="dbpinball.cli" version="0.1.6.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="dbpinball.cli" version="{assembly_version}" processorArchitecture="*"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
@@ -32,8 +38,12 @@ fn main() {
       <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
-</assembly>"#,
-            )
+</assembly>"#
+        );
+
+        let mut resource = winresource::WindowsResource::new();
+        resource
+            .set_manifest(&manifest)
             .set("ProductName", "DBPinball CLI")
             .set("FileDescription", "DBPinball command-line interface")
             .set("OriginalFilename", "dbpinball.exe")
