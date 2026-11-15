@@ -16,7 +16,7 @@ keyring = "2"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 getrandom = "0.2"
 unicode-normalization = "0.1"
 
