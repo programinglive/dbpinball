@@ -106,11 +106,11 @@ These are confirmed behaviours, documented so users can make informed decisions:
    is unavailable, the fallback creates an empty file and reports success.
 2. **Passwords are interpolated into connection URLs.** The desktop adapter builds
    `postgresql://user:password@host/db` and `mysql://user:password@host/db` by
-   string formatting on the query, restore and copy paths and in the fallback
+   string formatting in the query connection helpers and in the fallback
    dumpers. A password containing `@`, `:`, `/`, `?` or `#` can produce a
-   malformed URL, and a database error message may echo the URL. The Core Safe
-   Sync path builds its connections from separate connect options and is not
-   affected.
+   malformed URL, and a database error message may echo the URL. The restore path
+   passes the password through `PGPASSWORD`/`MYSQL_PWD` instead, and the Core Safe
+   Sync path builds its connections from separate connect options.
 3. **The `useSsl` flag is stored but not applied** to connections.
 4. **Backup, restore and copy are not routed in the UI**, and the CLI has no
    backup command. Do not rely on them.

@@ -177,10 +177,57 @@ function npmPackages(directory) {
         version: entry.version,
         license: entry.license || "UNKNOWN",
         directory,
+        installPath: path.join(root, directory, key),
       });
     }
   }
   return [...seen.values()];
+}
+
+/**
+ * The copyright lines a package actually publishes.
+ *
+ * MIT, BSD and 0BSD require the copyright notice itself, not just the license
+ * body, so a bundle of generic texts is incomplete. npm packages ship a LICENSE
+ * or CopyrightNotice file; those lines are collected verbatim. Nothing is
+ * invented: when a package publishes no notice, the entry says so.
+ */
+function copyrightNotices(installPath) {
+  if (!installPath || !fs.existsSync(installPath)) {
+    return [];
+  }
+  const candidates = fs
+    .readdirSync(installPath)
+    .filter((name) => /^(licen[cs]e|copyright|notice)/i.test(name));
+  const notices = new Set();
+  for (const name of candidates) {
+    const file = path.join(installPath, name);
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile() || stat.size > 200_000) {
+      continue;
+    }
+    for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+      const trimmed = line.trim();
+      // A real notice starts with "Copyright" and names a holder. The warranty
+      // disclaimer also contains the word, so exclude the liability phrasing.
+      if (!/^copyright\b/i.test(trimmed) && !/^\(c\)\s/i.test(trimmed)) {
+        continue;
+      }
+      if (/liable|warrant|damages|holders be/i.test(trimmed)) {
+        continue;
+      }
+      if (trimmed.length > 160) {
+        continue;
+      }
+      notices.add(trimmed);
+    }
+  }
+  return [...notices];
 }
 
 /* ------------------------------------------------------------------ */
@@ -223,7 +270,9 @@ for (const ids of resolved.values()) {
 
 const LICENSE_NOTES = {
   "0BSD":
-    "The SPDX text carries a `Copyright (C) YEAR by AUTHOR EMAIL` line; each dependency substitutes its own copyright holder there.",
+    "The SPDX template carries a `Copyright (C) YEAR by AUTHOR EMAIL` line. The per-package copyright notices are listed in the Copyright notices section below; this text is the license body.",
+  "MIT":
+    "The SPDX template carries a `Copyright (c) <year> <copyright holders>` line. The per-package copyright notices are listed in the Copyright notices section below; this text is the license body.",
   "Unicode-3.0": "Unicode License V3, as published by the Unicode Consortium.",
   "CC0-1.0": "Creative Commons CC0 1.0 Universal public domain dedication.",
   "MPL-2.0":
@@ -278,6 +327,43 @@ function table(title, entries) {
 
 table("Rust crates", rust);
 table("npm packages (application)", npmRoot);
+
+// Copyright notices, collected verbatim from each installed package.
+const noticeRows = [];
+for (const entry of [...npmRoot].sort((a, b) => a.name.localeCompare(b.name))) {
+  const notices = copyrightNotices(entry.installPath);
+  if (notices.length > 0) {
+    noticeRows.push({ name: entry.name, version: entry.version, notices });
+  }
+}
+
+lines.push("## Copyright notices");
+lines.push("");
+lines.push(
+  "MIT, BSD and 0BSD require the copyright notice itself, not only the license",
+  "body, and the SPDX texts for MIT and 0BSD carry a placeholder line where that",
+  "notice belongs. The notices below are copied verbatim from each installed npm",
+  "package's own LICENSE, COPYRIGHT or NOTICE file and complete those placeholders.",
+);
+lines.push("");
+lines.push(
+  "Rust crates are compiled from a registry cache rather than installed into the",
+  "repository, so their notices are not collected here; each crate's own LICENSE",
+  "file ships with its source and is retained unmodified.",
+);
+lines.push("");
+if (noticeRows.length === 0) {
+  lines.push("_No package-specific copyright notices were found._");
+  lines.push("");
+} else {
+  lines.push("| Package | Version | Copyright notice |");
+  lines.push("| --- | --- | --- |");
+  for (const row of noticeRows) {
+    const text = row.notices.join("<br>").replace(/\|/g, "\\|");
+    lines.push(`| \`${row.name}\` | ${row.version} | ${text} |`);
+  }
+  lines.push("");
+}
 
 lines.push("## License texts");
 lines.push("");

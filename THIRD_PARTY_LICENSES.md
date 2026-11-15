@@ -727,11 +727,82 @@ dependencies require.
 | `use-sidecar` | 1.1.3 | MIT | MIT |
 | `zod` | 4.6.7 | MIT | MIT |
 
+## Copyright notices
+
+MIT, BSD and 0BSD require the copyright notice itself, not only the license
+body, and the SPDX texts for MIT and 0BSD carry a placeholder line where that
+notice belongs. The notices below are copied verbatim from each installed npm
+package's own LICENSE, COPYRIGHT or NOTICE file and complete those placeholders.
+
+Rust crates are compiled from a registry cache rather than installed into the
+repository, so their notices are not collected here; each crate's own LICENSE
+file ships with its source and is retained unmodified.
+
+| Package | Version | Copyright notice |
+| --- | --- | --- |
+| `@floating-ui/core` | 1.7.3 | Copyright (c) 2021-present Floating UI contributors |
+| `@floating-ui/dom` | 1.7.4 | Copyright (c) 2021-present Floating UI contributors |
+| `@floating-ui/react-dom` | 2.1.6 | Copyright (c) 2021-present Floating UI contributors |
+| `@floating-ui/utils` | 0.2.10 | Copyright (c) 2021-present Floating UI contributors |
+| `@hookform/resolvers` | 5.2.2 | Copyright (c) 2019-present Beier(Bill) Luo |
+| `@radix-ui/primitive` | 1.1.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-arrow` | 1.1.7 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-checkbox` | 1.3.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-collection` | 1.1.7 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-context` | 1.1.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-dialog` | 1.1.15 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-dismissable-layer` | 1.1.11 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-dropdown-menu` | 2.1.16 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-focus-guards` | 1.1.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-focus-scope` | 1.1.7 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-label` | 2.1.8 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-menu` | 2.1.16 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-popper` | 1.2.8 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-portal` | 1.1.9 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-presence` | 1.1.5 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-primitive` | 2.1.4 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-primitive` | 2.1.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-progress` | 1.1.8 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-roving-focus` | 1.1.11 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-scroll-area` | 1.2.10 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-select` | 2.2.6 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-slot` | 1.2.3 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-slot` | 1.2.4 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-tabs` | 1.1.13 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-toggle` | 1.1.10 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-use-controllable-state` | 1.2.2 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-use-effect-event` | 0.0.2 | Copyright (c) 2022 WorkOS |
+| `@radix-ui/react-visually-hidden` | 1.2.3 | Copyright (c) 2022 WorkOS |
+| `@standard-schema/utils` | 0.3.0 | Copyright (c) 2024 Fabian Hiller |
+| `@tauri-apps/api` | 2.12.4 | copyright notice that is included in or attached to the work<br>copyright license to reproduce, prepare Derivative Works of,<br>(c) You must retain, in the Source form of any Derivative Works<br>Copyright (c) 2017 - Present Tauri Apps Contributors |
+| `aria-hidden` | 1.2.6 | Copyright (c) 2017 Anton Korzunov |
+| `class-variance-authority` | 0.7.1 | copyright notice that is included in or attached to the work<br>copyright license to reproduce, prepare Derivative Works of,<br>(c) You must retain, in the Source form of any Derivative Works<br>Copyright 2022 Joe Bell |
+| `clsx` | 2.1.1 | Copyright (c) Luke Edwards <luke.edwards05@gmail.com> (lukeed.com) |
+| `cookie` | 1.1.1 | Copyright (c) 2012-2014 Roman Shtylman <shtylman@gmail.com><br>Copyright (c) 2015 Douglas Christopher Wilson <doug@somethingdoug.com> |
+| `detect-node-es` | 1.1.0 | Copyright (c) 2017 Ilya Kantor |
+| `get-nonce` | 1.0.1 | Copyright (c) 2020 Anton Korzunov |
+| `lucide-react` | 0.553.0 | copyright notice and this permission notice appear in all copies.<br>Copyright (c) 2013-2023 Cole Bemis |
+| `react` | 19.2.0 | Copyright (c) Meta Platforms, Inc. and affiliates. |
+| `react-dom` | 19.2.0 | Copyright (c) Meta Platforms, Inc. and affiliates. |
+| `react-hook-form` | 7.66.0 | Copyright (c) 2019-present Beier(Bill) Luo |
+| `react-remove-scroll` | 2.7.1 | Copyright (c) 2017 Anton Korzunov |
+| `react-router` | 7.18.5 | Copyright (c) React Training LLC 2015-2019<br>Copyright (c) Remix Software Inc. 2020-2021<br>Copyright (c) Shopify Inc. 2022-2023 |
+| `react-router-dom` | 7.18.5 | Copyright (c) React Training LLC 2015-2019<br>Copyright (c) Remix Software Inc. 2020-2021<br>Copyright (c) Shopify Inc. 2022-2023 |
+| `react-style-singleton` | 2.2.3 | Copyright (c) 2017 Anton Korzunov |
+| `scheduler` | 0.27.0 | Copyright (c) Meta Platforms, Inc. and affiliates. |
+| `set-cookie-parser` | 2.7.3 | Copyright (c) 2015 Nathan Friedly <nathan@nfriedly.com> (http://nfriedly.com/) |
+| `tailwind-merge` | 3.4.0 | Copyright (c) 2021 Dany Castillo |
+| `tailwindcss-animate` | 1.0.7 | Copyright (c) 2020 Jamie Kyle |
+| `tslib` | 2.8.1 | Copyright (c) Microsoft Corporation. |
+| `use-callback-ref` | 1.3.3 | Copyright (c) 2017 Anton Korzunov |
+| `use-sidecar` | 1.1.3 | Copyright (c) 2017 Anton Korzunov |
+| `zod` | 4.6.7 | Copyright (c) 2025 Colin McDonnell |
+
 ## License texts
 
 ### 0BSD
 
-The SPDX text carries a `Copyright (C) YEAR by AUTHOR EMAIL` line; each dependency substitutes its own copyright holder there.
+The SPDX template carries a `Copyright (C) YEAR by AUTHOR EMAIL` line. The per-package copyright notices are listed in the Copyright notices section below; this text is the license body.
 
 ```text
 Copyright (C) YEAR by AUTHOR EMAIL
@@ -1010,6 +1081,8 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 ```
 
 ### MIT
+
+The SPDX template carries a `Copyright (c) <year> <copyright holders>` line. The per-package copyright notices are listed in the Copyright notices section below; this text is the license body.
 
 ```text
 MIT License
