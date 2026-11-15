@@ -816,7 +816,12 @@ fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[Qualif
     }
 
     let (account, options) = split_mariadb_grant_account(account_and_options);
-    if account.trim().is_empty() || !mariadb_grant_options_are_inert(options) {
+    // An unterminated quote makes the split untrustworthy, so the line is
+    // refused rather than guessed at.
+    if account.trim().is_empty()
+        || mariadb_grant_has_unterminated_quote(account_and_options)
+        || !mariadb_grant_options_are_inert(options)
+    {
         return true;
     }
 
@@ -890,7 +895,8 @@ fn split_mariadb_grant_account(input: &str) -> (&str, &str) {
 }
 
 /// The byte index just past the closing quote of the token that starts at
-/// `start`, honouring backslash escapes.
+/// `start`, honouring backslash escapes. Returns `start` when the quote is
+/// never closed, so an unterminated token cannot absorb the rest of the line.
 fn skip_quoted(input: &str, start: usize, quote: char) -> usize {
     let index = start + quote.len_utf8();
     let mut escaped = false;
@@ -907,7 +913,30 @@ fn skip_quoted(input: &str, start: usize, quote: char) -> usize {
             return index + offset + ch.len_utf8();
         }
     }
-    input.len()
+    start
+}
+
+/// True when a quote in the line is never closed.
+fn mariadb_grant_has_unterminated_quote(input: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '`' || ch == '"' => quote = Some(ch),
+            None => {}
+        }
+    }
+    quote.is_some()
 }
 
 /// True when every trailing clause is a known clause that cannot grant a
@@ -1107,6 +1136,13 @@ mod tests {
         ));
         assert!(!write(
             "GRANT SELECT ON `mdb_src`.* TO 'with space'@'%' REQUIRE SSL"
+        ));
+        // An unterminated quote must not swallow a re-grant clause.
+        assert!(write(
+            "GRANT SELECT ON `mdb_src`.* TO 'abc WITH GRANT OPTION"
+        ));
+        assert!(write(
+            "GRANT SELECT ON `mdb_src`.* TO 'u'@'%\\'' WITH GRANT OPTION"
         ));
     }
 }

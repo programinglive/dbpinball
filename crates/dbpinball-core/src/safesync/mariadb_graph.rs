@@ -651,6 +651,46 @@ mod tests {
     }
 
     #[test]
+    fn schema_hash_detects_a_narrower_decimal() {
+        let column = |precision: u32, scale: u32| ColumnInfo {
+            name: "amount".into(),
+            type_name: "decimal".into(),
+            nullable: false,
+            is_primary_key: false,
+            is_generated: false,
+            is_identity: false,
+            identity_always: false,
+            generated_expression: None,
+            max_len: None,
+            numeric_precision: Some(precision),
+            numeric_scale: Some(scale),
+        };
+        let wide = vec![column(12, 2)];
+        let narrow = vec![column(10, 2)];
+        let rescaled = vec![column(12, 4)];
+
+        let base =
+            compute_mariadb_schema_hash(&q("app.orders"), &wide, &["id".into()], &["id".into()]);
+        let narrower =
+            compute_mariadb_schema_hash(&q("app.orders"), &narrow, &["id".into()], &["id".into()]);
+        let rescaled_hash = compute_mariadb_schema_hash(
+            &q("app.orders"),
+            &rescaled,
+            &["id".into()],
+            &["id".into()],
+        );
+
+        assert_ne!(
+            base, narrower,
+            "a narrower destination decimal must be visible as drift"
+        );
+        assert_ne!(
+            base, rescaled_hash,
+            "a different scale must be visible as drift"
+        );
+    }
+
+    #[test]
     fn detect_mariadb_cycles_refuses_two_node_cycle_and_allows_dag() {
         let dag = vec![
             ForeignKeyEdge {
