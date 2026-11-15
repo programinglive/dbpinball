@@ -47,6 +47,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -172,7 +178,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dbpinball-windows-x64
-          path: artifacts/release/**
+          # Upload only the files this release produced, not everything under
+          # artifacts/release: a stale file from another run must never ship.
+          path: |
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_x64-setup.exe
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball-cli-${{ env.RELEASE_VERSION }}-x64.zip
+            artifacts/release/v${{ env.RELEASE_VERSION }}/SHA256SUMS.txt
+            artifacts/release/v${{ env.RELEASE_VERSION }}/provenance.json
           if-no-files-found: error
 
   linux:
@@ -181,6 +193,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies for Tauri
         run: |
@@ -229,6 +247,9 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           out="artifacts/release/v$version"
+          # Start from an empty directory so a file from an earlier run cannot
+          # travel with this release.
+          rm -rf "$out"
           mkdir -p "$out"
           tar -C target/cli-dist/release -czf "$out/dbpinball-cli-$version-x64-linux.tar.gz" dbpinball
 
@@ -268,5 +289,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dbpinball-linux-x64
-          path: artifacts/release/**
+          # Upload only the files this release produced, not everything under
+          # artifacts/release: a stale file from another run must never ship.
+          path: |
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball-cli-${{ env.RELEASE_VERSION }}-x64-linux.tar.gz
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_amd64.deb
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_amd64.AppImage
+            artifacts/release/v${{ env.RELEASE_VERSION }}/SHA256SUMS.txt
+            artifacts/release/v${{ env.RELEASE_VERSION }}/provenance.json
           if-no-files-found: error
