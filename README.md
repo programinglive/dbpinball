@@ -173,9 +173,10 @@ operational improvement.
   current UI**, and the CLI has no backup command. Do not rely on them.
 - The internal dumper fallback (used when `mysqldump`/`pg_dump` is missing)
   creates an empty file and reports success.
-- The fallback dumpers interpolate the password into a connection URL, so a
-  password containing `@`, `:`, `/`, `?` or `#` can produce a malformed URL, and
-  a database error may echo it.
+- The desktop adapter builds connection URLs by string interpolation on the
+  query, restore, copy and fallback-dump paths, so a password containing `@`,
+  `:`, `/`, `?` or `#` can produce a malformed URL, and a database error may echo
+  it. The Core Safe Sync path is not affected.
 - The `useSsl` flag is stored but not applied to connections.
 - `deterministic_phone`, `date_shift`, `amount_jitter` and `fixed` are declared
   in the masking policy schema but not implemented, and are refused.

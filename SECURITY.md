@@ -104,12 +104,13 @@ These are confirmed behaviours, documented so users can make informed decisions:
 
 1. **The internal dumper fallback is incomplete.** When `mysqldump` or `pg_dump`
    is unavailable, the fallback creates an empty file and reports success.
-2. **Passwords are interpolated into connection URLs.** The fallback dumpers
-   build `postgresql://user:password@host/db` and `mysql://user:password@host/db`
-   by string formatting. A password containing `@`, `:`, `/`, `?` or `#` can
-   produce a malformed URL, and a database error message may echo the URL. The
-   affected paths are the internal dumpers; the Core connection path uses
-   separate connect options.
+2. **Passwords are interpolated into connection URLs.** The desktop adapter builds
+   `postgresql://user:password@host/db` and `mysql://user:password@host/db` by
+   string formatting on the query, restore and copy paths and in the fallback
+   dumpers. A password containing `@`, `:`, `/`, `?` or `#` can produce a
+   malformed URL, and a database error message may echo the URL. The Core Safe
+   Sync path builds its connections from separate connect options and is not
+   affected.
 3. **The `useSsl` flag is stored but not applied** to connections.
 4. **Backup, restore and copy are not routed in the UI**, and the CLI has no
    backup command. Do not rely on them.
