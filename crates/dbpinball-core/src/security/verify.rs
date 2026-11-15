@@ -140,7 +140,6 @@ async fn verify_mysql(
                 COALESCE(@@hostname, ''), \
                 @@port, \
                 VERSION(), \
-                COALESCE(@@server_uuid, ''), \
                 @@read_only",
     )
     .fetch_one(&pool)
@@ -156,19 +155,71 @@ async fn verify_mysql(
     let database_name: String = row.try_get(0).unwrap_or_default();
     let current_user: String = row.try_get(1).unwrap_or_default();
     let hostname: String = row.try_get(2).unwrap_or_default();
-    let port: i32 = row.try_get(3).unwrap_or(0);
+    let port: u32 = row
+        .try_get::<u32, _>(3)
+        .or_else(|_| row.try_get::<u64, _>(3).map(|v| v as u32))
+        .or_else(|_| row.try_get::<i64, _>(3).map(|v| v.max(0) as u32))
+        .unwrap_or(0);
     let version: String = row.try_get(4).unwrap_or_default();
-    let server_uuid: String = row.try_get(5).unwrap_or_default();
-    let read_only: i8 = row.try_get(6).unwrap_or(0);
+    let read_only: i8 = row.try_get(5).unwrap_or(0);
 
-    let server = ServerIdentity {
-        engine: Some("mysql".into()),
-        version: Some(version),
-        server_uuid: if server_uuid.trim().is_empty() {
+    let is_mariadb = is_mariadb_version(&version);
+    let (engine_label, server_uuid) = if is_mariadb {
+        let mdb_row = sqlx::query(
+            "SELECT COALESCE(CAST(@@datadir AS CHAR CHARACTER SET utf8mb4), ''), \
+                    COALESCE(CAST(@@server_id AS CHAR), '')",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|error| {
+            CoreError::redacted(
+                ErrorCode::Connection,
+                format!("destination identity query failed: {error}"),
+            )
+        })?;
+        let datadir: String = mdb_row
+            .try_get::<String, _>(0)
+            .or_else(|_| {
+                mdb_row
+                    .try_get::<Vec<u8>, _>(0)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .unwrap_or_default();
+        let server_id: String = mdb_row
+            .try_get::<String, _>(1)
+            .or_else(|_| {
+                mdb_row
+                    .try_get::<Vec<u8>, _>(1)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .unwrap_or_default();
+        (
+            "mariadb",
+            mariadb_server_fingerprint(&hostname, port, &datadir, &server_id),
+        )
+    } else {
+        let mysql_row = sqlx::query("SELECT COALESCE(@@server_uuid, '')")
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| {
+                CoreError::redacted(
+                    ErrorCode::Connection,
+                    format!("destination identity query failed: {error}"),
+                )
+            })?;
+        let raw_uuid: String = mysql_row.try_get(0).unwrap_or_default();
+        let uuid = if raw_uuid.trim().is_empty() {
             None
         } else {
-            Some(server_uuid)
-        },
+            Some(raw_uuid)
+        };
+        ("mysql", uuid)
+    };
+
+    let server = ServerIdentity {
+        engine: Some(engine_label.into()),
+        version: Some(version),
+        server_uuid,
         database: Some(database_name.clone()),
         database_id: Some(database_name),
         current_user: Some(current_user),
@@ -195,6 +246,47 @@ async fn verify_mysql(
         server,
         observed_at_ms: now_ms(),
     })
+}
+
+fn is_mariadb_version(version: &str) -> bool {
+    version.to_ascii_lowercase().contains("mariadb")
+}
+
+/// Build a collision-resistant server identity fingerprint for MariaDB, which
+/// does not expose MySQL's `@@server_uuid`. Fails closed (`None`) if any
+/// required server property is missing or ambiguous rather than falling back to
+/// `@@server_id` alone.
+fn mariadb_server_fingerprint(
+    hostname: &str,
+    port: u32,
+    datadir: &str,
+    server_id: &str,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let host = hostname.trim();
+    let dir = datadir.trim();
+    let sid = server_id.trim();
+    if host.is_empty() || dir.is_empty() || port == 0 {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"dbpinball/mariadb-server-identity/v1|");
+    hasher.update(host.as_bytes());
+    hasher.update(b"|");
+    hasher.update(port.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(dir.as_bytes());
+    hasher.update(b"|");
+    hasher.update(sid.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Some(format!("mariadb-fp:{hex}"))
 }
 
 #[cfg(test)]
@@ -237,5 +329,38 @@ mod tests {
         assert!(server
             .identity_key(DbEngine::Postgres, "127.0.0.1", 5432)
             .is_none());
+    }
+
+    #[test]
+    fn mariadb_version_detection_distinguishes_mariadb_from_mysql() {
+        assert!(is_mariadb_version("10.11.19-MariaDB-0+deb12u1-log"));
+        assert!(is_mariadb_version("11.4.2-mariadb"));
+        assert!(!is_mariadb_version("8.4.0"));
+        assert!(!is_mariadb_version("8.0.39-0ubuntu0.24.04.1"));
+    }
+
+    #[test]
+    fn mariadb_fingerprint_is_deterministic_sensitive_and_fails_closed() {
+        let fp1 = mariadb_server_fingerprint("bw-server-clean", 3306, "/var/lib/mysql/", "1")
+            .expect("valid MariaDB identity");
+        let fp2 = mariadb_server_fingerprint("bw-server-clean", 3306, "/var/lib/mysql/", "1")
+            .expect("deterministic");
+        assert_eq!(fp1, fp2);
+        assert!(fp1.starts_with("mariadb-fp:"));
+
+        let different_host =
+            mariadb_server_fingerprint("other-host", 3306, "/var/lib/mysql/", "1").unwrap();
+        let different_dir =
+            mariadb_server_fingerprint("bw-server-clean", 3306, "/var/lib/mysql2/", "1").unwrap();
+        let different_port =
+            mariadb_server_fingerprint("bw-server-clean", 3307, "/var/lib/mysql/", "1").unwrap();
+        assert_ne!(fp1, different_host);
+        assert_ne!(fp1, different_dir);
+        assert_ne!(fp1, different_port);
+
+        // Fail closed when required identity components are missing or invalid.
+        assert!(mariadb_server_fingerprint("", 3306, "/var/lib/mysql/", "1").is_none());
+        assert!(mariadb_server_fingerprint("bw-server-clean", 3306, "", "1").is_none());
+        assert!(mariadb_server_fingerprint("bw-server-clean", 0, "/var/lib/mysql/", "1").is_none());
     }
 }
