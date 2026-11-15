@@ -80,6 +80,16 @@ jobs:
       - name: Check version consistency
         run: node scripts/check-versions.cjs
 
+      # A dependency change must not silently invalidate the license bundle.
+      # Regenerate it and fail if the committed file is out of date.
+      - name: Check the third-party license bundle is current
+        run: |
+          node scripts/generate-license-bundle.cjs
+          if ! git diff --exit-code -- THIRD_PARTY_LICENSES.md; then
+            echo "THIRD_PARTY_LICENSES.md is out of date; commit the regenerated file." >&2
+            exit 1
+          fi
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

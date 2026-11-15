@@ -104,13 +104,19 @@ These are confirmed behaviours, documented so users can make informed decisions:
 
 1. **The internal dumper fallback is incomplete.** When `mysqldump` or `pg_dump`
    is unavailable, the fallback creates an empty file and reports success.
-2. **The `useSsl` flag is stored but not applied** to connections.
-3. **Backup, restore and copy are not routed in the UI**, and the CLI has no
+2. **Passwords are interpolated into connection URLs.** The fallback dumpers
+   build `postgresql://user:password@host/db` and `mysql://user:password@host/db`
+   by string formatting. A password containing `@`, `:`, `/`, `?` or `#` can
+   produce a malformed URL, and a database error message may echo the URL. The
+   affected paths are the internal dumpers; the Core connection path uses
+   separate connect options.
+3. **The `useSsl` flag is stored but not applied** to connections.
+4. **Backup, restore and copy are not routed in the UI**, and the CLI has no
    backup command. Do not rely on them.
-4. **Four masking strategies are declared but not implemented**
+5. **Four masking strategies are declared but not implemented**
    (`deterministic_phone`, `date_shift`, `amount_jitter`, `fixed`). A policy that
    selects one is refused.
-5. **Non-MariaDB MySQL is refused for Safe Sync.**
+6. **Non-MariaDB MySQL is refused for Safe Sync.**
 
 Do not point DBPinball at production data for anything other than a read-only
 inspection or a reviewed Safe Sync plan.

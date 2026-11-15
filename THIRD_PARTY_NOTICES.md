@@ -4,17 +4,21 @@ DBPinball is distributed under the MIT License (see [`LICENSE`](LICENSE)). It
 includes third-party software whose licenses require attribution when the
 compiled application is distributed.
 
-This file lists **direct** dependencies. The full transitive set is larger (the
-Rust workspace resolves several hundred crates, and the frontend has its own
-tree). Before a release, generate a complete notice bundle with a tool such as
-`cargo about` or `cargo-deny` and ship it with the artifacts.
+This file summarizes the direct dependencies. The authoritative record is
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md), which is generated from the
+resolved dependency graph by `scripts/generate-license-bundle.cjs` and contains
+every third-party crate and package with its license and the full license texts.
+
+Both files, together with `LICENSE`, are shipped inside the CLI archive, the
+Linux tarball and the desktop installer.
 
 ## Status of published releases
 
-- **v0.1.7** was published without a bundled notice file. The notices below and
-  the repository's `LICENSE` are the attribution record for that release.
-- The packaging scripts now include this file in the CLI archive and the desktop
-  installer, so later releases carry it directly.
+- **v0.1.7** was published before the bundle existed, without a bundled notice
+  file. The repository's `LICENSE`, this file and the source tree are the
+  attribution record for that release. It is not retroactively replaced.
+- Releases built after this change carry `LICENSE`, `THIRD_PARTY_NOTICES.md` and
+  `THIRD_PARTY_LICENSES.md` inside the artifacts.
 
 ## Rust runtime dependencies
 
@@ -41,8 +45,9 @@ tree). Before a release, generate a complete notice bundle with a tool such as
 | `unicode-normalization` | MIT OR Apache-2.0 |
 | `clap` | MIT OR Apache-2.0 |
 | `rpassword` | Apache-2.0 |
-| `tempfile` | MIT OR Apache-2.0 |
-| `url` | MIT OR Apache-2.0 |
+
+Development and test only, not shipped in a binary: `tempfile` (MIT OR
+Apache-2.0), `url` (MIT OR Apache-2.0).
 
 Build-time only: `tauri-build` (Apache-2.0 OR MIT), `winresource` (MIT).
 

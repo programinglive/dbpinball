@@ -101,6 +101,7 @@ try {
         # distribution, so the archive carries them.
         Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
         Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') -Destination $stage
+        Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_LICENSES.md') -Destination $stage
 
         $zip = Join-Path $outDir "dbpinball-cli-$Version-$arch.zip"
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

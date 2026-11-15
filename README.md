@@ -33,14 +33,15 @@ standalone `dbpinball` command-line interface over the same Rust core.
 
 ## Supported engines
 
-| Engine | Versions | Inspection | Safe Sync |
+| Engine | Versions tested | Inspection | Safe Sync |
 | --- | --- | --- | --- |
 | PostgreSQL | 11+ | Yes | Yes |
-| MariaDB | 10.6+ | Yes | Yes, on 10.11+ InnoDB tables |
+| MariaDB | 10.11 | Yes | Yes, on InnoDB base tables |
 | MySQL (non-MariaDB) | 5.7+, 8.0+ | Yes | **Refused** |
 
-Safe Sync requires MariaDB specifically. A non-MariaDB MySQL server is refused
-rather than treated as compatible.
+Safe Sync requires MariaDB specifically: a server that identifies itself as
+MySQL is refused rather than treated as compatible. MariaDB 10.11 is the version
+the integration suite runs against; older MariaDB releases are not tested.
 
 ## What it does
 
@@ -172,6 +173,9 @@ operational improvement.
   current UI**, and the CLI has no backup command. Do not rely on them.
 - The internal dumper fallback (used when `mysqldump`/`pg_dump` is missing)
   creates an empty file and reports success.
+- The fallback dumpers interpolate the password into a connection URL, so a
+  password containing `@`, `:`, `/`, `?` or `#` can produce a malformed URL, and
+  a database error may echo it.
 - The `useSsl` flag is stored but not applied to connections.
 - `deterministic_phone`, `date_shift`, `amount_jitter` and `fixed` are declared
   in the masking policy schema but not implemented, and are refused.
