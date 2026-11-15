@@ -461,6 +461,67 @@ jobs:
           cargo test -p dbpinball-cli --features integration --test safesync_cli_integration -- --nocapture | tee /tmp/safesync-cli.log
           ! grep -q "test result: ok. 0 passed" /tmp/safesync-cli.log
 
+  mariadb-graph-integration:
+    name: MariaDB graph integration (two instances)
+    runs-on: ubuntu-latest
+    services:
+      source:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: mdb_root
+          MARIADB_DATABASE: mdb_src
+          MARIADB_USER: mdb_user
+          MARIADB_PASSWORD: mdb_pass
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      destination:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: mdb_root
+          MARIADB_DATABASE: mdb_dst
+          MARIADB_USER: mdb_user
+          MARIADB_PASSWORD: mdb_pass
+        ports:
+          - 33307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create unprivileged MariaDB test user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
+          mariadb -h 127.0.0.1 -P 33306 -u root -pmdb_root -e "CREATE USER 'mdb_nopriv'@'%' IDENTIFIED BY 'mdb_nopriv'; GRANT USAGE ON *.* TO 'mdb_nopriv'@'%';"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Run MariaDB 10.11 graph integration suite
+        env:
+          DBPINBALL_TEST_MARIADB_URL: mysql://mdb_user:mdb_pass@127.0.0.1:33306/mdb_src
+          DBPINBALL_TEST_MARIADB_DST_URL: mysql://mdb_user:mdb_pass@127.0.0.1:33307/mdb_dst
+          DBPINBALL_TEST_MARIADB_UNPRIV_URL: mysql://mdb_nopriv:mdb_nopriv@127.0.0.1:33306/information_schema
+        run: |
+          set -euo pipefail
+          cargo test -p dbpinball-core --features integration --test mariadb_graph_integration -- --nocapture | tee /tmp/mariadb-graph.log
+          ! grep -q "test result: ok. 0 passed" /tmp/mariadb-graph.log
+          ! grep -q "skipped:" /tmp/mariadb-graph.log
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
