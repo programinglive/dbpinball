@@ -683,7 +683,7 @@ async fn t03_adversarial_plan_tamper_expiry_drift_triggers_and_bounds() {
     tight_spec.selection.roots[0].filter = vec![FilterPredicate {
         column: "tenant_id".into(),
         op: FilterOp::Eq,
-        value: FilterValue::Int(1),
+        value: FilterValue::Text("t1".into()),
     }];
     tight_spec.limits.max_rows_per_table = 1;
     let err = service::plan(
