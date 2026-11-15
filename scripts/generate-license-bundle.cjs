@@ -219,6 +219,9 @@ function copyrightNotices(installPath) {
       if (!/^copyright\b/i.test(trimmed) && !/^\(c\)\s/i.test(trimmed)) {
         continue;
       }
+      if (/^copyright(?:\s+notices?)?[:.\s]*$/i.test(trimmed)) {
+        continue;
+      }
       if (/liable|warrant|damages|holders be/i.test(trimmed)) {
         continue;
       }
@@ -408,13 +411,46 @@ const target = path.join(root, "THIRD_PARTY_LICENSES.md");
  * bundle, every package's required license text is present, and no package was
  * left unresolved.
  */
+function extractTopSection(markdown, heading) {
+  const lines = markdown.split("\n");
+  const marker = `## ${heading}`;
+  const start = lines.findIndex((line) => line === marker);
+  if (start === -1) {
+    return "";
+  }
+  const rest = lines.slice(start + 1);
+  const next = rest.findIndex((line) => line.startsWith("## "));
+  return (next === -1 ? rest : rest.slice(0, next)).join("\n");
+}
+
+function extractLicenseSubsections(licenseTextsSection) {
+  const sections = new Map();
+  let currentId = null;
+  let buffer = [];
+  for (const line of licenseTextsSection.split("\n")) {
+    if (line.startsWith("### ")) {
+      if (currentId !== null) {
+        sections.set(currentId, buffer.join("\n"));
+      }
+      currentId = line.slice(4).trim();
+      buffer = [];
+    } else if (currentId !== null) {
+      buffer.push(line);
+    }
+  }
+  if (currentId !== null) {
+    sections.set(currentId, buffer.join("\n"));
+  }
+  return sections;
+}
+
 if (process.argv.includes("--verify")) {
   if (!fs.existsSync(target)) {
     console.error("THIRD_PARTY_LICENSES.md is missing");
     process.exit(1);
   }
-  const committed = fs.readFileSync(target, "utf8");
-  const committedLines = new Set(committed.split(/\r?\n/));
+  const committed = fs.readFileSync(target, "utf8").replace(/\r\n/g, "\n");
+  const committedLines = new Set(committed.split("\n"));
   const failures = [];
 
   for (const problem of problems) {
@@ -434,29 +470,46 @@ if (process.argv.includes("--verify")) {
     }
   }
 
+  const licenseTextsSection = extractTopSection(committed, "License texts");
+  const licenseSections = extractLicenseSubsections(licenseTextsSection);
+
   for (const license of needed) {
-    if (!committedLines.has(`### ${license}`)) {
+    if (!licenseSections.has(license)) {
       failures.push(`license text for ${license} is missing from the bundle`);
+      continue;
     }
     const textFile = path.join(textDir, `${license}.txt`);
     if (!fs.existsSync(textFile)) {
       failures.push(`canonical text file for ${license} is missing`);
       continue;
     }
-    // A heading with no body is not a license text. Require the committed
-    // section to contain the canonical text, not just its title.
-    const canonical = fs.readFileSync(textFile, "utf8").trim();
-    const probe = canonical.split(/\r?\n/).find((line) => line.trim().length > 40);
-    if (!probe || !committed.includes(probe.trim())) {
-      failures.push(`license text for ${license} is present as a heading but its body is missing`);
+    // Verify the full canonical text appears inside that specific license's
+    // section so a truncated body or a shared line in another section cannot
+    // satisfy the check.
+    const canonical = fs.readFileSync(textFile, "utf8").replace(/\r\n/g, "\n").trim();
+    const sectionBody = licenseSections.get(license) || "";
+    if (!canonical || !sectionBody.includes(canonical)) {
+      failures.push(
+        `license text for ${license} is present as a heading but its body is missing or incomplete`,
+      );
     }
   }
 
-  // At least one real copyright notice must survive extraction, otherwise the
-  // MIT and 0BSD placeholders are left unfilled.
-  const noticeSection = committed.split("## Copyright notices")[1] || "";
-  const noticeRows = noticeSection.split(/\r?\n/).filter((line) => line.startsWith("| `"));
-  if (noticeRows.length === 0) {
+  // At least one real copyright notice must survive extraction inside the
+  // Copyright notices section, with a non-empty notice cell.
+  const noticeSection = extractTopSection(committed, "Copyright notices");
+  const validNoticeRows = noticeSection.split("\n").filter((line) => {
+    if (!line.startsWith("| `")) {
+      return false;
+    }
+    const cells = line
+      .replace(/\\\|/g, " ")
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    return cells.length >= 3 && /(?:copyright|\(c\))\s+\S+/i.test(cells[2]);
+  });
+  if (validNoticeRows.length === 0) {
     failures.push("no per-package copyright notices were recorded");
   }
 
