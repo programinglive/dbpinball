@@ -315,10 +315,14 @@ async fn insert_table(
                 "missing_column_type",
             )
         })?;
-        let cast = mariadb_cast_for(type_name)?;
+        let cast = mariadb_cast_for(
+            type_name,
+            table.precisions.get(index).copied().flatten(),
+            table.scales.get(index).copied().flatten(),
+        )?;
         column_indices.push(index);
         columns.push(q_mdb(column));
-        placeholders.push(cast.to_string());
+        placeholders.push(cast);
         col_types.push(type_name.to_ascii_lowercase());
     }
 
@@ -359,14 +363,40 @@ fn normalize_mariadb_value(type_name: &str, value: &str) -> String {
     }
 }
 
-fn mariadb_cast_for(type_name: &str) -> Result<&'static str, CoreError> {
+fn mariadb_cast_for(
+    type_name: &str,
+    precision: Option<u32>,
+    scale: Option<u32>,
+) -> Result<String, CoreError> {
     match type_name.to_ascii_lowercase().as_str() {
-        "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "uuid" => Ok("?"),
+        "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "uuid" => {
+            Ok("?".to_string())
+        }
         "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "boolean"
-        | "bool" => Ok("CAST(? AS SIGNED)"),
-        "decimal" | "numeric" => Ok("CAST(? AS DECIMAL(65, 30))"),
-        "date" => Ok("CAST(? AS DATE)"),
-        "datetime" | "timestamp" => Ok("CAST(? AS DATETIME(6))"),
+        | "bool" => Ok("CAST(? AS SIGNED)".to_string()),
+        "decimal" | "numeric" => {
+            // Bind through the column's own declared precision and scale, so a
+            // value that fits the column fits the cast exactly. A fixed
+            // DECIMAL(65,30) would silently truncate anything wider than 35
+            // integer digits.
+            let (Some(precision), Some(scale)) = (precision, scale) else {
+                return Err(CoreError::with_detail(
+                    ErrorCode::Unsupported,
+                    "an exact numeric column has no declared precision, so it cannot be bound exactly",
+                    "decimal_precision_unknown",
+                ));
+            };
+            if precision == 0 || precision > 65 || scale > precision {
+                return Err(CoreError::with_detail(
+                    ErrorCode::Unsupported,
+                    format!("DECIMAL({precision},{scale}) is not a valid MariaDB precision"),
+                    "decimal_precision_invalid",
+                ));
+            }
+            Ok(format!("CAST(? AS DECIMAL({precision},{scale}))"))
+        }
+        "date" => Ok("CAST(? AS DATE)".to_string()),
+        "datetime" | "timestamp" => Ok("CAST(? AS DATETIME(6))".to_string()),
         other => Err(CoreError::with_detail(
             ErrorCode::Unsupported,
             format!("MariaDB column type '{other}' is not supported in Safe Sync"),

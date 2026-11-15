@@ -19,7 +19,7 @@ use dbpinball_core::domain::connection::{DbConnection, DbEngine, TargetClass};
 use dbpinball_core::domain::error::{CoreError, ErrorCode};
 use dbpinball_core::ports::credentials::{CredentialProvider, Secret};
 use dbpinball_core::safesync::import_mariadb::destination_lock_name;
-use dbpinball_core::safesync::key::{InMemoryMaskKeyStore, MaskKey};
+use dbpinball_core::safesync::key::{InMemoryMaskKeyStore, MaskKey, MaskKeyStore};
 use dbpinball_core::safesync::service::{self, ExecuteRequest};
 use dbpinball_core::safesync::spec::{
     ExecutionOptions, FilterOp, FilterPredicate, FilterValue, Limits, MaskingSelection,
@@ -167,6 +167,8 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
 }
 
 fn write_mariadb_policy(dir: &std::path::Path, db: &str) -> String {
+    // The policy file must live inside an authorized policy root.
+    std::env::set_var("DBPINBALL_POLICY_DIR", dir);
     let policy_path = dir.join("mariadb-masking-policy.yaml");
     let yaml = format!(
         r#"name: mariadb-test
@@ -966,4 +968,197 @@ async fn t04_adversarial_replace_rollback_and_get_lock_concurrency() {
         .bind(&dst_lock)
         .fetch_optional(&mut *dst_holder)
         .await;
+}
+
+#[tokio::test]
+async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy() {
+    let _guard = test_lock().lock().await;
+    let Some(src_admin) = connect_env(
+        "DBPINBALL_TEST_MARIADB_URL",
+        "src-admin",
+        TargetClass::Production,
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(src_ro) = connect_env(
+        "DBPINBALL_TEST_MARIADB_RO_URL",
+        "src-ro",
+        TargetClass::Production,
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(dst) = connect_env(
+        "DBPINBALL_TEST_MARIADB_DST_URL",
+        "dst-local",
+        TargetClass::Local,
+    )
+    .await
+    else {
+        return;
+    };
+
+    reset_pair_schema(&src_admin.pool, &dst.pool).await;
+
+    let creds = InMemoryCredentialProvider::default();
+    creds.insert(&src_ro.profile.id, &src_ro.password);
+    creds.insert(&dst.profile.id, &dst.password);
+
+    let dir = tempdir().unwrap();
+    let enrollments = enroll_dst(dir.path(), &dst, &creds).await;
+    let keys = key_store();
+    let now = now_ms();
+
+    let spec = base_spec(
+        dir.path(),
+        &src_ro.profile.id,
+        &dst.profile.id,
+        &src_ro.profile.database,
+    );
+    let plan = service::plan(
+        &spec,
+        &src_ro.profile,
+        &dst.profile,
+        &creds,
+        &enrollments,
+        &keys,
+        now,
+        true,
+        false,
+    )
+    .await
+    .expect("plan");
+
+    // 1. A destination primary-key collision must roll the whole import back.
+    sqlx::raw_sql(
+        "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) \
+         VALUES ('t1', 20, 'collision@dst.test', NULL);",
+    )
+    .execute(&dst.pool)
+    .await
+    .unwrap();
+
+    let err = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &spec,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &src_ro.profile,
+            destination: &dst.profile,
+        },
+        &creds,
+        &enrollments,
+        &keys,
+        None,
+        now,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("destination_import_failed"));
+
+    // Nothing from the failed run may survive: no order rows, and the
+    // pre-existing customer is untouched.
+    let orders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mdb_orders")
+        .fetch_one(&dst.pool)
+        .await
+        .unwrap();
+    assert_eq!(orders, 0, "a failed import must not leave partial rows");
+    let email: String =
+        sqlx::query_scalar("SELECT email FROM mdb_customers WHERE customer_id = 20")
+            .fetch_one(&dst.pool)
+            .await
+            .unwrap();
+    assert_eq!(email, "collision@dst.test");
+
+    // 2. A plan bound to another destination identity is refused.
+    let mut foreign = plan.clone();
+    foreign.destination.identity_key = Some("mysql://other:3306/other#mariadb-fp:deadbeef".into());
+    let masker = {
+        let policy = dbpinball_core::safesync::resolve_policy(&spec.masking.policy).unwrap();
+        dbpinball_core::safesync::Masker::new(policy, keys.load().unwrap()).unwrap()
+    };
+    foreign.seal(&masker);
+    let err = service::execute(
+        ExecuteRequest {
+            plan: &foreign,
+            spec: &spec,
+            acknowledgement: &foreign.plan_fingerprint,
+            replace: false,
+            source: &src_ro.profile,
+            destination: &dst.profile,
+        },
+        &creds,
+        &enrollments,
+        &keys,
+        None,
+        now,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("destination_changed"));
+
+    // 3. A non-empty destination is refused for a fresh plan.
+    sqlx::raw_sql("DELETE FROM mdb_customers WHERE customer_id = 20;")
+        .execute(&dst.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) \
+         VALUES ('t1', 77, 'existing@dst.test', NULL);",
+    )
+    .execute(&dst.pool)
+    .await
+    .unwrap();
+    let err = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &spec,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &src_ro.profile,
+            destination: &dst.profile,
+        },
+        &creds,
+        &enrollments,
+        &keys,
+        None,
+        now,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("destination_not_empty"));
+
+    // 4. A masking strategy that is not implemented is refused at plan time.
+    let unimplemented = dir.path().join("unimplemented-policy.yaml");
+    std::fs::write(
+        &unimplemented,
+        format!(
+            "name: unimplemented\nversion: 1\nrules:\n  - schema: {db}\n    table: mdb_customers\n    column: tenant_id\n    strategy: keep\n  - schema: {db}\n    table: mdb_customers\n    column: customer_id\n    strategy: keep\n  - schema: {db}\n    table: mdb_customers\n    column: email\n    strategy: date_shift\n  - schema: {db}\n    table: mdb_customers\n    column: note\n    strategy: redact\n  - schema: {db}\n    table: mdb_orders\n    column: id\n    strategy: keep\n  - schema: {db}\n    table: mdb_orders\n    column: tenant_id\n    strategy: keep\n  - schema: {db}\n    table: mdb_orders\n    column: customer_id\n    strategy: keep\n  - schema: {db}\n    table: mdb_orders\n    column: amount\n    strategy: keep\n  - schema: {db}\n    table: mdb_orders\n    column: ordered_on\n    strategy: keep\n  - schema: {db}\n    table: mdb_orders\n    column: created_at\n    strategy: keep\n",
+            db = src_ro.profile.database
+        ),
+    )
+    .unwrap();
+    let mut bad_spec = spec.clone();
+    bad_spec.masking.policy = unimplemented.to_string_lossy().into_owned();
+    let err = service::plan(
+        &bad_spec,
+        &src_ro.profile,
+        &dst.profile,
+        &creds,
+        &enrollments,
+        &keys,
+        now,
+        true,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("unsupported_strategy"));
 }

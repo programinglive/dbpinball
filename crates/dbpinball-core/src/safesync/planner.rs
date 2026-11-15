@@ -13,7 +13,9 @@ use sqlx::Row;
 
 use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
-use crate::safesync::graph::{discover_parents, ForeignKeyEdge, SchemaGraph, TableInfo};
+use crate::safesync::graph::{
+    discover_parents, ColumnInfo, ForeignKeyEdge, SchemaGraph, TableInfo,
+};
 use crate::safesync::mariadb_graph::discover_mariadb_parents_conn;
 use crate::safesync::mask::{ColumnRule, MaskInput, MaskStrategy, MaskedValue, Masker};
 use crate::safesync::session::BoundSession;
@@ -50,6 +52,10 @@ pub struct TableRows {
     pub columns: Vec<String>,
     /// Base type names parallel to `columns`, from the catalogue.
     pub types: Vec<String>,
+    /// Declared numeric precision parallel to `columns`, when reported.
+    pub precisions: Vec<Option<u32>>,
+    /// Declared numeric scale parallel to `columns`, when reported.
+    pub scales: Vec<Option<u32>>,
     /// The columns that identify a row, in order.
     pub row_identity: Vec<String>,
     pub schema_hash: String,
@@ -146,6 +152,7 @@ pub async fn build(
     // metadata path agree on what a valid policy is.
     for info in &graph.tables {
         masker.coverage(&info.schema, &info.table, &info.column_shapes(&graph))?;
+        assert_decimal_precision_known(info, masker, engine)?;
     }
 
     if !effective_read {
@@ -394,6 +401,8 @@ fn metadata_only(
             table: info.name(),
             columns: info.columns.iter().map(|c| c.name.clone()).collect(),
             types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+            precisions: info.columns.iter().map(|c| c.numeric_precision).collect(),
+            scales: info.columns.iter().map(|c| c.numeric_scale).collect(),
             row_identity: info.row_identity.clone(),
             schema_hash: info.schema_hash.clone(),
             rls_active: info.rls_active,
@@ -948,6 +957,7 @@ fn mask_table(
             if let Some(text) = masked.as_text() {
                 total_bytes = total_bytes.saturating_add(text.len() as u64);
             }
+            let masked = validate_decimal_exactness(column, masked)?;
             values.push(masked);
         }
 
@@ -978,6 +988,8 @@ fn mask_table(
         table: info.name(),
         columns: info.columns.iter().map(|c| c.name.clone()).collect(),
         types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+        precisions: info.columns.iter().map(|c| c.numeric_precision).collect(),
+        scales: info.columns.iter().map(|c| c.numeric_scale).collect(),
         row_identity: info.row_identity.clone(),
         schema_hash: info.schema_hash.clone(),
         rls_active: info.rls_active,
@@ -987,6 +999,124 @@ fn mask_table(
         rows,
         total_bytes,
     })
+}
+
+/// A MariaDB exact numeric is bound through a cast built from its declared
+/// precision and scale. Without that pair the cast cannot be exact, so a keep
+/// rule on such a column is refused at plan time rather than at import time.
+fn assert_decimal_precision_known(
+    info: &TableInfo,
+    masker: &Masker,
+    engine: DbEngine,
+) -> Result<(), CoreError> {
+    if engine != DbEngine::Mysql {
+        return Ok(());
+    }
+    for column in &info.columns {
+        let type_name = column.type_name.to_ascii_lowercase();
+        if !crate::safesync::mask::is_exact_numeric_type(&type_name) {
+            continue;
+        }
+        let Some(rule) = masker
+            .policy()
+            .rule_for(&info.schema, &info.table, &column.name)
+        else {
+            continue;
+        };
+        if rule.strategy != crate::safesync::mask::MaskStrategy::Keep {
+            continue;
+        }
+        if column.numeric_precision.is_none() || column.numeric_scale.is_none() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Unsupported,
+                format!(
+                    "column {} is an exact numeric without a declared precision, so it cannot be kept exactly",
+                    column.name
+                ),
+                "decimal_precision_unknown",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A kept exact numeric must fit the declared precision and scale exactly.
+///
+/// The destination bind uses a cast built from the same pair, so a value that
+/// fits here cannot be truncated there. A value that does not fit is refused
+/// instead of being rounded or truncated.
+fn validate_decimal_exactness(
+    column: &ColumnInfo,
+    value: MaskedValue,
+) -> Result<MaskedValue, CoreError> {
+    let type_name = column.type_name.to_ascii_lowercase();
+    if !crate::safesync::mask::is_exact_numeric_type(&type_name) {
+        return Ok(value);
+    }
+    let Some(text) = value.as_text() else {
+        return Ok(value);
+    };
+    let (Some(precision), Some(scale)) = (column.numeric_precision, column.numeric_scale) else {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} is an exact numeric without a declared precision, so it cannot be kept exactly",
+                column.name
+            ),
+            "decimal_precision_unknown",
+        ));
+    };
+    let (integer_digits, fraction_digits) = decimal_digit_counts(text).ok_or_else(|| {
+        CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} holds a value that is not a plain decimal literal",
+                column.name
+            ),
+            "decimal_value_malformed",
+        )
+    })?;
+    let allowed_integer = precision.saturating_sub(scale);
+    if integer_digits > allowed_integer || fraction_digits > scale {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} holds a value that does not fit DECIMAL({precision},{scale})",
+                column.name
+            ),
+            "decimal_value_out_of_range",
+        ));
+    }
+    Ok(value)
+}
+
+/// Count the significant integer digits and the fraction digits of a plain
+/// decimal literal. Returns `None` for anything that is not
+/// `[+-]?digits[.digits]`, so an exponent or a locale form is refused rather
+/// than guessed at.
+fn decimal_digit_counts(text: &str) -> Option<(u32, u32)> {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if body.is_empty() {
+        return None;
+    }
+    let (integer, fraction) = match body.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (body, ""),
+    };
+    if integer.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !integer.chars().all(|c| c.is_ascii_digit()) || !fraction.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let significant = integer.trim_start_matches('0');
+    let integer_digits = if significant.is_empty() {
+        0
+    } else {
+        significant.len() as u32
+    };
+    Some((integer_digits, fraction.len() as u32))
 }
 
 fn identity_string(info: &TableInfo, raw: &RawRow) -> String {
@@ -1449,6 +1579,8 @@ mod tests {
             identity_always: false,
             generated_expression: None,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         };
         let info = TableInfo {
             schema: "public".into(),
@@ -1522,6 +1654,8 @@ mod tests {
                     identity_always: false,
                     generated_expression: None,
                     max_len: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
                 })
                 .collect(),
             primary_key: vec!["c0".into()],
@@ -1543,5 +1677,69 @@ mod tests {
         let err = build_filter(&info, &root).unwrap_err();
         assert_eq!(err.code, ErrorCode::Usage);
         assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
+    }
+
+    fn decimal_column(precision: Option<u32>, scale: Option<u32>) -> ColumnInfo {
+        ColumnInfo {
+            name: "amount".into(),
+            type_name: "decimal".into(),
+            nullable: false,
+            is_primary_key: false,
+            is_generated: false,
+            is_identity: false,
+            identity_always: false,
+            generated_expression: None,
+            max_len: None,
+            numeric_precision: precision,
+            numeric_scale: scale,
+        }
+    }
+
+    #[test]
+    fn decimal_digit_counts_are_exact() {
+        assert_eq!(decimal_digit_counts("999.95"), Some((3, 2)));
+        assert_eq!(decimal_digit_counts("-0.5"), Some((0, 1)));
+        assert_eq!(decimal_digit_counts("0"), Some((0, 0)));
+        assert_eq!(decimal_digit_counts("000123"), Some((3, 0)));
+        assert_eq!(decimal_digit_counts("1e5"), None);
+        assert_eq!(decimal_digit_counts("1,5"), None);
+        assert_eq!(decimal_digit_counts(""), None);
+        assert_eq!(decimal_digit_counts("."), None);
+    }
+
+    #[test]
+    fn a_decimal_value_that_fits_is_kept() {
+        let column = decimal_column(Some(12), Some(2));
+        let value =
+            validate_decimal_exactness(&column, MaskedValue::Text("999.95".into())).unwrap();
+        assert_eq!(value, MaskedValue::Text("999.95".into()));
+    }
+
+    #[test]
+    fn a_decimal_value_that_does_not_fit_is_refused() {
+        let column = decimal_column(Some(5), Some(2));
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1234.56".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_out_of_range"));
+
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1.234".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_out_of_range"));
+    }
+
+    #[test]
+    fn a_decimal_without_a_declared_precision_is_refused() {
+        let column = decimal_column(None, None);
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1.00".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_precision_unknown"));
+    }
+
+    #[test]
+    fn a_malformed_decimal_literal_is_refused() {
+        let column = decimal_column(Some(12), Some(2));
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1e5".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_malformed"));
     }
 }

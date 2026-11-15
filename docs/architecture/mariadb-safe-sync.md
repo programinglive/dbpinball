@@ -64,7 +64,7 @@ a type never grants a keep by itself.
 |---|---|---|
 | `keep` | text, `char`/`varchar`, `uuid` | Kept only when the rule names the column. |
 | `keep` | integer types, only when `is_identity` or `is_identity_reference` | An ordinary integer (`tenant_id`, salary, birth year) is refused with `integer_keep_requires_identity`. |
-| `keep` | `decimal`/`numeric` | Preserved through the literal text form and bound back with an explicit cast, so no floating-point round trip can change the value. |
+| `keep` | `decimal`/`numeric` | Preserved through the literal text form and bound back with `CAST(? AS DECIMAL(p,s))` built from the declared precision and scale, so no floating-point round trip can change the value and nothing wider than the column can be truncated. |
 | `keep` | `date`, `datetime`, `timestamp` (and `timestamp with/without time zone`) | Preserved through the literal text form with an explicit cast, so microseconds and the UTC session timezone are never reinterpreted. |
 | `null` | any nullable column | A non-nullable column is refused. |
 | `deterministic_email`, `deterministic_pseudonym`, `deterministic_key`, `redact` | text types only | Integer, numeric, and temporal columns are refused. |
@@ -81,6 +81,7 @@ even when a keep rule exists.
 - MySQL (non-MariaDB) servers are not enabled for Safe Sync in this phase.
 - `deterministic_phone`, `date_shift`, `amount_jitter`, and `fixed` are declared in the policy schema but not implemented; a policy that selects them is refused with `unsupported_strategy` rather than silently falling back.
 - Floating-point columns cannot be preserved exactly, so they are refused instead of being copied with a lossy cast.
-- A `keep` rule on `decimal`/`numeric` is bound through `CAST(? AS DECIMAL(65,30))`, which carries 35 integer digits. A declared precision above that is not yet refused at plan time, so a value with more than 35 integer digits would be truncated by the cast; treat such columns as unsupported until the cast is derived from `NUMERIC_PRECISION`/`NUMERIC_SCALE`.
+- A `keep` rule on `decimal`/`numeric` is bound through `CAST(? AS DECIMAL(p,s))` built from the column's declared `NUMERIC_PRECISION`/`NUMERIC_SCALE`, so a value that fits the column fits the cast exactly. A decimal column without a declared precision is refused at plan time (`decimal_precision_unknown`), and a value that does not fit the declared precision and scale is refused during extraction (`decimal_value_out_of_range`) instead of being rounded or truncated.
 - A source and a destination with different engines are refused with `engine_mismatch` before any session is opened.
-- `spec.masking.policy` may name a local YAML file; the path is read as given, so a spec is trusted input and must come from a reviewed source.
+- `SHOW GRANTS` parsing is fail-closed: only `SELECT`, `SHOW VIEW`, `SHOW DATABASES` and `USAGE` are accepted as read-only, and any line with an unrecognised privilege, `WITH GRANT OPTION`, `PROXY`, a role grant, or a trailing clause that cannot be interpreted is treated as write-capable, so the source role is refused.
+- `spec.masking.policy` may name a local YAML file only when it resolves inside an authorized policy directory (`DBPINBALL_POLICY_DIR`, otherwise the working directory), contains no parent traversal, and is a regular file. The refusal never echoes the operating-system error, so the path cannot be used as an existence oracle.

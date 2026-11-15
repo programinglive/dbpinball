@@ -32,6 +32,14 @@ pub struct ColumnInfo {
     pub generated_expression: Option<String>,
     /// A declared length limit (`varchar(n)`), when present.
     pub max_len: Option<usize>,
+    /// The declared numeric precision (`decimal(p,s)`), when the catalogue
+    /// reports one. A kept exact numeric is bound through a cast built from
+    /// this pair, so an unknown precision cannot be proven exact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_precision: Option<u32>,
+    /// The declared numeric scale (`decimal(p,s)`), when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_scale: Option<u32>,
 }
 
 /// One table and its identity.
@@ -74,6 +82,8 @@ impl TableInfo {
                 is_identity: column.is_identity,
                 is_identity_reference: references_identity(graph, self, &column.name),
                 max_len: column.max_len,
+                numeric_precision: column.numeric_precision,
+                numeric_scale: column.numeric_scale,
             })
             .collect()
     }
@@ -401,6 +411,8 @@ pub async fn inspect_table(
             identity_always: row.try_get(5).unwrap_or(false),
             generated_expression: row.try_get(7).ok(),
             max_len,
+            numeric_precision: None,
+            numeric_scale: None,
         });
     }
 
@@ -595,6 +607,8 @@ mod tests {
             identity_always: false,
             generated_expression: None,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let first = schema_hash("public", "accounts", "r", &columns, &["id".into()], &[]).unwrap();
         let second = schema_hash("public", "accounts", "r", &columns, &["id".into()], &[]).unwrap();
@@ -623,6 +637,8 @@ mod tests {
                 identity_always: false,
                 generated_expression: None,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             }],
             primary_key: vec!["id".into()],
             row_identity: vec!["id".into()],

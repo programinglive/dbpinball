@@ -178,7 +178,9 @@ pub async fn inspect_mariadb_table_conn(
                 IS_NULLABLE, \
                 EXTRA, \
                 CHARACTER_MAXIMUM_LENGTH, \
-                COALESCE(GENERATION_EXPRESSION, '') \
+                COALESCE(GENERATION_EXPRESSION, ''), \
+                NUMERIC_PRECISION, \
+                NUMERIC_SCALE \
          FROM information_schema.COLUMNS \
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
          ORDER BY ORDINAL_POSITION",
@@ -215,6 +217,8 @@ pub async fn inspect_mariadb_table_conn(
         let extra = decode_string(&row, 3).to_ascii_lowercase();
         let max_len = decode_optional_usize(&row, 4);
         let gen_expr = decode_string(&row, 5);
+        let numeric_precision = decode_optional_u32(&row, 6);
+        let numeric_scale = decode_optional_u32(&row, 7);
 
         let is_generated = extra.contains("generated");
         let is_identity = extra.contains("auto_increment");
@@ -234,6 +238,8 @@ pub async fn inspect_mariadb_table_conn(
             identity_always: false,
             generated_expression,
             max_len,
+            numeric_precision,
+            numeric_scale,
         });
     }
 
@@ -595,6 +601,10 @@ fn decode_optional_usize(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<usiz
         .and_then(|v| usize::try_from(v).ok())
 }
 
+fn decode_optional_u32(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<u32> {
+    decode_optional_usize(row, idx).and_then(|value| u32::try_from(value).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +625,8 @@ mod tests {
             identity_always: false,
             generated_expression: None,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let mut cols_b = cols_a.clone();
         cols_b[0].type_name = "int".into();

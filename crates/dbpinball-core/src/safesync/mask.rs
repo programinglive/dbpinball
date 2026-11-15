@@ -96,6 +96,10 @@ pub struct ColumnShape {
     pub is_identity_reference: bool,
     /// An explicit destination length limit, when the policy supplies one.
     pub max_len: Option<usize>,
+    /// The declared numeric precision, when the catalogue reports one.
+    pub numeric_precision: Option<u32>,
+    /// The declared numeric scale, when the catalogue reports one.
+    pub numeric_scale: Option<u32>,
 }
 
 /// The referenced key a `deterministic_key` column belongs to.
@@ -1097,6 +1101,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
             ColumnShape {
                 name: "email".into(),
@@ -1106,6 +1112,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
             ColumnShape {
                 name: "full_name".into(),
@@ -1115,6 +1123,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
         ]
     }
@@ -1244,6 +1254,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         });
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unmapped_column"));
@@ -1271,6 +1283,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unmapped_column"));
@@ -1297,6 +1311,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
@@ -1617,6 +1633,8 @@ mod tests {
             is_identity: identity,
             is_identity_reference: reference,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }
     }
 
@@ -1672,6 +1690,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }
     }
 

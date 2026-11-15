@@ -780,17 +780,37 @@ async fn assert_mariadb_source_role(
     Ok(())
 }
 
+/// True when a `SHOW GRANTS` line may grant a write (or an unprovable
+/// privilege) on the selected tables.
+///
+/// The parser is deliberately fail-closed: a line it cannot fully interpret is
+/// reported as write-capable, so the source role is refused. Only privileges
+/// that are provably read-only are accepted, and only when every trailing
+/// clause is a known non-privilege clause.
 fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[QualifiedName]) -> bool {
     let upper = grant.trim().to_ascii_uppercase();
     let Some(rest) = upper.strip_prefix("GRANT ") else {
         return true;
     };
+    // `GRANT PROXY ON ...` is not a table privilege and cannot be interpreted
+    // as read-only here.
+    if rest.starts_with("PROXY ") {
+        return true;
+    }
     let Some((privs_part, target_and_user)) = rest.split_once(" ON ") else {
         return true;
     };
-    let Some((target_part, _)) = target_and_user.split_once(" TO ") else {
+    let Some((target_part, account_and_options)) = target_and_user.split_once(" TO ") else {
         return true;
     };
+    if privs_part.trim().is_empty() {
+        return true;
+    }
+
+    let (account, options) = split_mariadb_grant_account(account_and_options);
+    if account.trim().is_empty() || !mariadb_grant_options_are_inert(options) {
+        return true;
+    }
 
     let target = target_part.trim().replace('`', "");
     let applies = if target == "*.*" {
@@ -817,34 +837,53 @@ fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[Qualif
         return false;
     }
 
-    const DISALLOWED: &[&str] = &[
-        "ALL PRIVILEGES",
-        "ALL",
-        "SUPER",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "ALTER",
-        "DROP",
-        "CREATE",
-        "INDEX",
-        "REFERENCES",
-        "LOCK TABLES",
-        "TRIGGER",
-        "EVENT",
-        "EXECUTE",
-        "PROCESS",
-        "RELOAD",
-        "SHUTDOWN",
-        "FILE",
-        "GRANT OPTION",
-    ];
+    // The only privileges that cannot write. Anything else, including a
+    // privilege this build does not know, is treated as write-capable.
+    const READ_ONLY: &[&str] = &["SELECT", "SHOW VIEW", "SHOW DATABASES", "USAGE"];
 
     privs_part.split(',').any(|raw| {
         let p = raw.trim();
         let base = p.split('(').next().unwrap_or(p).trim();
-        DISALLOWED.contains(&base)
+        !READ_ONLY.contains(&base)
     })
+}
+
+/// Split `'user'@'host' [options]` into the account and the trailing clauses.
+fn split_mariadb_grant_account(account_and_options: &str) -> (&str, &str) {
+    let upper = account_and_options.to_ascii_uppercase();
+    let mut cut = account_and_options.len();
+    for keyword in [" REQUIRE ", " WITH ", " IDENTIFIED ", " AS "] {
+        if let Some(index) = upper.find(keyword) {
+            cut = cut.min(index);
+        }
+    }
+    (&account_and_options[..cut], &account_and_options[cut..])
+}
+
+/// True when every trailing clause is a known clause that cannot grant a
+/// privilege. `WITH GRANT OPTION`, role grants and anything unrecognised are
+/// refused.
+fn mariadb_grant_options_are_inert(options: &str) -> bool {
+    let upper = options.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return true;
+    }
+    if upper.contains("WITH GRANT OPTION") {
+        return false;
+    }
+    const INERT_PREFIXES: &[&str] = &[
+        "REQUIRE ",
+        "WITH MAX_QUERIES_PER_HOUR ",
+        "WITH MAX_UPDATES_PER_HOUR ",
+        "WITH MAX_CONNECTIONS_PER_HOUR ",
+        "WITH MAX_USER_CONNECTIONS ",
+        "IDENTIFIED BY ",
+        "IDENTIFIED VIA ",
+        "IDENTIFIED WITH ",
+    ];
+    INERT_PREFIXES
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
 }
 
 fn mariadb_schema_matches(pattern: &str, candidate: &str) -> bool {
@@ -976,6 +1015,41 @@ mod tests {
             "GRANT DELETE ON `mdb_%`.* TO `mdb_rw`@`%`",
             "mdb_src",
             &tables
+        ));
+    }
+
+    #[test]
+    fn mariadb_grant_parser_fails_closed_on_uninterpretable_clauses() {
+        let tables = vec![QualifiedName::parse_with_default("orders", "mdb_src").unwrap()];
+        let write = |grant: &str| mariadb_grant_allows_write(grant, "mdb_src", &tables);
+
+        // A read privilege that can be re-granted is an escalation path.
+        assert!(write(
+            "GRANT SELECT ON `mdb_src`.* TO `mdb_ro`@`%` WITH GRANT OPTION"
+        ));
+        // PROXY is not a table privilege.
+        assert!(write("GRANT PROXY ON ``@`` TO `mdb_ro`@`%`"));
+        // Role grants cannot be interpreted as read-only.
+        assert!(write(
+            "GRANT SELECT ON `mdb_src`.* TO `mdb_ro`@`%` AS `mdb_role` WITH ROLE `r1`"
+        ));
+        // An unknown privilege is not assumed to be read-only.
+        assert!(write(
+            "GRANT SELECT, SOME_FUTURE_PRIVILEGE ON `mdb_src`.* TO `mdb_ro`@`%`"
+        ));
+        // A malformed line is refused rather than skipped.
+        assert!(write("GRANT SELECT `mdb_src`.* `mdb_ro`@`%`"));
+        assert!(write("GRANT ON `mdb_src`.* TO `mdb_ro`@`%`"));
+
+        // Inert clauses keep a genuine read-only role usable.
+        assert!(!write(
+            "GRANT SELECT ON `mdb_src`.* TO `mdb_ro`@`%` REQUIRE SSL"
+        ));
+        assert!(!write(
+            "GRANT SELECT ON `mdb_src`.* TO `mdb_ro`@`%` WITH MAX_USER_CONNECTIONS 5"
+        ));
+        assert!(!write(
+            "GRANT SELECT, SHOW VIEW ON `mdb_src`.* TO `mdb_ro`@`%`"
         ));
     }
 }

@@ -584,6 +584,8 @@ mod tests {
             table: QualifiedName::parse("public.accounts").unwrap(),
             columns: vec!["id".into()],
             types: vec!["uuid".into()],
+            precisions: vec![None],
+            scales: vec![None],
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
             rls_active: false,
