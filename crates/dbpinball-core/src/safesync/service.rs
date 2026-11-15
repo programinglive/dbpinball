@@ -91,6 +91,7 @@ pub async fn plan(
     replace: bool,
 ) -> Result<DryRunPlan, CoreError> {
     spec.validate()?;
+    assert_same_engine(source, destination)?;
     let masker = masker_for(spec, keys)?;
 
     let root_tables = root_tables_for(spec, source)?;
@@ -361,6 +362,20 @@ fn refusal(decision: PolicyDecision) -> CoreError {
     )
 }
 
+/// A plan is bound to one engine. A PostgreSQL source with a MariaDB
+/// destination (or the reverse) is refused explicitly instead of failing later
+/// as an accidental schema-hash mismatch.
+fn assert_same_engine(source: &DbConnection, destination: &DbConnection) -> Result<(), CoreError> {
+    if source.engine != destination.engine {
+        return Err(CoreError::with_detail(
+            ErrorCode::PolicyRefusal,
+            "the source and destination must use the same engine",
+            "engine_mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn root_tables_for(
     spec: &SafeSyncSpec,
     source: &DbConnection,
@@ -430,6 +445,7 @@ pub async fn execute(
     cancel: Arc<AtomicBool>,
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
+    assert_same_engine(request.source, request.destination)?;
     request.plan.check_version()?;
     request.plan.check_expiry_contract(now_ms)?;
 

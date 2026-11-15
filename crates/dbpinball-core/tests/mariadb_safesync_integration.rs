@@ -18,6 +18,7 @@ use tempfile::tempdir;
 use dbpinball_core::domain::connection::{DbConnection, DbEngine, TargetClass};
 use dbpinball_core::domain::error::{CoreError, ErrorCode};
 use dbpinball_core::ports::credentials::{CredentialProvider, Secret};
+use dbpinball_core::safesync::import_mariadb::destination_lock_name;
 use dbpinball_core::safesync::key::{InMemoryMaskKeyStore, MaskKey};
 use dbpinball_core::safesync::service::{self, ExecuteRequest};
 use dbpinball_core::safesync::spec::{
@@ -924,5 +925,45 @@ async fn t04_adversarial_replace_rollback_and_get_lock_concurrency() {
     let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
         .bind(&lock_name)
         .fetch_optional(&mut *holder)
+        .await;
+
+    // A different plan fingerprint must still be serialised: the destination
+    // lock is keyed on the destination database, not on the plan.
+    let dst_lock = destination_lock_name(&dst.profile.database);
+    assert_ne!(
+        dst_lock, lock_name,
+        "the destination lock must not be the plan lock"
+    );
+    let mut dst_holder = dst.pool.acquire().await.unwrap();
+    let got: i32 = sqlx::query_scalar("SELECT GET_LOCK(?, 5)")
+        .bind(&dst_lock)
+        .fetch_one(&mut *dst_holder)
+        .await
+        .unwrap();
+    assert_eq!(got, 1);
+
+    let err = service::execute(
+        ExecuteRequest {
+            plan: &plan_replace,
+            spec: &spec,
+            acknowledgement: &plan_replace.plan_fingerprint,
+            replace: true,
+            source: &src_ro.profile,
+            destination: &dst.profile,
+        },
+        &creds,
+        &enrollments,
+        &keys,
+        None,
+        now,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("concurrent_run_in_progress"));
+
+    let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
+        .bind(&dst_lock)
+        .fetch_optional(&mut *dst_holder)
         .await;
 }

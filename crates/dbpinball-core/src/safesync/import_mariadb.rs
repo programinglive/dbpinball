@@ -30,6 +30,17 @@ fn plan_lock_name(fingerprint: &str) -> String {
     format!("dbpinball_sync_{prefix}")
 }
 
+/// The destination-scoped lock name.
+///
+/// The plan lock alone is not enough: two *different* plans can target the same
+/// destination tables, and their fingerprints differ, so they would not
+/// serialise. The destination lock is what makes the "destination is not empty"
+/// refusal and the replace path race-free, mirroring the PostgreSQL table locks.
+pub fn destination_lock_name(database: &str) -> String {
+    let digest = Sha256::digest(database.as_bytes());
+    format!("dbpinball_sync_dst_{}", hex_lower(&digest[..8]))
+}
+
 async fn acquire_get_lock(session: &mut BoundSession, name: &str) -> Result<(), CoreError> {
     let conn = session.mysql_connection()?;
     let acquired: Option<i32> = sqlx::query_scalar("SELECT GET_LOCK(?, 5)")
@@ -83,8 +94,11 @@ async fn setup_run_table(session: &mut BoundSession, dst_db: &str) -> Result<(),
 }
 
 /// Import masked rows into a MariaDB InnoDB destination inside one atomic
-/// transaction, guarded by a session-scoped `GET_LOCK`.
-pub async fn run(
+/// transaction, guarded by a destination-scoped and a plan-scoped `GET_LOCK`.
+///
+/// `pub(crate)`: only `service::execute` may reach the raw writer, so no caller
+/// can bypass plan authorization.
+pub(crate) async fn run(
     session: &mut BoundSession,
     plan: &DryRunPlan,
     tables: &[TableRows],
@@ -94,11 +108,19 @@ pub async fn run(
     let dst_db = session.identity().database_name.clone();
     setup_run_table(session, &dst_db).await?;
 
+    // Destination first, then the plan lock. Every run takes them in this order,
+    // so the shared destination lock can never form a cycle with a plan lock.
+    let dst_lock = destination_lock_name(&dst_db);
+    acquire_get_lock(session, &dst_lock).await?;
     let lock_name = plan_lock_name(&plan.plan_fingerprint);
-    acquire_get_lock(session, &lock_name).await?;
+    if let Err(error) = acquire_get_lock(session, &lock_name).await {
+        release_get_lock(session, &dst_lock).await;
+        return Err(error);
+    }
 
     let tx_res = run_with_lock(session, &dst_db, plan, tables, policy, &cancel).await;
     release_get_lock(session, &lock_name).await;
+    release_get_lock(session, &dst_lock).await;
     tx_res
 }
 

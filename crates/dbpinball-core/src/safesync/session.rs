@@ -283,10 +283,10 @@ impl BoundSession {
                 sqlx::query("BEGIN READ ONLY")
                     .execute(&mut *conn)
                     .await
-                    .map_err(|error| {
+                    .map_err(|_| {
                         CoreError::with_detail(
                             ErrorCode::Operation,
-                            format!("the source transaction could not start: {error}"),
+                            "the source transaction could not start; the server message is withheld",
                             "source_not_read_only",
                         )
                     })?;
@@ -296,10 +296,10 @@ impl BoundSession {
                 sqlx::query("START TRANSACTION READ ONLY")
                     .execute(&mut *conn)
                     .await
-                    .map_err(|error| {
+                    .map_err(|_| {
                         CoreError::with_detail(
                             ErrorCode::Operation,
-                            format!("the MariaDB source transaction could not start: {error}"),
+                            "the MariaDB source transaction could not start; the server message is withheld",
                             "source_not_read_only",
                         )
                     })?;

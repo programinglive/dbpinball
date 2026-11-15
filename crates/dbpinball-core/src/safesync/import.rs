@@ -61,7 +61,11 @@ pub struct ImportReport {
 }
 
 /// Import masked rows into the destination inside one transaction.
-pub async fn run(
+///
+/// `pub(crate)`: `service::execute` is the only entry point that verifies the
+/// plan MAC, expiry, acknowledgement and enrollment, so the raw writer must
+/// never be reachable from another crate.
+pub(crate) async fn run(
     session: &mut BoundSession,
     plan: &DryRunPlan,
     tables: &[TableRows],

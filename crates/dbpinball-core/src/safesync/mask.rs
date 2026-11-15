@@ -956,6 +956,11 @@ pub fn is_risky_type(type_name: &str) -> bool {
                 | "point"
                 | "linestring"
                 | "polygon"
+                | "multipoint"
+                | "multilinestring"
+                | "multipolygon"
+                | "geometrycollection"
+                | "geomcollection"
                 | "xml"
                 | "tsvector"
                 | "tsquery"
@@ -1717,6 +1722,26 @@ mod tests {
             let error = masker
                 .coverage("public", "orders", &columns)
                 .expect_err("a float cannot be preserved exactly");
+            assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
+        }
+    }
+
+    #[test]
+    fn a_spatial_column_cannot_be_kept() {
+        for type_name in [
+            "multipoint",
+            "multilinestring",
+            "multipolygon",
+            "geometrycollection",
+            "geomcollection",
+        ] {
+            let mut policy = MaskingPolicy::builtin_default();
+            policy.rules.push(keep_rule("shapes", "shape"));
+            let masker = Masker::new(policy, key()).unwrap();
+            let columns = vec![typed_column("shape", type_name)];
+            let error = masker
+                .coverage("public", "shapes", &columns)
+                .expect_err("a spatial type is risky");
             assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
         }
     }

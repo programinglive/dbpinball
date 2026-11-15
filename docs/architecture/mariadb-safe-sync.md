@@ -48,7 +48,7 @@
    - Supports `eq`, `in` (up to 100 values), `gte`, and `lte` (up to 8 predicates) on MariaDB integer (`tinyint`, `smallint`, `mediumint`, `int`, `bigint`), `decimal`/`numeric`, `date`, `datetime`, and `timestamp` types.
    - Refuses risky unmasked/binary/spatial types (`blob`, `tinyblob`, `mediumblob`, `longblob`, `binary`, `varbinary`, `geometry`, `point`, `linestring`, `polygon`) unless configured as `omit` or `null`.
 4. **Transactional Import, Locking & Recovery (`safesync::import_mariadb`)**:
-   - Acquires a session-scoped `GET_LOCK` per destination database/schema to prevent concurrent imports.
+   - Acquires two session-scoped `GET_LOCK` guards: one keyed on the destination database (so two *different* plans targeting the same destination cannot interleave) and one keyed on the plan fingerprint. The destination lock is always taken first, so the order cannot deadlock.
    - Executes `DELETE FROM` in reverse topological order (when `replace: true`) and parameterized `INSERT` inside a single InnoDB transaction.
    - Records run state and digests in `dbpinball_safe_sync_runs` for crash recovery and idempotent retry.
    - Reconciles `AUTO_INCREMENT` sequences **post-commit** via `ALTER TABLE ... AUTO_INCREMENT = <next>` so DDL never triggers an implicit commit mid-transaction.
@@ -81,3 +81,6 @@ even when a keep rule exists.
 - MySQL (non-MariaDB) servers are not enabled for Safe Sync in this phase.
 - `deterministic_phone`, `date_shift`, `amount_jitter`, and `fixed` are declared in the policy schema but not implemented; a policy that selects them is refused with `unsupported_strategy` rather than silently falling back.
 - Floating-point columns cannot be preserved exactly, so they are refused instead of being copied with a lossy cast.
+- A `keep` rule on `decimal`/`numeric` is bound through `CAST(? AS DECIMAL(65,30))`, which carries 35 integer digits. A declared precision above that is not yet refused at plan time, so a value with more than 35 integer digits would be truncated by the cast; treat such columns as unsupported until the cast is derived from `NUMERIC_PRECISION`/`NUMERIC_SCALE`.
+- A source and a destination with different engines are refused with `engine_mismatch` before any session is opened.
+- `spec.masking.policy` may name a local YAML file; the path is read as given, so a spec is trusted input and must come from a reviewed source.
