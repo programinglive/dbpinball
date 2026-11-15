@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::{MySqlPool, Row};
+use sqlx::{MySqlConnection, MySqlPool, Row};
 
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::database_error;
@@ -26,9 +26,31 @@ pub struct MariaDbTrigger {
     pub timing: String,
 }
 
+async fn acquire_conn(
+    pool: &MySqlPool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>, CoreError> {
+    pool.acquire().await.map_err(|err| {
+        database_error(
+            ErrorCode::Connection,
+            "MariaDB connection pool",
+            "connect_failed",
+            err,
+        )
+    })
+}
+
 /// Inspect triggers on a MariaDB table via `information_schema.TRIGGERS`.
 pub async fn inspect_mariadb_triggers(
     pool: &MySqlPool,
+    table: &QualifiedName,
+) -> Result<Vec<MariaDbTrigger>, CoreError> {
+    let mut conn = acquire_conn(pool).await?;
+    inspect_mariadb_triggers_conn(&mut conn, table).await
+}
+
+/// Inspect triggers on a MariaDB table using an existing pinned connection.
+pub async fn inspect_mariadb_triggers_conn(
+    conn: &mut MySqlConnection,
     table: &QualifiedName,
 ) -> Result<Vec<MariaDbTrigger>, CoreError> {
     let rows = sqlx::query(
@@ -39,7 +61,7 @@ pub async fn inspect_mariadb_triggers(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
         database_error(
@@ -66,6 +88,15 @@ pub async fn inspect_mariadb_table(
     pool: &MySqlPool,
     table: &QualifiedName,
 ) -> Result<TableInfo, CoreError> {
+    let mut conn = acquire_conn(pool).await?;
+    inspect_mariadb_table_conn(&mut conn, table).await
+}
+
+/// Inspect one MariaDB table's metadata using an existing pinned connection.
+pub async fn inspect_mariadb_table_conn(
+    conn: &mut MySqlConnection,
+    table: &QualifiedName,
+) -> Result<TableInfo, CoreError> {
     let table_row = sqlx::query(
         "SELECT TABLE_TYPE, COALESCE(ENGINE, '') \
          FROM information_schema.TABLES \
@@ -73,7 +104,7 @@ pub async fn inspect_mariadb_table(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|err| {
         database_error(
@@ -117,7 +148,7 @@ pub async fn inspect_mariadb_table(
         ));
     }
 
-    let triggers = inspect_mariadb_triggers(pool, table).await?;
+    let triggers = inspect_mariadb_triggers_conn(conn, table).await?;
     if !triggers.is_empty() {
         return Err(CoreError::with_detail(
             ErrorCode::Unsupported,
@@ -131,7 +162,7 @@ pub async fn inspect_mariadb_table(
         ));
     }
 
-    let primary_key = inspect_primary_key(pool, table).await?;
+    let primary_key = inspect_primary_key(conn, table).await?;
     let pk_set: BTreeSet<&str> = primary_key.iter().map(String::as_str).collect();
 
     let col_rows = sqlx::query(
@@ -147,7 +178,7 @@ pub async fn inspect_mariadb_table(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
         database_error(
@@ -202,7 +233,7 @@ pub async fn inspect_mariadb_table(
     let row_identity = if !primary_key.is_empty() {
         primary_key.clone()
     } else {
-        inspect_unique_not_null_key(pool, table, &columns).await?
+        inspect_unique_not_null_key(conn, table, &columns).await?
     };
 
     let schema_hash = compute_mariadb_schema_hash(table, &columns, &primary_key, &row_identity);
@@ -225,6 +256,15 @@ pub async fn inspect_mariadb_foreign_keys(
     pool: &MySqlPool,
     table: &QualifiedName,
 ) -> Result<Vec<ForeignKeyEdge>, CoreError> {
+    let mut conn = acquire_conn(pool).await?;
+    inspect_mariadb_foreign_keys_conn(&mut conn, table).await
+}
+
+/// Inspect outgoing foreign-key constraints using an existing pinned connection.
+pub async fn inspect_mariadb_foreign_keys_conn(
+    conn: &mut MySqlConnection,
+    table: &QualifiedName,
+) -> Result<Vec<ForeignKeyEdge>, CoreError> {
     let rows = sqlx::query(
         "SELECT kcu.CONSTRAINT_NAME, \
                 kcu.COLUMN_NAME, \
@@ -243,7 +283,7 @@ pub async fn inspect_mariadb_foreign_keys(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
         database_error(
@@ -320,6 +360,17 @@ pub async fn discover_mariadb_parents(
     roots: &[QualifiedName],
     max_depth: u8,
 ) -> Result<SchemaGraph, CoreError> {
+    let mut conn = acquire_conn(pool).await?;
+    discover_mariadb_parents_conn(&mut conn, roots, max_depth).await
+}
+
+/// Discover the parent-directed InnoDB foreign-key graph using an existing
+/// pinned connection.
+pub async fn discover_mariadb_parents_conn(
+    conn: &mut MySqlConnection,
+    roots: &[QualifiedName],
+    max_depth: u8,
+) -> Result<SchemaGraph, CoreError> {
     if roots.is_empty() {
         return Err(CoreError::with_detail(
             ErrorCode::Usage,
@@ -340,14 +391,14 @@ pub async fn discover_mariadb_parents(
     }
 
     while let Some((current, depth)) = queue.pop_front() {
-        let info = inspect_mariadb_table(pool, &current).await?;
+        let info = inspect_mariadb_table_conn(conn, &current).await?;
         tables.push(info);
 
         if depth >= max_depth {
             continue;
         }
 
-        let fks = inspect_mariadb_foreign_keys(pool, &current).await?;
+        let fks = inspect_mariadb_foreign_keys_conn(conn, &current).await?;
         for edge in fks {
             if edge.child == edge.parent {
                 return Err(CoreError::with_detail(
@@ -411,7 +462,7 @@ fn has_cycle<'a>(
 }
 
 async fn inspect_primary_key(
-    pool: &MySqlPool,
+    conn: &mut MySqlConnection,
     table: &QualifiedName,
 ) -> Result<Vec<String>, CoreError> {
     let rows = sqlx::query(
@@ -422,7 +473,7 @@ async fn inspect_primary_key(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
         database_error(
@@ -437,7 +488,7 @@ async fn inspect_primary_key(
 }
 
 async fn inspect_unique_not_null_key(
-    pool: &MySqlPool,
+    conn: &mut MySqlConnection,
     table: &QualifiedName,
     columns: &[ColumnInfo],
 ) -> Result<Vec<String>, CoreError> {
@@ -449,7 +500,7 @@ async fn inspect_unique_not_null_key(
     )
     .bind(&table.schema)
     .bind(&table.table)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
         database_error(

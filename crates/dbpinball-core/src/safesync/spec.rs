@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
 
 /// The only spec version this build understands.
@@ -32,10 +33,15 @@ pub struct QualifiedName {
 impl QualifiedName {
     /// Parse `schema.table` or a bare `table` (which defaults to `public`).
     pub fn parse(input: &str) -> Result<Self, CoreError> {
+        Self::parse_with_default(input, "public")
+    }
+
+    /// Parse `schema.table` or a bare `table` (which defaults to `default_schema`).
+    pub fn parse_with_default(input: &str, default_schema: &str) -> Result<Self, CoreError> {
         let trimmed = input.trim();
         let mut parts = trimmed.split('.');
         let (schema, table) = match (parts.next(), parts.next(), parts.next()) {
-            (Some(table), None, None) => ("public", table),
+            (Some(table), None, None) => (default_schema, table),
             (Some(schema), Some(table), None) => (schema, table),
             _ => {
                 return Err(invalid_identifier(format!(
@@ -239,9 +245,23 @@ pub fn canonical_predicate(
     predicate: &FilterPredicate,
     type_name: &str,
 ) -> Result<String, CoreError> {
+    canonical_predicate_for_engine(DbEngine::Postgres, predicate, type_name)
+}
+
+/// Canonical, collision-free rendering of one predicate for a specific engine.
+pub fn canonical_predicate_for_engine(
+    engine: DbEngine,
+    predicate: &FilterPredicate,
+    type_name: &str,
+) -> Result<String, CoreError> {
     let canonical_value: serde_json::Value = match predicate.op {
         FilterOp::Gte | FilterOp::Lte => serde_json::Value::String(
-            crate::safesync::typed::parse_typed_value(type_name, &predicate.value)?.canonical(),
+            crate::safesync::typed::parse_typed_value_for_engine(
+                engine,
+                type_name,
+                &predicate.value,
+            )?
+            .canonical(),
         ),
         FilterOp::Eq | FilterOp::In => serde_json::to_value(&predicate.value).unwrap_or_default(),
     };
@@ -263,6 +283,15 @@ pub fn canonical_filter(
     filter: &[FilterPredicate],
     types: &BTreeMap<String, String>,
 ) -> Result<String, CoreError> {
+    canonical_filter_for_engine(DbEngine::Postgres, filter, types)
+}
+
+/// Engine-aware canonical, injective, order-independent rendering of a root filter list.
+pub fn canonical_filter_for_engine(
+    engine: DbEngine,
+    filter: &[FilterPredicate],
+    types: &BTreeMap<String, String>,
+) -> Result<String, CoreError> {
     if filter.len() > MAX_FILTER_PREDICATES {
         return Err(CoreError::with_detail(
             ErrorCode::Usage,
@@ -275,7 +304,9 @@ pub fn canonical_filter(
         let type_name = types.get(&predicate.column).ok_or_else(|| {
             invalid_identifier(format!("filter column {} does not exist", predicate.column))
         })?;
-        encoded.push(canonical_predicate(predicate, type_name)?);
+        encoded.push(canonical_predicate_for_engine(
+            engine, predicate, type_name,
+        )?);
     }
     encoded.sort();
     encoded.dedup();

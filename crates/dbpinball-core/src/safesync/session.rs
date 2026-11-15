@@ -5,6 +5,7 @@
 //! the work. A reconnect builds a new session and therefore a new authorization.
 
 use serde::Serialize;
+use sqlx::mysql::{MySqlConnectOptions, MySqlConnection};
 use sqlx::postgres::{PgConnectOptions, PgConnection};
 use sqlx::{Connection, Row};
 
@@ -57,7 +58,7 @@ impl SessionIdentity {
     /// The M3 identity view of this session, so the policy can decide.
     pub fn as_destination_identity(&self, observed_at_ms: u64) -> DestinationIdentity {
         DestinationIdentity {
-            engine: self.engine.clone(),
+            engine: self.engine,
             host: self.host.clone(),
             port: self.port,
             identity_key: self.identity_key.clone(),
@@ -67,10 +68,15 @@ impl SessionIdentity {
     }
 }
 
+enum SessionConnection {
+    Postgres(PgConnection),
+    MariaDb(MySqlConnection),
+}
+
 /// One owned connection plus the identity read from it.
 pub struct BoundSession {
     role: SessionRole,
-    connection: PgConnection,
+    connection: SessionConnection,
     identity: SessionIdentity,
 }
 
@@ -96,48 +102,94 @@ impl BoundSession {
         credentials: &dyn CredentialProvider,
         limits: &Limits,
     ) -> Result<Self, CoreError> {
-        if profile.engine != DbEngine::Postgres {
-            return Err(CoreError::with_detail(
-                ErrorCode::Unsupported,
-                "Safe Sync supports PostgreSQL only",
-                "unsupported_engine",
-            ));
-        }
-
         let secret = credentials.get(&profile.id)?;
-        let options = PgConnectOptions::new()
-            .host(&profile.host)
-            .port(profile.port)
-            .username(&profile.username)
-            .password(secret.expose())
-            .database(&profile.database);
+        match profile.engine {
+            DbEngine::Postgres => {
+                let options = PgConnectOptions::new()
+                    .host(&profile.host)
+                    .port(profile.port)
+                    .username(&profile.username)
+                    .password(secret.expose())
+                    .database(&profile.database);
 
-        let mut connection = PgConnection::connect_with(&options)
-            .await
-            .map_err(|error| {
-                crate::safesync::database_error(
-                    ErrorCode::Connection,
-                    &format!("the {} connection", role_label(role)),
-                    "connect_failed",
-                    error,
-                )
-            })?;
+                let mut connection =
+                    PgConnection::connect_with(&options)
+                        .await
+                        .map_err(|error| {
+                            crate::safesync::database_error(
+                                ErrorCode::Connection,
+                                &format!("the {} connection", role_label(role)),
+                                "connect_failed",
+                                error,
+                            )
+                        })?;
 
-        if role == SessionRole::Source {
-            apply_source_guards(&mut connection, limits).await?;
+                if role == SessionRole::Source {
+                    apply_source_guards(&mut connection, limits).await?;
+                }
+
+                let identity = read_identity(&mut connection, role, profile).await?;
+
+                Ok(Self {
+                    role,
+                    connection: SessionConnection::Postgres(connection),
+                    identity,
+                })
+            }
+            DbEngine::Mysql => {
+                if profile.database.trim().is_empty() {
+                    return Err(CoreError::with_detail(
+                        ErrorCode::Usage,
+                        "a database name is required for MariaDB Safe Sync",
+                        "missing_database",
+                    ));
+                }
+
+                let options = MySqlConnectOptions::new()
+                    .host(&profile.host)
+                    .port(profile.port)
+                    .username(&profile.username)
+                    .password(secret.expose())
+                    .database(&profile.database);
+
+                let mut connection =
+                    MySqlConnection::connect_with(&options)
+                        .await
+                        .map_err(|error| {
+                            crate::safesync::database_error(
+                                ErrorCode::Connection,
+                                &format!("the {} connection", role_label(role)),
+                                "connect_failed",
+                                error,
+                            )
+                        })?;
+
+                match role {
+                    SessionRole::Source => {
+                        apply_mariadb_source_guards(&mut connection, limits).await?;
+                    }
+                    SessionRole::Destination => {
+                        apply_mariadb_destination_guards(&mut connection, limits).await?;
+                    }
+                }
+
+                let identity = read_mariadb_identity(&mut connection, role, profile).await?;
+
+                Ok(Self {
+                    role,
+                    connection: SessionConnection::MariaDb(connection),
+                    identity,
+                })
+            }
         }
-
-        let identity = read_identity(&mut connection, role, profile).await?;
-
-        Ok(Self {
-            role,
-            connection,
-            identity,
-        })
     }
 
     pub fn role(&self) -> SessionRole {
         self.role
+    }
+
+    pub fn engine(&self) -> DbEngine {
+        self.identity.engine
     }
 
     pub fn identity(&self) -> &SessionIdentity {
@@ -145,7 +197,34 @@ impl BoundSession {
     }
 
     pub fn connection(&mut self) -> &mut PgConnection {
-        &mut self.connection
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => conn,
+            SessionConnection::MariaDb(_) => {
+                panic!("pg connection requested on a MariaDB BoundSession")
+            }
+        }
+    }
+
+    pub fn pg_connection(&mut self) -> Result<&mut PgConnection, CoreError> {
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => Ok(conn),
+            SessionConnection::MariaDb(_) => Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "expected a PostgreSQL session",
+                "engine_mismatch",
+            )),
+        }
+    }
+
+    pub fn mysql_connection(&mut self) -> Result<&mut MySqlConnection, CoreError> {
+        match &mut self.connection {
+            SessionConnection::MariaDb(conn) => Ok(conn),
+            SessionConnection::Postgres(_) => Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "expected a MariaDB session",
+                "engine_mismatch",
+            )),
+        }
     }
 
     /// Fail when the session is no longer the one the plan recorded.
@@ -155,77 +234,125 @@ impl BoundSession {
 
     /// Refuse a source role that could write, or that could bypass a row policy.
     pub async fn assert_source_role(&mut self, tables: &[QualifiedName]) -> Result<(), CoreError> {
-        let (is_super, bypass_rls): (bool, bool) = sqlx::query_as(
-            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
-        )
-        .fetch_one(&mut self.connection)
-        .await
-        .map_err(connection_error)?;
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => {
+                let (is_super, bypass_rls): (bool, bool) = sqlx::query_as(
+                    "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(connection_error)?;
 
-        if is_super || bypass_rls {
-            return Err(CoreError::with_detail(
-                ErrorCode::Operation,
-                "the source role is privileged; use a SELECT-only role",
-                "source_privileged",
-            ));
-        }
+                if is_super || bypass_rls {
+                    return Err(CoreError::with_detail(
+                        ErrorCode::Operation,
+                        "the source role is privileged; use a SELECT-only role",
+                        "source_privileged",
+                    ));
+                }
 
-        for table in tables {
-            if table_writes(&mut self.connection, table).await? {
-                return Err(CoreError::with_detail(
-                    ErrorCode::Operation,
-                    format!("the source role can write to {table}"),
-                    "source_privileged",
-                ));
+                for table in tables {
+                    if table_writes(conn, table).await? {
+                        return Err(CoreError::with_detail(
+                            ErrorCode::Operation,
+                            format!("the source role can write to {table}"),
+                            "source_privileged",
+                        ));
+                    }
+                    if owns_table(conn, table).await? {
+                        return Err(CoreError::with_detail(
+                            ErrorCode::Operation,
+                            format!("the source role owns {table}"),
+                            "source_privileged",
+                        ));
+                    }
+                }
+
+                Ok(())
             }
-            if owns_table(&mut self.connection, table).await? {
-                return Err(CoreError::with_detail(
-                    ErrorCode::Operation,
-                    format!("the source role owns {table}"),
-                    "source_privileged",
-                ));
+            SessionConnection::MariaDb(conn) => {
+                assert_mariadb_source_role(conn, &self.identity.database_name, tables).await
             }
         }
-
-        Ok(())
     }
 
     /// Open a read-only transaction. A write on it fails at the engine.
     pub async fn begin_read_only(&mut self) -> Result<(), CoreError> {
-        sqlx::query("BEGIN READ ONLY")
-            .execute(&mut self.connection)
-            .await
-            .map_err(|error| {
-                CoreError::with_detail(
-                    ErrorCode::Operation,
-                    format!("the source transaction could not start: {error}"),
-                    "source_not_read_only",
-                )
-            })?;
-        Ok(())
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => {
+                sqlx::query("BEGIN READ ONLY")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        CoreError::with_detail(
+                            ErrorCode::Operation,
+                            format!("the source transaction could not start: {error}"),
+                            "source_not_read_only",
+                        )
+                    })?;
+                Ok(())
+            }
+            SessionConnection::MariaDb(conn) => {
+                sqlx::query("START TRANSACTION READ ONLY")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        CoreError::with_detail(
+                            ErrorCode::Operation,
+                            format!("the MariaDB source transaction could not start: {error}"),
+                            "source_not_read_only",
+                        )
+                    })?;
+                Ok(())
+            }
+        }
     }
 
     /// Open the destination transaction.
     ///
     /// `READ COMMITTED` is deliberate. The destination is protected by a
-    /// transaction-scoped advisory lock per plan and by `SHARE ROW EXCLUSIVE`
-    /// table locks, so every statement sees the state left by whoever held the
-    /// lock before. `REPEATABLE READ` would take its snapshot before the
-    /// advisory lock is granted, so a waiting run could miss the run that just
-    /// committed and then collide on the primary key.
+    /// transaction-scoped advisory lock per plan (PostgreSQL) or session-scoped
+    /// `GET_LOCK` (MariaDB) and table locks, so every statement sees the state
+    /// left by whoever held the lock before. `REPEATABLE READ` would take its
+    /// snapshot before the lock is granted.
     pub async fn begin_destination_transaction(&mut self) -> Result<(), CoreError> {
-        sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut self.connection)
-            .await
-            .map_err(connection_error)?;
-        Ok(())
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => {
+                sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(connection_error)?;
+                Ok(())
+            }
+            SessionConnection::MariaDb(conn) => {
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(connection_error)?;
+                sqlx::query("START TRANSACTION")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(connection_error)?;
+                Ok(())
+            }
+        }
     }
 
     pub async fn rollback(&mut self) -> Result<(), CoreError> {
-        sqlx::query("ROLLBACK")
-            .execute(&mut self.connection)
-            .await
-            .map_err(connection_error)?;
+        match &mut self.connection {
+            SessionConnection::Postgres(conn) => {
+                sqlx::query("ROLLBACK")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(connection_error)?;
+            }
+            SessionConnection::MariaDb(conn) => {
+                sqlx::query("ROLLBACK")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(connection_error)?;
+            }
+        }
         Ok(())
     }
 }
@@ -442,6 +569,282 @@ fn connection_error(error: sqlx::Error) -> CoreError {
     )
 }
 
+async fn apply_mariadb_source_guards(
+    connection: &mut MySqlConnection,
+    limits: &Limits,
+) -> Result<(), CoreError> {
+    sqlx::query("SET NAMES utf8mb4")
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    sqlx::query("SET SESSION time_zone = '+00:00'")
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    sqlx::query("SET SESSION TRANSACTION READ ONLY")
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+
+    let stmt_secs = (limits.timeout_ms as f64 / 1000.0).max(1.0);
+    sqlx::query("SET SESSION max_statement_time = ?")
+        .bind(stmt_secs)
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+
+    let lock_secs = (limits.timeout_ms.min(5_000) / 1000).max(1);
+    sqlx::query("SET SESSION lock_wait_timeout = ?")
+        .bind(lock_secs)
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+
+    let tx_ro: i8 = sqlx::query_scalar("SELECT @@SESSION.tx_read_only")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    if tx_ro == 0 {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the MariaDB source session is not read-only",
+            "source_not_read_only",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn apply_mariadb_destination_guards(
+    connection: &mut MySqlConnection,
+    limits: &Limits,
+) -> Result<(), CoreError> {
+    sqlx::query("SET NAMES utf8mb4")
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    sqlx::query("SET SESSION time_zone = '+00:00'")
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    let lock_secs = (limits.timeout_ms.min(5_000) / 1000).max(1);
+    sqlx::query("SET SESSION lock_wait_timeout = ?")
+        .bind(lock_secs)
+        .execute(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    Ok(())
+}
+
+fn decode_mysql_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> String {
+    row.try_get::<String, _>(idx)
+        .or_else(|_| {
+            row.try_get::<Vec<u8>, _>(idx)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .unwrap_or_default()
+}
+
+async fn read_mariadb_identity(
+    connection: &mut MySqlConnection,
+    role: SessionRole,
+    profile: &DbConnection,
+) -> Result<SessionIdentity, CoreError> {
+    let row = sqlx::query(
+        "SELECT COALESCE(DATABASE(), ''), \
+                CURRENT_USER(), \
+                COALESCE(@@hostname, ''), \
+                @@port, \
+                VERSION(), \
+                @@SESSION.tx_read_only, \
+                CONNECTION_ID(), \
+                COALESCE(CAST(@@datadir AS CHAR CHARACTER SET utf8mb4), ''), \
+                COALESCE(CAST(@@server_id AS CHAR), '')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(connection_error)?;
+
+    let database_name = decode_mysql_string(&row, 0);
+    let current_user = decode_mysql_string(&row, 1);
+    let hostname = decode_mysql_string(&row, 2);
+    let server_port_u32: u32 = row
+        .try_get::<u32, _>(3)
+        .or_else(|_| row.try_get::<u64, _>(3).map(|v| v as u32))
+        .or_else(|_| row.try_get::<i64, _>(3).map(|v| v.max(0) as u32))
+        .unwrap_or(0);
+    let version = decode_mysql_string(&row, 4);
+    let tx_read_only: i8 = row.try_get(5).unwrap_or(0);
+    let conn_id: u64 = row
+        .try_get::<u64, _>(6)
+        .or_else(|_| row.try_get::<u32, _>(6).map(u64::from))
+        .or_else(|_| row.try_get::<i64, _>(6).map(|v| v.max(0) as u64))
+        .unwrap_or(0);
+    let datadir = decode_mysql_string(&row, 7);
+    let server_id = decode_mysql_string(&row, 8);
+
+    if !crate::security::verify::is_mariadb_version(&version) {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            "Safe Sync supports PostgreSQL and MariaDB only",
+            "unsupported_engine",
+        ));
+    }
+
+    let fingerprint = crate::security::verify::mariadb_server_fingerprint(
+        &hostname,
+        server_port_u32,
+        &datadir,
+        &server_id,
+    );
+
+    let is_read_only = match role {
+        SessionRole::Source => tx_read_only != 0,
+        SessionRole::Destination => tx_read_only != 0,
+    };
+
+    let server = ServerIdentity {
+        engine: Some("mariadb".into()),
+        version: Some(version),
+        server_uuid: fingerprint.clone(),
+        database: Some(database_name.clone()),
+        database_id: Some(database_name.clone()),
+        current_user: Some(current_user.clone()),
+        read_only: Some(is_read_only),
+        can_write: None,
+    };
+
+    let host = if hostname.is_empty() {
+        profile.host.clone()
+    } else {
+        hostname.clone()
+    };
+    let port = if server_port_u32 > 0 {
+        server_port_u32 as u16
+    } else {
+        profile.port
+    };
+    let identity_key = server.identity_key(DbEngine::Mysql, &host, port);
+
+    Ok(SessionIdentity {
+        engine: DbEngine::Mysql,
+        identity_key,
+        system_identifier: fingerprint,
+        database_oid: database_name.clone(),
+        database_name,
+        current_user,
+        backend_pid: (conn_id.min(i32::MAX as u64)) as i32,
+        backend_start: String::new(),
+        server_addr: hostname,
+        server_port: port,
+        transaction_read_only: is_read_only,
+        host,
+        port,
+        server,
+    })
+}
+
+async fn assert_mariadb_source_role(
+    connection: &mut MySqlConnection,
+    database_name: &str,
+    tables: &[QualifiedName],
+) -> Result<(), CoreError> {
+    let tx_ro: i8 = sqlx::query_scalar("SELECT @@SESSION.tx_read_only")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+    if tx_ro == 0 {
+        return Err(CoreError::with_detail(
+            ErrorCode::Operation,
+            "the MariaDB source session is not read-only",
+            "source_not_read_only",
+        ));
+    }
+
+    let rows = sqlx::query("SHOW GRANTS FOR CURRENT_USER()")
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(connection_error)?;
+
+    for row in rows {
+        let grant = decode_mysql_string(&row, 0);
+        if mariadb_grant_allows_write(&grant, database_name, tables) {
+            return Err(CoreError::with_detail(
+                ErrorCode::Operation,
+                "the MariaDB source role is privileged or writable; use a SELECT-only role",
+                "source_privileged",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[QualifiedName]) -> bool {
+    let upper = grant.trim().to_ascii_uppercase();
+    let Some(rest) = upper.strip_prefix("GRANT ") else {
+        return true;
+    };
+    let Some((privs_part, target_and_user)) = rest.split_once(" ON ") else {
+        return true;
+    };
+    let Some((target_part, _)) = target_and_user.split_once(" TO ") else {
+        return true;
+    };
+
+    let target = target_part.trim().replace('`', "");
+    let applies = if target == "*.*" {
+        true
+    } else if let Some((schema, table)) = target.split_once('.') {
+        let db_match = schema.eq_ignore_ascii_case(database_name)
+            || tables.iter().any(|t| t.schema.eq_ignore_ascii_case(schema));
+        if !db_match {
+            false
+        } else if table == "*" {
+            true
+        } else {
+            tables.iter().any(|t| {
+                t.schema.eq_ignore_ascii_case(schema) && t.table.eq_ignore_ascii_case(table)
+            })
+        }
+    } else {
+        true
+    };
+
+    if !applies {
+        return false;
+    }
+
+    const DISALLOWED: &[&str] = &[
+        "ALL PRIVILEGES",
+        "ALL",
+        "SUPER",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "ALTER",
+        "DROP",
+        "CREATE",
+        "INDEX",
+        "REFERENCES",
+        "LOCK TABLES",
+        "TRIGGER",
+        "EVENT",
+        "EXECUTE",
+        "PROCESS",
+        "RELOAD",
+        "SHUTDOWN",
+        "FILE",
+        "GRANT OPTION",
+    ];
+
+    privs_part.split(',').any(|raw| {
+        let p = raw.trim();
+        let base = p.split('(').next().unwrap_or(p).trim();
+        DISALLOWED.contains(&base)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +909,40 @@ mod tests {
     fn a_default_limit_set_is_documented() {
         let limits = Limits::default();
         assert_eq!(limits.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn mariadb_grant_parser_distinguishes_select_from_writes() {
+        let tables = vec![QualifiedName::parse_with_default("orders", "mdb_src").unwrap()];
+        assert!(!mariadb_grant_allows_write(
+            "GRANT USAGE ON *.* TO `mdb_ro`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(!mariadb_grant_allows_write(
+            "GRANT SELECT ON `mdb_src`.* TO `mdb_ro`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(!mariadb_grant_allows_write(
+            "GRANT INSERT ON `other_db`.* TO `mdb_ro`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(mariadb_grant_allows_write(
+            "GRANT ALL PRIVILEGES ON *.* TO `root`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(mariadb_grant_allows_write(
+            "GRANT SELECT, INSERT ON `mdb_src`.* TO `mdb_rw`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(mariadb_grant_allows_write(
+            "GRANT UPDATE (`status`) ON `mdb_src`.`orders` TO `mdb_rw`@`%`",
+            "mdb_src",
+            &tables
+        ));
     }
 }

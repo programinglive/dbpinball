@@ -20,7 +20,7 @@ pub struct DbConnection {
     pub target: TargetClass,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DbEngine {
     Mysql,

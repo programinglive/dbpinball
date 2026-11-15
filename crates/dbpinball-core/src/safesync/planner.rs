@@ -11,8 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use sqlx::Row;
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::graph::{discover_parents, ForeignKeyEdge, SchemaGraph, TableInfo};
+use crate::safesync::mariadb_graph::discover_mariadb_parents_conn;
 use crate::safesync::mask::{ColumnRule, MaskInput, MaskStrategy, MaskedValue, Masker};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::{
@@ -110,19 +112,30 @@ pub async fn build(
 
     let depth = spec.selection.relationships.depth;
     let limits = &spec.limits;
+    let engine = session.engine();
+    let default_schema = match engine {
+        DbEngine::Postgres => "public".to_string(),
+        DbEngine::Mysql => session.identity().database_name.clone(),
+    };
 
     let root_names = spec
         .selection
         .roots
         .iter()
-        .map(|root| QualifiedName::parse(&root.table))
+        .map(|root| QualifiedName::parse_with_default(&root.table, &default_schema))
         .collect::<Result<Vec<_>, _>>()?;
 
     // A non-zero depth needs row values to follow foreign keys; a metadata-only
     // plan is only possible for a flat selection.
     let effective_read = read_rows || depth > 0;
-    let graph =
-        discover_parents(session, &root_names, if effective_read { depth } else { 0 }).await?;
+    let effective_depth = if effective_read { depth } else { 0 };
+    let graph = match engine {
+        DbEngine::Postgres => discover_parents(session, &root_names, effective_depth).await?,
+        DbEngine::Mysql => {
+            discover_mariadb_parents_conn(session.mysql_connection()?, &root_names, effective_depth)
+                .await?
+        }
+    };
 
     // The source role must be safe for every discovered table, not just the
     // roots: a parent the role owns would bypass RLS on it.
@@ -136,7 +149,7 @@ pub async fn build(
     }
 
     if !effective_read {
-        return metadata_only(spec, &graph, masker);
+        return metadata_only(spec, &graph, masker, engine, &default_schema);
     }
 
     let mut selected: BTreeMap<QualifiedName, Vec<RawRow>> = BTreeMap::new();
@@ -148,7 +161,7 @@ pub async fn build(
 
     // Roots.
     for root in &spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
+        let name = QualifiedName::parse_with_default(&root.table, &default_schema)?;
         let info = graph
             .table(&name)
             .ok_or_else(|| missing_table(&name))?
@@ -182,7 +195,7 @@ pub async fn build(
             ));
         }
 
-        roots.push(root_plan_for(&info, root, masker)?);
+        roots.push(root_plan_for_engine(engine, &info, root, masker)?);
     }
 
     // Parent worklist. A request is (parent, parent columns, tuple, level).
@@ -359,13 +372,15 @@ fn metadata_only(
     spec: &SafeSyncSpec,
     graph: &SchemaGraph,
     masker: &Masker,
+    engine: DbEngine,
+    default_schema: &str,
 ) -> Result<SelectionResult, CoreError> {
     let mut roots = Vec::new();
     for root in &spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
+        let name = QualifiedName::parse_with_default(&root.table, default_schema)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
         masker.coverage(&name.schema, &name.table, &info.column_shapes(graph))?;
-        roots.push(root_plan_for(info, root, masker)?);
+        roots.push(root_plan_for_engine(engine, info, root, masker)?);
     }
 
     let names: Vec<QualifiedName> = graph.tables.iter().map(|table| table.name()).collect();
@@ -722,7 +737,7 @@ async fn fetch_root(
     root: &crate::safesync::spec::RootSelection,
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
-    let (where_clause, binds) = build_filter(info, root)?;
+    let (where_clause, binds) = build_filter_for_engine(session.engine(), info, root)?;
     fetch(session, info, &where_clause, &binds, limits).await
 }
 
@@ -733,6 +748,7 @@ async fn fetch_by_key(
     tuple: &[Option<String>],
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
+    let engine = session.engine();
     let mut clauses = Vec::with_capacity(columns.len());
     let mut binds = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
@@ -747,7 +763,15 @@ async fn fetch_by_key(
                 "invalid_identifier",
             ));
         }
-        clauses.push(format!("{}::text = ${}", quote_ident(column), index + 1));
+        let q_col = quote_ident_for(engine, column);
+        match engine {
+            DbEngine::Postgres => {
+                clauses.push(format!("{q_col}::text = ${}", index + 1));
+            }
+            DbEngine::Mysql => {
+                clauses.push(format!("CAST({q_col} AS CHAR CHARACTER SET utf8mb4) = ?"));
+            }
+        }
         binds.push(tuple[index].clone().unwrap_or_default());
     }
 
@@ -762,42 +786,88 @@ async fn fetch(
     binds: &[String],
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
+    let engine = session.engine();
     let column_list = info
         .columns
         .iter()
-        .map(|column| format!("{}::text", quote_ident(&column.name)))
+        .map(|column| {
+            let q = quote_ident_for(engine, &column.name);
+            match engine {
+                DbEngine::Postgres => format!("{q}::text"),
+                DbEngine::Mysql => format!("CAST({q} AS CHAR CHARACTER SET utf8mb4)"),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
     let sql = format!(
         "SELECT {} FROM {}.{} {} LIMIT {}",
         column_list,
-        quote_ident(&info.schema),
-        quote_ident(&info.table),
+        quote_ident_for(engine, &info.schema),
+        quote_ident_for(engine, &info.table),
         where_clause,
         limits.max_rows_per_table.saturating_add(1)
     );
 
-    let mut query = sqlx::query(&sql);
-    for value in binds {
-        query = query.bind(value);
-    }
+    match engine {
+        DbEngine::Postgres => {
+            let mut query = sqlx::query(&sql);
+            for value in binds {
+                query = query.bind(value);
+            }
 
-    session.begin_read_only().await?;
-    let fetched = query.fetch_all(&mut *session.connection()).await;
-    let _ = session.rollback().await;
-    let rows = fetched.map_err(connection_error)?;
+            session.begin_read_only().await?;
+            let fetched = query.fetch_all(session.pg_connection()?).await;
+            let _ = session.rollback().await;
+            let rows = fetched.map_err(connection_error)?;
 
-    let mut output = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut values = Vec::with_capacity(info.columns.len());
-        for index in 0..info.columns.len() {
-            let value: Option<String> = row.try_get(index).unwrap_or(None);
-            values.push(value);
+            let mut output = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut values = Vec::with_capacity(info.columns.len());
+                for index in 0..info.columns.len() {
+                    let value: Option<String> = row.try_get(index).unwrap_or(None);
+                    values.push(value);
+                }
+                output.push(values);
+            }
+            Ok(output)
         }
-        output.push(values);
+        DbEngine::Mysql => {
+            let mut query = sqlx::query(&sql);
+            for value in binds {
+                query = query.bind(value);
+            }
+
+            session.begin_read_only().await?;
+            let fetched = query.fetch_all(session.mysql_connection()?).await;
+            let _ = session.rollback().await;
+            let rows = fetched.map_err(connection_error)?;
+
+            let mut output = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut values = Vec::with_capacity(info.columns.len());
+                for index in 0..info.columns.len() {
+                    let value: Option<String> = match row.try_get::<Option<String>, _>(index) {
+                        Ok(v) => v,
+                        Err(_) => match row.try_get::<Option<Vec<u8>>, _>(index) {
+                            Ok(Some(bytes)) => Some(String::from_utf8(bytes).map_err(|_| {
+                                CoreError::with_detail(
+                                    ErrorCode::Unsupported,
+                                    "non-UTF-8 column value is not supported",
+                                    "unsupported_encoding",
+                                )
+                            })?),
+                            Ok(None) => None,
+                            Err(_) => None,
+                        },
+                    };
+                    values.push(value);
+                }
+                output.push(values);
+            }
+            Ok(output)
+        }
     }
-    Ok(output)
 }
 
 fn mask_table(
@@ -938,7 +1008,16 @@ fn identity_string(info: &TableInfo, raw: &RawRow) -> String {
     parts.join(",")
 }
 
+#[cfg(test)]
 fn build_filter(
+    info: &TableInfo,
+    root: &crate::safesync::spec::RootSelection,
+) -> Result<(String, Vec<String>), CoreError> {
+    build_filter_for_engine(DbEngine::Postgres, info, root)
+}
+
+fn build_filter_for_engine(
+    engine: DbEngine,
     info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
 ) -> Result<(String, Vec<String>), CoreError> {
@@ -976,12 +1055,19 @@ fn build_filter(
                 )
             })?;
 
-        let column = quote_ident(&predicate.column);
+        let column = quote_ident_for(engine, &predicate.column);
 
         match predicate.op {
             FilterOp::Eq => {
                 binds.push(render_value(&predicate.value)?);
-                clauses.push(format!("{column}::text = ${}", binds.len()));
+                match engine {
+                    DbEngine::Postgres => {
+                        clauses.push(format!("{column}::text = ${}", binds.len()));
+                    }
+                    DbEngine::Mysql => {
+                        clauses.push(format!("CAST({column} AS CHAR CHARACTER SET utf8mb4) = ?"));
+                    }
+                }
             }
             FilterOp::In => {
                 let FilterValue::List(values) = &predicate.value else {
@@ -990,24 +1076,49 @@ fn build_filter(
                 let mut placeholders = Vec::with_capacity(values.len());
                 for value in values {
                     binds.push(render_value(value)?);
-                    placeholders.push(format!("${}", binds.len()));
+                    match engine {
+                        DbEngine::Postgres => placeholders.push(format!("${}", binds.len())),
+                        DbEngine::Mysql => placeholders.push("?".to_string()),
+                    }
                 }
-                clauses.push(format!("{column}::text IN ({})", placeholders.join(", ")));
+                match engine {
+                    DbEngine::Postgres => {
+                        clauses.push(format!("{column}::text IN ({})", placeholders.join(", ")));
+                    }
+                    DbEngine::Mysql => {
+                        clauses.push(format!(
+                            "CAST({column} AS CHAR CHARACTER SET utf8mb4) IN ({})",
+                            placeholders.join(", ")
+                        ));
+                    }
+                }
             }
             FilterOp::Gte | FilterOp::Lte => {
-                let typed =
-                    crate::safesync::typed::parse_typed_value(&col.type_name, &predicate.value)?;
-                binds.push(typed.canonical());
+                let typed = crate::safesync::typed::parse_typed_value_for_engine(
+                    engine,
+                    &col.type_name,
+                    &predicate.value,
+                )?;
                 let op_sql = match predicate.op {
                     FilterOp::Gte => ">=",
                     FilterOp::Lte => "<=",
                     _ => unreachable!(),
                 };
-                clauses.push(format!(
-                    "{column} {op_sql} ${}::{}",
-                    binds.len(),
-                    typed.cast()
-                ));
+                match engine {
+                    DbEngine::Postgres => {
+                        binds.push(typed.canonical());
+                        clauses.push(format!(
+                            "{column} {op_sql} ${}::{}",
+                            binds.len(),
+                            typed.cast()
+                        ));
+                    }
+                    DbEngine::Mysql => {
+                        let mdb_cast = typed.mariadb_cast()?;
+                        binds.push(typed.mariadb_bind());
+                        clauses.push(format!("{column} {op_sql} CAST(? AS {mdb_cast})"));
+                    }
+                }
             }
         }
     }
@@ -1015,7 +1126,8 @@ fn build_filter(
     Ok((format!("WHERE {}", clauses.join(" AND ")), binds))
 }
 
-fn root_plan_for(
+fn root_plan_for_engine(
+    engine: DbEngine,
     info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
     masker: &Masker,
@@ -1035,7 +1147,11 @@ fn root_plan_for(
                 )
             })?;
         type_map.insert(col.name.clone(), col.type_name.clone());
-        let encoded = crate::safesync::spec::canonical_predicate(predicate, &col.type_name)?;
+        let encoded = crate::safesync::spec::canonical_predicate_for_engine(
+            engine,
+            predicate,
+            &col.type_name,
+        )?;
         canonicalized.push((
             encoded,
             predicate.column.clone(),
@@ -1046,7 +1162,8 @@ fn root_plan_for(
     canonicalized.sort_by(|a, b| a.0.cmp(&b.0));
     canonicalized.dedup_by(|a, b| a.0 == b.0);
 
-    let canonical = crate::safesync::spec::canonical_filter(&root.filter, &type_map)?;
+    let canonical =
+        crate::safesync::spec::canonical_filter_for_engine(engine, &root.filter, &type_map)?;
     Ok(RootPlan {
         schema: info.schema.clone(),
         table: info.table.clone(),
@@ -1082,7 +1199,17 @@ pub async fn extract_table(
     limits: &Limits,
 ) -> Result<TableRows, CoreError> {
     let name = info.name();
-    let graph = discover_parents(session, std::slice::from_ref(&name), 0).await?;
+    let graph = match session.engine() {
+        DbEngine::Postgres => discover_parents(session, std::slice::from_ref(&name), 0).await?,
+        DbEngine::Mysql => {
+            discover_mariadb_parents_conn(
+                session.mysql_connection()?,
+                std::slice::from_ref(&name),
+                0,
+            )
+            .await?
+        }
+    };
     if !graph.edges.is_empty() {
         return Err(CoreError::with_detail(
             ErrorCode::Unsupported,
@@ -1114,10 +1241,18 @@ fn invalid_filter(message: &str) -> CoreError {
     CoreError::with_detail(ErrorCode::Usage, message, "invalid_spec")
 }
 
-/// Quote an identifier. The catalogue already validated it, but quoting keeps a
-/// future caller from reintroducing string concatenation.
+/// Quote an identifier for PostgreSQL. The catalogue already validated it, but
+/// quoting keeps a future caller from reintroducing string concatenation.
 pub fn quote_ident(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+    quote_ident_for(DbEngine::Postgres, identifier)
+}
+
+/// Quote an identifier for the specified engine.
+pub fn quote_ident_for(engine: DbEngine, identifier: &str) -> String {
+    match engine {
+        DbEngine::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        DbEngine::Mysql => format!("`{}`", identifier.replace('`', "``")),
+    }
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {

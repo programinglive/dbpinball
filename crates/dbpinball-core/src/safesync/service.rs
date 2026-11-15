@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::domain::connection::DbConnection;
+use crate::domain::connection::{DbConnection, DbEngine};
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::ports::credentials::CredentialProvider;
 use crate::safesync::audit::{AuditRecord, TableAudit};
@@ -83,7 +83,7 @@ pub async fn plan(
     spec.validate()?;
     let masker = masker_for(spec, keys)?;
 
-    let root_tables = root_tables(spec)?;
+    let root_tables = root_tables_for(spec, source)?;
 
     let mut source_session =
         BoundSession::open(SessionRole::Source, source, credentials, &spec.limits).await?;
@@ -185,7 +185,7 @@ pub async fn validate(
         ));
     }
     check_filter_digests(plan, spec, &masker)?;
-    let root_tables = root_tables(spec)?;
+    let root_tables = root_tables_for(spec, source)?;
 
     let mut source_session =
         BoundSession::open(SessionRole::Source, source, credentials, &spec.limits).await?;
@@ -260,8 +260,15 @@ pub fn check_filter_digests(
         return Err(filter_mismatch("the plan does not match the specification"));
     }
 
+    let engine = if plan.source.engine == "mariadb" || plan.source.engine == "mysql" {
+        DbEngine::Mysql
+    } else {
+        DbEngine::Postgres
+    };
+
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let root_name = crate::safesync::spec::QualifiedName::parse(&root.table)?;
+        let root_name =
+            crate::safesync::spec::QualifiedName::parse_with_default(&root.table, &planned.schema)?;
         if root_name.schema != planned.schema || root_name.table != planned.table {
             return Err(filter_mismatch(
                 "the specification does not match the plan's root table",
@@ -293,7 +300,8 @@ pub fn check_filter_digests(
                 ));
             }
         }
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter, &types)?;
+        let canonical =
+            crate::safesync::spec::canonical_filter_for_engine(engine, &root.filter, &types)?;
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
@@ -343,11 +351,18 @@ fn refusal(decision: PolicyDecision) -> CoreError {
     )
 }
 
-fn root_tables(spec: &SafeSyncSpec) -> Result<Vec<QualifiedName>, CoreError> {
+fn root_tables_for(
+    spec: &SafeSyncSpec,
+    source: &DbConnection,
+) -> Result<Vec<QualifiedName>, CoreError> {
+    let default_schema = match source.engine {
+        DbEngine::Postgres => "public",
+        DbEngine::Mysql => source.database.as_str(),
+    };
     spec.selection
         .roots
         .iter()
-        .map(|root| QualifiedName::parse(&root.table))
+        .map(|root| QualifiedName::parse_with_default(&root.table, default_schema))
         .collect()
 }
 
@@ -482,7 +497,7 @@ pub async fn execute(
     }
 
     check_filter_digests(request.plan, request.spec, &masker)?;
-    let root_tables = root_tables(request.spec)?;
+    let root_tables = root_tables_for(request.spec, request.source)?;
 
     let mut source_session = BoundSession::open(
         SessionRole::Source,
@@ -679,6 +694,10 @@ pub async fn status(
 ) -> Result<RunStatus, CoreError> {
     let mut session =
         BoundSession::open(SessionRole::Destination, destination, credentials, limits).await?;
+
+    if session.engine() == DbEngine::Mysql {
+        return crate::safesync::import_mariadb::read_run_status(&mut session, run_id).await;
+    }
 
     let statement = format!(
         "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, sequence_status, finished_at::text

@@ -879,7 +879,16 @@ fn fit_text(value: &str, max_len: Option<usize>, strategy: &str) -> Result<Maske
 pub fn is_text_type(type_name: &str) -> bool {
     matches!(
         type_name,
-        "text" | "character varying" | "varchar" | "citext" | "name"
+        "text"
+            | "character varying"
+            | "character"
+            | "varchar"
+            | "char"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "citext"
+            | "name"
     )
 }
 
@@ -893,14 +902,32 @@ pub fn is_keepable_type(type_name: &str) -> bool {
 
 /// Integer types that an identity column can use.
 pub fn is_integer_type(type_name: &str) -> bool {
-    matches!(type_name, "bigint" | "integer" | "smallint")
+    matches!(
+        type_name,
+        "bigint" | "integer" | "int" | "mediumint" | "smallint" | "tinyint"
+    )
 }
 
 pub fn is_risky_type(type_name: &str) -> bool {
     type_name.ends_with("[]")
         || matches!(
             type_name,
-            "json" | "jsonb" | "bytea" | "xml" | "tsvector" | "tsquery"
+            "json"
+                | "jsonb"
+                | "bytea"
+                | "blob"
+                | "tinyblob"
+                | "mediumblob"
+                | "longblob"
+                | "binary"
+                | "varbinary"
+                | "geometry"
+                | "point"
+                | "linestring"
+                | "polygon"
+                | "xml"
+                | "tsvector"
+                | "tsquery"
         )
 }
 

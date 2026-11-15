@@ -248,7 +248,7 @@ async fn verify_mysql(
     })
 }
 
-fn is_mariadb_version(version: &str) -> bool {
+pub(crate) fn is_mariadb_version(version: &str) -> bool {
     version.to_ascii_lowercase().contains("mariadb")
 }
 
@@ -256,7 +256,7 @@ fn is_mariadb_version(version: &str) -> bool {
 /// does not expose MySQL's `@@server_uuid`. Fails closed (`None`) if any
 /// required server property is missing or ambiguous rather than falling back to
 /// `@@server_id` alone.
-fn mariadb_server_fingerprint(
+pub(crate) fn mariadb_server_fingerprint(
     hostname: &str,
     port: u32,
     datadir: &str,

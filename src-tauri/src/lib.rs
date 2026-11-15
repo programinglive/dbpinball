@@ -1,6 +1,7 @@
 mod connections;
 mod models;
 mod runners;
+mod safesync;
 mod secrets;
 mod security;
 
@@ -153,6 +154,62 @@ fn security_forget(connection_id: String) -> Result<bool, String> {
     security::forget(connection_id)
 }
 
+#[tauri::command]
+async fn safe_sync_inspect(
+    connection: DbConnection,
+) -> Result<dbpinball_core::safesync::SessionIdentity, String> {
+    safesync::inspect(connection).await
+}
+
+#[tauri::command]
+async fn safe_sync_plan(
+    spec_yaml_or_json: String,
+    source: DbConnection,
+    destination: DbConnection,
+    estimate: bool,
+    replace: bool,
+) -> Result<dbpinball_core::safesync::DryRunPlan, String> {
+    safesync::plan(spec_yaml_or_json, source, destination, estimate, replace).await
+}
+
+#[tauri::command]
+async fn safe_sync_validate(
+    plan: dbpinball_core::safesync::DryRunPlan,
+    spec_yaml_or_json: String,
+    source: DbConnection,
+    destination: DbConnection,
+) -> Result<dbpinball_core::safesync::service::ValidationReport, String> {
+    safesync::validate(plan, spec_yaml_or_json, source, destination).await
+}
+
+#[tauri::command]
+async fn safe_sync_execute(
+    plan: dbpinball_core::safesync::DryRunPlan,
+    spec_yaml_or_json: String,
+    acknowledgement: String,
+    replace: bool,
+    source: DbConnection,
+    destination: DbConnection,
+) -> Result<dbpinball_core::safesync::service::RunReport, String> {
+    safesync::execute(
+        plan,
+        spec_yaml_or_json,
+        acknowledgement,
+        replace,
+        source,
+        destination,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn safe_sync_status(
+    run_id: String,
+    destination: DbConnection,
+) -> Result<dbpinball_core::safesync::service::RunStatus, String> {
+    safesync::status(run_id, destination).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -177,7 +234,12 @@ pub fn run() {
             connections_migration_status,
             security_status,
             security_enroll,
-            security_forget
+            security_forget,
+            safe_sync_inspect,
+            safe_sync_plan,
+            safe_sync_validate,
+            safe_sync_execute,
+            safe_sync_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

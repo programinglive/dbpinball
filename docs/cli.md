@@ -96,7 +96,7 @@ dbpinball schema inspect --connection <id> --database app --json
 
 ### `dbpinball safe-sync`
 
-Runs the PostgreSQL Safe Sync workflow (`inspect`, `plan`, `validate`, `execute`, `status`, `key rotate`). Root selection filters support `eq`, `in` (up to 100 values), and inclusive typed range bounds `gte` and `lte` (up to 8 predicates per root, combined with `AND`) on `smallint`, `integer`, `bigint`, `numeric`/`decimal`, `date`, `timestamp without time zone`, and `timestamp with time zone` (with an explicit numeric offset or `Z`). Filter literals are never written to the plan file; the plan stores `filter_columns`, `filter_ops`, `filter_types`, and the keyed `filter_digest`.
+Runs the PostgreSQL and MariaDB 10.11 Safe Sync workflow (`inspect`, `plan`, `validate`, `execute`, `status`, `key rotate`). Root selection filters support `eq`, `in` (up to 100 values), and inclusive typed range bounds `gte` and `lte` (up to 8 predicates per root, combined with `AND`) on `smallint`, `integer`/`int`, `bigint`, `numeric`/`decimal`, `date`, `timestamp without time zone` / `datetime`, and `timestamp with time zone` / `timestamp` (with an explicit numeric offset or `Z`). Filter literals are never written to the plan file; the plan stores `filter_columns`, `filter_ops`, `filter_types`, and the keyed `filter_digest`.
 
 ## Global options
 

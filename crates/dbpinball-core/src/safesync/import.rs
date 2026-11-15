@@ -12,6 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::graph::inspect_table;
 use crate::safesync::mask::{hex_lower, MaskedValue};
@@ -67,6 +68,10 @@ pub async fn run(
     policy: ConflictPolicy,
     cancel: Arc<AtomicBool>,
 ) -> Result<ImportReport, CoreError> {
+    if session.engine() == DbEngine::Mysql {
+        return crate::safesync::import_mariadb::run(session, plan, tables, policy, cancel).await;
+    }
+
     // The run table is created in autocommit before the data transaction. It is
     // its own transaction, so a failed CREATE leaves the connection usable and
     // the session lock is released cleanly; it also keeps the DDL out of the
@@ -370,6 +375,10 @@ pub async fn reconcile_sequences(
     tables: &[TableRows],
     run_id: &str,
 ) -> Result<String, CoreError> {
+    if session.engine() == DbEngine::Mysql {
+        return crate::safesync::import_mariadb::reconcile_sequences(session, tables, run_id).await;
+    }
+
     let mut raised = false;
     let mut unproven = false;
 
@@ -562,6 +571,10 @@ pub async fn persisted_sequence_status(
     session: &mut BoundSession,
     run_id: &str,
 ) -> Result<String, CoreError> {
+    if session.engine() == DbEngine::Mysql {
+        return crate::safesync::import_mariadb::persisted_sequence_status(session, run_id).await;
+    }
+
     let status: Option<String> = sqlx::query_scalar(&format!(
         "SELECT sequence_status FROM {RUN_TABLE} WHERE run_id = $1::uuid"
     ))
