@@ -942,6 +942,16 @@ fn build_filter(
     info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
 ) -> Result<(String, Vec<String>), CoreError> {
+    if root.filter.len() > crate::safesync::spec::MAX_FILTER_PREDICATES {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            format!(
+                "a root filter may contain at most {} predicates",
+                crate::safesync::spec::MAX_FILTER_PREDICATES
+            ),
+            "limit_exceeded",
+        ));
+    }
     if root.filter.is_empty() {
         return Err(CoreError::with_detail(
             ErrorCode::Usage,
@@ -1354,5 +1364,49 @@ mod tests {
         };
         let err = build_filter(&info, &bad_root).unwrap_err();
         assert_eq!(err.detail.as_deref(), Some("invalid_filter"));
+    }
+
+    #[test]
+    fn build_filter_refuses_nine_predicates_even_with_duplicates() {
+        use crate::safesync::graph::{ColumnInfo, TableInfo};
+        use crate::safesync::spec::{FilterPredicate, RootSelection};
+
+        let info = TableInfo {
+            schema: "public".into(),
+            table: "orders".into(),
+            relkind: "r".into(),
+            rls_active: false,
+            columns: (0..8)
+                .map(|idx| ColumnInfo {
+                    name: format!("c{idx}"),
+                    type_name: "integer".into(),
+                    nullable: false,
+                    is_primary_key: false,
+                    is_generated: false,
+                    is_identity: false,
+                    identity_always: false,
+                    generated_expression: None,
+                    max_len: None,
+                })
+                .collect(),
+            primary_key: vec!["c0".into()],
+            row_identity: vec!["c0".into()],
+            schema_hash: "hash".into(),
+        };
+        let mut filter: Vec<FilterPredicate> = (0..8)
+            .map(|idx| FilterPredicate {
+                column: format!("c{idx}"),
+                op: FilterOp::Gte,
+                value: FilterValue::Int(idx),
+            })
+            .collect();
+        filter.push(filter[0].clone());
+        let root = RootSelection {
+            table: "public.orders".into(),
+            filter,
+        };
+        let err = build_filter(&info, &root).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
     }
 }

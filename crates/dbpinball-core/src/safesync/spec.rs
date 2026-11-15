@@ -263,6 +263,13 @@ pub fn canonical_filter(
     filter: &[FilterPredicate],
     types: &BTreeMap<String, String>,
 ) -> Result<String, CoreError> {
+    if filter.len() > MAX_FILTER_PREDICATES {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            format!("a root filter may contain at most {MAX_FILTER_PREDICATES} predicates"),
+            "limit_exceeded",
+        ));
+    }
     let mut encoded = Vec::with_capacity(filter.len());
     for predicate in filter {
         let type_name = types.get(&predicate.column).ok_or_else(|| {
@@ -717,6 +724,26 @@ selection:
             "        - column: c8\n          op: lte\n          value: 99\nmasking:",
         );
         let err = SafeSyncSpec::parse_yaml(&yaml).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
+    }
+
+    #[test]
+    fn canonical_filter_refuses_nine_predicates_even_with_duplicates() {
+        let mut types = BTreeMap::new();
+        let mut filter = Vec::new();
+        for idx in 0..8 {
+            let col = format!("c{idx}");
+            types.insert(col.clone(), "integer".to_string());
+            filter.push(FilterPredicate {
+                column: col,
+                op: FilterOp::Gte,
+                value: FilterValue::Int(idx),
+            });
+        }
+        // Add a duplicate predicate as the 9th entry; cap must still reject before dedup.
+        filter.push(filter[0].clone());
+        let err = canonical_filter(&filter, &types).unwrap_err();
         assert_eq!(err.code, ErrorCode::Usage);
         assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
     }

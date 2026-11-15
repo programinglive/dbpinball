@@ -1451,3 +1451,98 @@ async fn t30_destination_transaction_rolls_back_on_conflict() {
     assert_eq!(cust_count, 0);
     assert_eq!(ord_count, 0);
 }
+
+#[tokio::test]
+async fn t31_changed_root_table_is_refused_before_connect() {
+    let Some((_guard, c)) = RangeCluster::locked().await else {
+        return;
+    };
+    let t_ord = setup_e2e_tables(&c).await;
+    let spec = e2e_spec(
+        &t_ord,
+        vec![pred("id", FilterOp::Gte, FilterValue::Int(10))],
+        1,
+    );
+    let plan = service::plan(
+        &spec,
+        &c.source.connection,
+        &c.destination.connection,
+        &c.provider(),
+        &c.store(),
+        &key_store(),
+        now_ms(),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut tampered = spec.clone();
+    tampered.selection.roots[0].table = "public.ranged_customers".to_string();
+
+    let validate_err = service::validate(
+        &plan,
+        &tampered,
+        &c.source.connection,
+        &c.destination.connection,
+        &c.provider(),
+        &c.store(),
+        &key_store(),
+        now_ms(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(validate_err.detail.as_deref(), Some("spec_plan_mismatch"));
+
+    let execute_err = run_execute(&c, &tampered, &plan, false).await.unwrap_err();
+    assert_eq!(execute_err.detail.as_deref(), Some("spec_plan_mismatch"));
+}
+
+#[tokio::test]
+async fn t32_validate_refuses_nine_predicates_with_duplicate() {
+    let Some((_guard, c)) = RangeCluster::locked().await else {
+        return;
+    };
+    let t_ord = setup_e2e_tables(&c).await;
+    let spec = e2e_spec(
+        &t_ord,
+        vec![pred("id", FilterOp::Gte, FilterValue::Int(10))],
+        1,
+    );
+    let plan = service::plan(
+        &spec,
+        &c.source.connection,
+        &c.destination.connection,
+        &c.provider(),
+        &c.store(),
+        &key_store(),
+        now_ms(),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut bloated = spec.clone();
+    bloated.selection.roots[0].filter = (0..8)
+        .map(|i| pred("id", FilterOp::Gte, FilterValue::Int(i)))
+        .collect();
+    bloated.selection.roots[0]
+        .filter
+        .push(pred("id", FilterOp::Gte, FilterValue::Int(0)));
+
+    let err = service::validate(
+        &plan,
+        &bloated,
+        &c.source.connection,
+        &c.destination.connection,
+        &c.provider(),
+        &c.store(),
+        &key_store(),
+        now_ms(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Usage);
+    assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
+}
