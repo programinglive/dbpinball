@@ -110,7 +110,7 @@ The design separates two things that are easy to confuse:
 - **Administrative operations** — raw backup, restore, copy, and database management. Byte-faithful, unsanitized.
 - **Safe Sync** — policy-controlled, selective, sanitized reproduction of production data into a verified development target.
 
-**A raw database copy is not sanitized and is not safe to share.** Safe Sync is the only capability intended to produce shareable development data, and it is not implemented yet.
+**A raw database copy is not sanitized and is not safe to share.** Safe Sync is the only capability intended to produce shareable development data. It is implemented for PostgreSQL and MariaDB 10.11+ InnoDB; see the [Safe Sync design](https://dbpinball.programinglive.com/security/safe-sync-design) for the supported types and the refusals.
 
 ## Supported database engines
 

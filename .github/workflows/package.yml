@@ -77,32 +77,59 @@ jobs:
           & $exe doctor --json | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "dbpinball doctor failed" }
 
-      - name: Verify the CLI archive installs and resolves
+      - name: Verify the CLI archive installs and resolves from PATH
         shell: pwsh
         run: |
           $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $zip = "artifacts/release/v$version/dbpinball-cli-$version-x64.zip"
           $extract = "artifacts/verify/cli"
           Expand-Archive -Path $zip -DestinationPath $extract -Force
-          # Install into a throwaway LOCALAPPDATA so the runner's real PATH is untouched.
-          $env:LOCALAPPDATA = Join-Path $PWD "artifacts/verify/localappdata"
-          New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+
+          $envKey = 'HKCU:\Environment'
+          $before = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+
           & "$extract/install-cli.ps1" -Quiet
           if ($LASTEXITCODE -ne 0) { throw "install-cli.ps1 failed" }
-          $installed = Join-Path $env:LOCALAPPDATA "dbpinball/bin/dbpinball.exe"
-          if (-not (Test-Path $installed)) { throw "the CLI was not installed" }
-          & $installed --version
+
+          $after = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $installDir = Join-Path $env:LOCALAPPDATA 'dbpinball/bin'
+          if (-not (($after -split ';') | Where-Object { $_.TrimEnd('\') -ieq $installDir.TrimEnd('\') })) {
+            throw "the installer did not add $installDir to the user PATH"
+          }
+
+          # Resolve the command the way a new terminal would: from the persisted
+          # user PATH, not from an absolute path.
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $env:PATH = "$after;$machinePath"
+          $resolved = (Get-Command dbpinball -ErrorAction SilentlyContinue)
+          if (-not $resolved) { throw "dbpinball does not resolve from the persisted user PATH" }
+          if ($resolved.Source -notlike "*dbpinball\bin\dbpinball.exe") {
+            throw "dbpinball resolved to an unexpected file: $($resolved.Source)"
+          }
+          dbpinball --version
           if ($LASTEXITCODE -ne 0) { throw "the installed CLI did not run" }
+          dbpinball --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "dbpinball --help failed" }
+
+          & "$extract/install-cli.ps1" -Uninstall -Quiet
+          if ($LASTEXITCODE -ne 0) { throw "install-cli.ps1 -Uninstall failed" }
+          $restored = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($restored -ne $before) {
+            throw "uninstall did not restore the original user PATH`nbefore: $before`nafter:  $restored"
+          }
 
       - name: Verify checksums
         shell: pwsh
         run: |
           $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $dir = "artifacts/release/v$version"
-          Get-Content "$dir/SHA256SUMS.txt" | ForEach-Object {
-            if ($_ -match '^([0-9a-f]{64})\s+(.+)$') {
+          $lines = @(Get-Content "$dir/SHA256SUMS.txt" | Where-Object { $_ -match '^[0-9a-f]{64}\s+' })
+          if ($lines.Count -lt 2) { throw "SHA256SUMS.txt must cover at least the installer and the CLI archive" }
+          foreach ($line in $lines) {
+            if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
               $expected = $Matches[1]
               $file = Join-Path $dir $Matches[2]
+              if (-not (Test-Path -LiteralPath $file)) { throw "checksummed file is missing: $file" }
               $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
               if ($actual -ne $expected) { throw "checksum mismatch for $file" }
             }
@@ -167,11 +194,38 @@ jobs:
           out="artifacts/release/v$version"
           mkdir -p "$out"
           tar -C target/cli-dist/release -czf "$out/dbpinball-cli-$version-x64-linux.tar.gz" dbpinball
-          cp src-tauri/target/release/bundle/deb/*.deb "$out/" 2>/dev/null || true
-          cp src-tauri/target/release/bundle/appimage/*.AppImage "$out/" 2>/dev/null || true
+
+          # The workspace target directory is the repository's `target`, not
+          # `src-tauri/target`. Fail loudly instead of uploading a CLI-only set.
+          deb=$(ls target/release/bundle/deb/*.deb 2>/dev/null | head -n 1 || true)
+          appimage=$(ls target/release/bundle/appimage/*.AppImage 2>/dev/null | head -n 1 || true)
+          if [ -z "$deb" ]; then echo "no .deb was produced" >&2; exit 1; fi
+          if [ -z "$appimage" ]; then echo "no AppImage was produced" >&2; exit 1; fi
+          cp "$deb" "$out/"
+          cp "$appimage" "$out/"
+
           cd "$out"
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+
+          commit=$(git rev-parse HEAD)
+          dirty=false
+          if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
+          cat > provenance.json <<EOF
+          {
+            "product": "dbpinball",
+            "version": "$version",
+            "commit": "$commit",
+            "dirty": $dirty,
+            "architecture": "x64",
+            "platform": "linux",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "rustc": "$(rustc --version | sed 's/^rustc //')",
+            "node": "$(node --version)",
+            "artifacts": $(ls | grep -v '^provenance.json$' | grep -v '^SHA256SUMS.txt$' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          }
+          EOF
+          cat provenance.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

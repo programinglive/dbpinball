@@ -50,8 +50,11 @@ Output under `artifacts\release\v<version>\`:
 | --- | --- |
 | `dbpinball_<version>_x64-setup.exe` | Desktop installer (NSIS, per-user) |
 | `dbpinball-cli-<version>-x64.zip` | `dbpinball.exe`, `install-cli.ps1`, `CLI-README.txt` |
-| `SHA256SUMS.txt` | SHA-256 of every artifact |
+| `SHA256SUMS.txt` | SHA-256 of the installer and the CLI archive |
 | `provenance.json` | Version, commit, architecture, toolchain versions |
+
+`provenance.json` is written after the checksums, so it is not itself listed in
+`SHA256SUMS.txt`. The Linux job writes the same two files for its artifacts.
 
 The script never publishes anything. Creating a tag or a GitHub release is a
 separate, explicitly authorized step.

@@ -43,9 +43,10 @@ fn main() {
             .set("FileVersion", env!("CARGO_PKG_VERSION"));
 
         if let Err(error) = resource.compile() {
-            // A missing resource compiler must not break a build that would
-            // otherwise succeed; the binary is still functional without it.
-            println!("cargo:warning=Windows resource compilation skipped: {error}");
+            // The version resource is what keeps the release binary from being
+            // quarantined by heuristic scanners, so a Windows build must not
+            // silently ship without it.
+            panic!("Windows resource compilation failed: {error}");
         }
     }
 }
