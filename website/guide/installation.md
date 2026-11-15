@@ -129,7 +129,9 @@ powershell -ExecutionPolicy Bypass -File .\install-cli.ps1 -Uninstall
 ```
 
 This removes the binary and the PATH entry it added. Other PATH entries are
-preserved.
+preserved, and an entry that was already on your PATH before the install is left
+in place. If you remove the entry by hand and add the same folder back yourself,
+uninstall still treats it as the entry it created and removes it.
 
 - **Linux:** `sudo apt remove dbpinball`, or delete the AppImage.
 

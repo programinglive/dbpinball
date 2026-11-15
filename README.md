@@ -19,7 +19,7 @@ The project is being rebuilt around a **core-first, CLI-first** architecture: a 
 - **Local-first.** Connections and credentials stay on your machine. Passwords go to the OS keyring.
 - **Engine-level, not framework-level.** DBPinball talks to MySQL and PostgreSQL directly, so it works with any application built on them.
 - **Headless by design.** The roadmap moves all database logic into a reusable Rust core so the same capability can run from a CLI, a desktop app, or CI.
-- **Safe Sync as a first-class goal.** Reproducing production data for debugging should be selective, sanitized, and impossible to point at production by accident. That capability is planned, not shipped.
+- **Safe Sync as a first-class goal.** Reproducing production data for debugging should be selective, sanitized, and impossible to point at production by accident. It is implemented for PostgreSQL and MariaDB 10.11+ InnoDB.
 
 ## Current features
 
@@ -333,10 +333,10 @@ Dependency status is tracked in [`docs/security/DEPENDENCY_VULNERABILITY_REPORT.
 | M1 | Incremental core extraction with desktop compatibility | Complete |
 | M2 | CLI foundation and contract tests | Complete |
 | M2.1 | Desktop import of `localStorage` profiles into the shared store | Complete |
-| M3 | Shared security policy and destination verification | Planned |
-| M4 | PostgreSQL Safe Sync through the CLI | Planned |
-| M5 | Desktop Safe Sync integration | Planned |
-| M6 | MySQL Safe Sync | Planned |
+| M3 | Shared security policy and destination verification | Complete |
+| M4 | PostgreSQL Safe Sync through the CLI | Complete |
+| M5 | Desktop Safe Sync integration | Complete |
+| M6 | MariaDB Safe Sync (non-MariaDB MySQL is refused) | Complete |
 | M7 | Advanced snapshots and relational dependency resolution | Planned |
 
 Deferred: cross-engine copy, SSH tunnels, scheduled backups, cloud storage.

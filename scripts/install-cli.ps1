@@ -80,12 +80,15 @@ try {
         }
     }
 
+    function Test-UserPathExists {
+        $key = Get-Item -Path $EnvironmentKey
+        return $null -ne $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+
     function Set-RawUserPath {
         param([string]$Value, [Microsoft.Win32.RegistryValueKind]$Kind)
-        if ([string]::IsNullOrEmpty($Value)) {
-            Remove-ItemProperty -Path $EnvironmentKey -Name Path -ErrorAction SilentlyContinue
-            return
-        }
+        # Always write, even an empty string: removing the value would change
+        # whether the user PATH exists at all.
         Set-ItemProperty -Path $EnvironmentKey -Name Path -Value $Value -Type $Kind
     }
 
@@ -193,6 +196,8 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     Write-Step "Installed $reported to $TargetExe"
 
     $current = Get-RawUserPath
+    $pathExisted = Test-UserPathExists
+    $pathKind = Get-UserPathKind
     $previousState = Read-State
     $entryPresent = Test-PathEntry -Value $current -Entry $InstallDir
 
@@ -227,7 +232,11 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
         } | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding utf8
     } catch {
         if (-not $entryPresent) {
-            Set-RawUserPath -Value $current -Kind (Get-UserPathKind)
+            if ($pathExisted) {
+                Set-RawUserPath -Value $current -Kind $pathKind
+            } else {
+                Remove-ItemProperty -Path $EnvironmentKey -Name Path -ErrorAction SilentlyContinue
+            }
             Send-EnvironmentChanged
         }
         throw "The install state could not be recorded, so the PATH change was reverted: $($_.Exception.Message)"

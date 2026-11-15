@@ -139,8 +139,9 @@ jobs:
             "dbpinball_${version}_x64-setup.exe",
             "dbpinball-cli-$version-x64.zip"
           )
+          $names = @($lines | ForEach-Object { ($_ -split '\s+', 2)[1] })
           foreach ($name in $expected) {
-            if (-not ($lines | Where-Object { $_ -match "\s$([regex]::Escape($name))$" })) {
+            if (-not ($names -ccontains $name)) {
               throw "SHA256SUMS.txt has no line for $name"
             }
           }
