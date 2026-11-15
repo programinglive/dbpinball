@@ -44,11 +44,11 @@ describe("SafeSyncPage", () => {
         case "security_status":
           return { enrolled: true, category: "staging", fingerprintMatch: true };
         case "safe_sync_plan":
-          return { planId: "plan_123", engine: "mariadb", tables: [{ table: "orders", estimatedRows: 10 }] };
+          return { plan_fingerprint: "plan_123", engine: "mariadb", tables: [{ table: "orders", estimated_rows: 10 }] };
         case "safe_sync_validate":
           return { valid: true, warnings: [] };
         case "safe_sync_execute":
-          return { runId: "run_456", status: "completed", rowsImported: 10 };
+          return { run_id: "run_456", status: "completed", rowsWritten: 10 };
         case "safe_sync_status":
           return { runId: "run_456", status: "completed" };
         default:
@@ -107,8 +107,8 @@ describe("SafeSyncPage", () => {
     const executeBtn = screen.getByRole("button", { name: /Execute Safe Sync/i });
     expect(executeBtn).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("Acknowledgement Phrase"), {
-      target: { value: "ministry_local" },
+    fireEvent.change(screen.getByLabelText("Acknowledgement Phrase (plan_fingerprint)"), {
+      target: { value: "plan_123" },
     });
     expect(executeBtn).toBeEnabled();
 

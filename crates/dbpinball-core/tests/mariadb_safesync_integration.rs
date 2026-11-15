@@ -165,7 +165,60 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
     .expect("seed src rows");
 }
 
-fn base_spec(src_id: &str, dst_id: &str, db: &str) -> SafeSyncSpec {
+fn write_mariadb_policy(dir: &std::path::Path, db: &str) -> String {
+    let policy_path = dir.join("mariadb-masking-policy.yaml");
+    let yaml = format!(
+        r#"name: mariadb-test
+version: 1
+rules:
+  - schema: {db}
+    table: mdb_customers
+    column: tenant_id
+    strategy: keep
+  - schema: {db}
+    table: mdb_customers
+    column: customer_id
+    strategy: keep
+  - schema: {db}
+    table: mdb_customers
+    column: email
+    strategy: deterministic_email
+  - schema: {db}
+    table: mdb_customers
+    column: note
+    strategy: redact
+  - schema: {db}
+    table: mdb_orders
+    column: id
+    strategy: keep
+  - schema: {db}
+    table: mdb_orders
+    column: tenant_id
+    strategy: keep
+  - schema: {db}
+    table: mdb_orders
+    column: customer_id
+    strategy: keep
+  - schema: {db}
+    table: mdb_orders
+    column: amount
+    strategy: keep
+  - schema: {db}
+    table: mdb_orders
+    column: ordered_on
+    strategy: keep
+  - schema: {db}
+    table: mdb_orders
+    column: created_at
+    strategy: keep
+"#
+    );
+    std::fs::write(&policy_path, yaml).expect("write masking policy");
+    policy_path.to_string_lossy().into_owned()
+}
+
+fn base_spec(dir: &std::path::Path, src_id: &str, dst_id: &str, db: &str) -> SafeSyncSpec {
+    let policy_path = write_mariadb_policy(dir, db);
     SafeSyncSpec {
         version: SPEC_VERSION,
         source: src_id.to_string(),
@@ -186,7 +239,7 @@ fn base_spec(src_id: &str, dst_id: &str, db: &str) -> SafeSyncSpec {
         },
         limits: Limits::default(),
         masking: MaskingSelection {
-            policy: "development-default@2".to_string(),
+            policy: policy_path,
         },
         execution: ExecutionOptions::default(),
     }
@@ -267,6 +320,7 @@ async fn t01_full_inspect_plan_validate_execute_retry_and_auto_increment() {
 
     // 2. Plan
     let spec = base_spec(
+        dir.path(),
         &src_ro.profile.id,
         &dst.profile.id,
         &src_ro.profile.database,
@@ -448,6 +502,7 @@ async fn t02_adversarial_source_and_destination_refusals() {
 
     // Privileged/writable source user is refused
     let priv_spec = base_spec(
+        dir.path(),
         &src_admin.profile.id,
         &dst.profile.id,
         &src_admin.profile.database,
@@ -469,6 +524,7 @@ async fn t02_adversarial_source_and_destination_refusals() {
 
     // Unenrolled destination is refused
     let spec = base_spec(
+        dir.path(),
         &src_ro.profile.id,
         &dst.profile.id,
         &src_ro.profile.database,
@@ -551,6 +607,7 @@ async fn t03_adversarial_plan_tamper_expiry_drift_triggers_and_bounds() {
     let now = now_ms();
 
     let spec = base_spec(
+        dir.path(),
         &src_ro.profile.id,
         &dst.profile.id,
         &src_ro.profile.database,
@@ -724,6 +781,7 @@ async fn t04_adversarial_replace_rollback_and_get_lock_concurrency() {
     let now = now_ms();
 
     let spec = base_spec(
+        dir.path(),
         &src_ro.profile.id,
         &dst.profile.id,
         &src_ro.profile.database,

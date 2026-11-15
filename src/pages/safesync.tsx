@@ -39,10 +39,11 @@ interface SessionIdentity {
 }
 
 interface DryRunPlan {
+  plan_fingerprint?: string;
   planId?: string;
   engine?: string;
-  expiresAtMs?: number;
-  tables?: Array<{ table?: string; estimatedRows?: number; [key: string]: unknown }>;
+  expires_at_ms?: number;
+  tables?: Array<{ table?: string; estimated_rows?: number; [key: string]: unknown }>;
   [key: string]: unknown;
 }
 
@@ -53,16 +54,26 @@ interface ValidationReport {
 }
 
 interface RunReport {
+  run_id?: string;
   runId?: string;
   status?: string;
+  rowsWritten?: number;
   rowsImported?: number;
   [key: string]: unknown;
 }
 
 const DEFAULT_SPEC = `version: 1
-root:
-  table: orders
-  limit: 100
+source: source
+destination: destination
+selection:
+  roots:
+    - table: orders
+      filter:
+        - column: id
+          op: gte
+          value: 1
+masking:
+  policy: development-default@2
 `;
 
 export default function SafeSyncPage() {
@@ -188,12 +199,13 @@ export default function SafeSyncPage() {
   };
 
   const handleCheckStatus = async () => {
-    if (!destConn || !runReport?.runId) return;
+    const runId = runReport?.run_id ?? runReport?.runId;
+    if (!destConn || !runId) return;
     setBusy(true);
     setError(null);
     try {
       const status = await invoke<Record<string, unknown>>("safe_sync_status", {
-        runId: runReport.runId,
+        runId,
         destination: destConn,
       });
       setRunStatus(status);
@@ -340,10 +352,14 @@ export default function SafeSyncPage() {
             </span>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="safesync-ack">Acknowledgement Phrase</Label>
+            <Label htmlFor="safesync-ack">Acknowledgement Phrase (plan_fingerprint)</Label>
             <Input
               id="safesync-ack"
-              placeholder="Enter acknowledgement (e.g. destination database/cluster confirmation)"
+              placeholder={
+                plan?.plan_fingerprint
+                  ? `Enter ${plan.plan_fingerprint}`
+                  : "Enter exact plan_fingerprint from Dry-Run Plan"
+              }
               value={acknowledgement}
               onChange={(e) => setAcknowledgement(e.target.value)}
             />
@@ -353,7 +369,7 @@ export default function SafeSyncPage() {
               <Play className="mr-2 h-4 w-4" />
               Execute Safe Sync
             </Button>
-            {runReport?.runId && (
+            {(runReport?.run_id ?? runReport?.runId) && (
               <Button type="button" variant="outline" disabled={busy} onClick={handleCheckStatus}>
                 Refresh Run Status
               </Button>

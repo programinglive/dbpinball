@@ -52,6 +52,16 @@ pub fn resolve_policy(name: &str) -> Result<MaskingPolicy, CoreError> {
     match name {
         "development-default@1" | "development-default" => Ok(MaskingPolicy::builtin_default()),
         "development-default@2" => Ok(MaskingPolicy::builtin_v2()),
+        other if other.ends_with(".yaml") || other.ends_with(".yml") => {
+            let text = std::fs::read_to_string(other).map_err(|error| {
+                CoreError::with_detail(
+                    ErrorCode::Usage,
+                    format!("masking policy '{other}' could not be read: {error}"),
+                    "mask_policy_invalid",
+                )
+            })?;
+            MaskingPolicy::parse_yaml(&text)
+        }
         other => Err(CoreError::with_detail(
             ErrorCode::Usage,
             format!("masking policy '{other}' is not installed"),

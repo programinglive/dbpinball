@@ -475,7 +475,7 @@ pub async fn reconcile_sequences(
     let dst_db = session.identity().database_name.clone();
     let lock_name = format!(
         "dbpinball_ai_{}",
-        &run_id.chars().take(32).collect::<String>()
+        run_id.chars().take(32).collect::<String>()
     );
     acquire_get_lock(session, &lock_name).await?;
 

@@ -796,15 +796,17 @@ fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[Qualif
     let applies = if target == "*.*" {
         true
     } else if let Some((schema, table)) = target.split_once('.') {
-        let db_match = schema.eq_ignore_ascii_case(database_name)
-            || tables.iter().any(|t| t.schema.eq_ignore_ascii_case(schema));
+        let db_match = mariadb_schema_matches(schema, database_name)
+            || tables
+                .iter()
+                .any(|t| mariadb_schema_matches(schema, &t.schema));
         if !db_match {
             false
         } else if table == "*" {
             true
         } else {
             tables.iter().any(|t| {
-                t.schema.eq_ignore_ascii_case(schema) && t.table.eq_ignore_ascii_case(table)
+                mariadb_schema_matches(schema, &t.schema) && t.table.eq_ignore_ascii_case(table)
             })
         }
     } else {
@@ -843,6 +845,27 @@ fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[Qualif
         let base = p.split('(').next().unwrap_or(p).trim();
         DISALLOWED.contains(&base)
     })
+}
+
+fn mariadb_schema_matches(pattern: &str, candidate: &str) -> bool {
+    let pat: Vec<char> = pattern.to_ascii_uppercase().chars().collect();
+    let cand: Vec<char> = candidate.to_ascii_uppercase().chars().collect();
+    fn rec(p: &[char], c: &[char]) -> bool {
+        if p.is_empty() {
+            return c.is_empty();
+        }
+        if p[0] == '\\' && p.len() > 1 {
+            return !c.is_empty() && p[1] == c[0] && rec(&p[2..], &c[1..]);
+        }
+        if p[0] == '%' {
+            return rec(&p[1..], c) || (!c.is_empty() && rec(p, &c[1..]));
+        }
+        if p[0] == '_' {
+            return !c.is_empty() && rec(&p[1..], &c[1..]);
+        }
+        !c.is_empty() && p[0] == c[0] && rec(&p[1..], &c[1..])
+    }
+    rec(&pat, &cand)
 }
 
 #[cfg(test)]
@@ -941,6 +964,16 @@ mod tests {
         ));
         assert!(mariadb_grant_allows_write(
             "GRANT UPDATE (`status`) ON `mdb_src`.`orders` TO `mdb_rw`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(mariadb_grant_allows_write(
+            "GRANT INSERT ON `mdb\\_src`.* TO `mdb_rw`@`%`",
+            "mdb_src",
+            &tables
+        ));
+        assert!(mariadb_grant_allows_write(
+            "GRANT DELETE ON `mdb_%`.* TO `mdb_rw`@`%`",
             "mdb_src",
             &tables
         ));
