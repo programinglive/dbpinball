@@ -213,15 +213,23 @@ function copyrightNotices(installPath) {
     }
     for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
       const trimmed = line.trim();
-      // A real notice starts with "Copyright" and names a holder. The warranty
-      // disclaimer also contains the word, so exclude the liability phrasing.
+      // A real notice starts with "Copyright" and names a holder. License prose
+      // also contains the word ("copyright notice that is included in ..."), so
+      // reject the sentence forms rather than presenting them as notices.
       if (!/^copyright\b/i.test(trimmed) && !/^\(c\)\s/i.test(trimmed)) {
         continue;
       }
       if (/liable|warrant|damages|holders be/i.test(trimmed)) {
         continue;
       }
-      if (trimmed.length > 160) {
+      if (
+        /\b(that|shall|must|license|permission|included|applies|reproduce|retain|attached)\b/i.test(
+          trimmed,
+        )
+      ) {
+        continue;
+      }
+      if (trimmed.length > 120) {
         continue;
       }
       notices.add(trimmed);
@@ -430,9 +438,26 @@ if (process.argv.includes("--verify")) {
     if (!committedLines.has(`### ${license}`)) {
       failures.push(`license text for ${license} is missing from the bundle`);
     }
-    if (!fs.existsSync(path.join(textDir, `${license}.txt`))) {
+    const textFile = path.join(textDir, `${license}.txt`);
+    if (!fs.existsSync(textFile)) {
       failures.push(`canonical text file for ${license} is missing`);
+      continue;
     }
+    // A heading with no body is not a license text. Require the committed
+    // section to contain the canonical text, not just its title.
+    const canonical = fs.readFileSync(textFile, "utf8").trim();
+    const probe = canonical.split(/\r?\n/).find((line) => line.trim().length > 40);
+    if (!probe || !committed.includes(probe.trim())) {
+      failures.push(`license text for ${license} is present as a heading but its body is missing`);
+    }
+  }
+
+  // At least one real copyright notice must survive extraction, otherwise the
+  // MIT and 0BSD placeholders are left unfilled.
+  const noticeSection = committed.split("## Copyright notices")[1] || "";
+  const noticeRows = noticeSection.split(/\r?\n/).filter((line) => line.startsWith("| `"));
+  if (noticeRows.length === 0) {
+    failures.push("no per-package copyright notices were recorded");
   }
 
   if (failures.length > 0) {

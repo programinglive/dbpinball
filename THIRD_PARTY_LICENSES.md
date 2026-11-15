@@ -774,14 +774,14 @@ file ships with its source and is retained unmodified.
 | `@radix-ui/react-use-effect-event` | 0.0.2 | Copyright (c) 2022 WorkOS |
 | `@radix-ui/react-visually-hidden` | 1.2.3 | Copyright (c) 2022 WorkOS |
 | `@standard-schema/utils` | 0.3.0 | Copyright (c) 2024 Fabian Hiller |
-| `@tauri-apps/api` | 2.12.4 | copyright notice that is included in or attached to the work<br>copyright license to reproduce, prepare Derivative Works of,<br>(c) You must retain, in the Source form of any Derivative Works<br>Copyright (c) 2017 - Present Tauri Apps Contributors |
+| `@tauri-apps/api` | 2.12.4 | Copyright (c) 2017 - Present Tauri Apps Contributors |
 | `aria-hidden` | 1.2.6 | Copyright (c) 2017 Anton Korzunov |
-| `class-variance-authority` | 0.7.1 | copyright notice that is included in or attached to the work<br>copyright license to reproduce, prepare Derivative Works of,<br>(c) You must retain, in the Source form of any Derivative Works<br>Copyright 2022 Joe Bell |
+| `class-variance-authority` | 0.7.1 | Copyright 2022 Joe Bell |
 | `clsx` | 2.1.1 | Copyright (c) Luke Edwards <luke.edwards05@gmail.com> (lukeed.com) |
 | `cookie` | 1.1.1 | Copyright (c) 2012-2014 Roman Shtylman <shtylman@gmail.com><br>Copyright (c) 2015 Douglas Christopher Wilson <doug@somethingdoug.com> |
 | `detect-node-es` | 1.1.0 | Copyright (c) 2017 Ilya Kantor |
 | `get-nonce` | 1.0.1 | Copyright (c) 2020 Anton Korzunov |
-| `lucide-react` | 0.553.0 | copyright notice and this permission notice appear in all copies.<br>Copyright (c) 2013-2023 Cole Bemis |
+| `lucide-react` | 0.553.0 | Copyright (c) 2013-2023 Cole Bemis |
 | `react` | 19.2.0 | Copyright (c) Meta Platforms, Inc. and affiliates. |
 | `react-dom` | 19.2.0 | Copyright (c) Meta Platforms, Inc. and affiliates. |
 | `react-hook-form` | 7.66.0 | Copyright (c) 2019-present Beier(Bill) Luo |
