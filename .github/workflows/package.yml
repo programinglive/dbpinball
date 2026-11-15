@@ -150,6 +150,14 @@ jobs:
               throw "SHA256SUMS.txt has no line for $name"
             }
           }
+          # Reject anything that is not part of this release, so a stale file
+          # from an earlier run cannot be uploaded alongside the artifacts.
+          $allowed = @($expected) + @("SHA256SUMS.txt", "provenance.json")
+          $present = @(Get-ChildItem -LiteralPath $dir -File | Select-Object -ExpandProperty Name)
+          $extra = @($present | Where-Object { $allowed -notcontains $_ })
+          if ($extra.Count -gt 0) {
+            throw "unexpected files in the release directory: $($extra -join ', ')"
+          }
           foreach ($line in $lines) {
             if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
               $expected = $Matches[1]

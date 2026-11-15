@@ -14,7 +14,7 @@ _No unreleased changes yet._
 The first release that ships an installer, a CLI distribution path, and Safe
 Sync for both PostgreSQL and MariaDB.
 
-### ? Features
+### Features
 
 - **Safe Sync for PostgreSQL and MariaDB 10.11+ InnoDB.** Bounded, masked,
   verified subset synchronization from a read-only source into an enrolled local
@@ -45,7 +45,7 @@ Sync for both PostgreSQL and MariaDB.
 - **Release provenance**: every build publishes `SHA256SUMS.txt` and
   `provenance.json` with the version, source commit, architecture and toolchain.
 
-### ?? Bug Fixes
+### Bug fixes
 
 - The sidebar showed a hardcoded `0.1.4`; it now renders the packaged version,
   and `scripts/check-versions.cjs` fails the build when the manifests drift.
@@ -57,7 +57,7 @@ Sync for both PostgreSQL and MariaDB.
 - The desktop bundle could not be built because the Rust `tauri` crate and
   `@tauri-apps/api` were on mismatched minor versions.
 
-### ?? Security
+### Security
 
 - Exact `DECIMAL` precision and scale are enforced at plan and execute time; a
   narrower destination is refused as schema drift and the destination session
@@ -69,7 +69,7 @@ Sync for both PostgreSQL and MariaDB.
   parent traversal, and be a regular file; the refusal never echoes the
   operating-system error.
 
-### ?? Known limitations
+### Known limitations
 
 - The Windows binaries are **not code-signed**. SmartScreen warns and heuristic
   scanners can flag unsigned binaries; verify the published SHA-256 before

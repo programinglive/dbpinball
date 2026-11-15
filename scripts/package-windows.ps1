@@ -51,6 +51,11 @@ try {
 
     $arch = 'x64'
     $outDir = Join-Path $repoRoot "artifacts\release\v$Version"
+    # Start from an empty directory: a file left by an earlier run must never
+    # travel with this release.
+    if (Test-Path -LiteralPath $outDir) {
+        Remove-Item -LiteralPath $outDir -Recurse -Force
+    }
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
     $artifacts = @()

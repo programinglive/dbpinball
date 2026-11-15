@@ -15,7 +15,7 @@ body:
     attributes:
       label: DBPinball version
       description: The version shown in the app, or the commit SHA.
-      placeholder: "0.1.6"
+      placeholder: "0.1.7"
     validations:
       required: true
   - type: dropdown
