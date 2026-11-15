@@ -47,6 +47,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -66,6 +72,11 @@ jobs:
 
       - name: Build artifacts
         shell: pwsh
+        env:
+          # On a pull_request event github.sha is the ephemeral merge commit, so
+          # record the real head instead. A push to main has no pull_request
+          # payload and falls back to github.sha.
+          DBPINBALL_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./scripts/package-windows.ps1
 
       - name: Verify the packaged CLI runs
@@ -145,6 +156,14 @@ jobs:
               throw "SHA256SUMS.txt has no line for $name"
             }
           }
+          # Reject anything that is not part of this release, so a stale file
+          # from an earlier run cannot be uploaded alongside the artifacts.
+          $allowed = @($expected) + @("SHA256SUMS.txt", "provenance.json")
+          $present = @(Get-ChildItem -LiteralPath $dir -File | Select-Object -ExpandProperty Name)
+          $extra = @($present | Where-Object { $allowed -notcontains $_ })
+          if ($extra.Count -gt 0) {
+            throw "unexpected files in the release directory: $($extra -join ', ')"
+          }
           foreach ($line in $lines) {
             if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
               $expected = $Matches[1]
@@ -155,11 +174,33 @@ jobs:
             }
           }
 
+      - name: Verify the upload set is complete
+        shell: pwsh
+        run: |
+          $dir = "artifacts/release/v$env:RELEASE_VERSION"
+          $expected = @(
+            "dbpinball_$($env:RELEASE_VERSION)_x64-setup.exe",
+            "dbpinball-cli-$($env:RELEASE_VERSION)-x64.zip",
+            "SHA256SUMS.txt",
+            "provenance.json"
+          )
+          foreach ($name in $expected) {
+            if (-not (Test-Path -LiteralPath (Join-Path $dir $name))) {
+              throw "missing release file: $name"
+            }
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dbpinball-windows-x64
-          path: artifacts/release/**
+          # Upload only the files this release produced, not everything under
+          # artifacts/release: a stale file from another run must never ship.
+          path: |
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_x64-setup.exe
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball-cli-${{ env.RELEASE_VERSION }}-x64.zip
+            artifacts/release/v${{ env.RELEASE_VERSION }}/SHA256SUMS.txt
+            artifacts/release/v${{ env.RELEASE_VERSION }}/provenance.json
           if-no-files-found: error
 
   linux:
@@ -168,6 +209,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies for Tauri
         run: |
@@ -208,10 +255,17 @@ jobs:
         run: npm run tauri build -- --bundles deb,appimage
 
       - name: Assemble artifacts
+        env:
+          # On a pull_request event github.sha is the ephemeral merge commit, so
+          # record the real head instead.
+          DBPINBALL_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           out="artifacts/release/v$version"
+          # Start from an empty directory so a file from an earlier run cannot
+          # travel with this release.
+          rm -rf "$out"
           mkdir -p "$out"
           tar -C target/cli-dist/release -czf "$out/dbpinball-cli-$version-x64-linux.tar.gz" dbpinball
 
@@ -228,7 +282,7 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-          commit=$(git rev-parse HEAD)
+          commit="${DBPINBALL_BUILD_COMMIT:-$(git rev-parse HEAD)}"
           dirty=false
           if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
           cat > provenance.json <<EOF
@@ -247,9 +301,32 @@ jobs:
           EOF
           cat provenance.json
 
+      - name: Verify the upload set is complete
+        run: |
+          set -euo pipefail
+          dir="artifacts/release/v$RELEASE_VERSION"
+          for name in \
+            "dbpinball-cli-$RELEASE_VERSION-x64-linux.tar.gz" \
+            "dbpinball_${RELEASE_VERSION}_amd64.deb" \
+            "dbpinball_${RELEASE_VERSION}_amd64.AppImage" \
+            "SHA256SUMS.txt" \
+            "provenance.json"; do
+            if [ ! -f "$dir/$name" ]; then
+              echo "missing release file: $name" >&2
+              exit 1
+            fi
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dbpinball-linux-x64
-          path: artifacts/release/**
+          # Upload only the files this release produced, not everything under
+          # artifacts/release: a stale file from another run must never ship.
+          path: |
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball-cli-${{ env.RELEASE_VERSION }}-x64-linux.tar.gz
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_amd64.deb
+            artifacts/release/v${{ env.RELEASE_VERSION }}/dbpinball_${{ env.RELEASE_VERSION }}_amd64.AppImage
+            artifacts/release/v${{ env.RELEASE_VERSION }}/SHA256SUMS.txt
+            artifacts/release/v${{ env.RELEASE_VERSION }}/provenance.json
           if-no-files-found: error

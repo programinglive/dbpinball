@@ -43,7 +43,7 @@ try {
     }
     if (-not $Version) { throw 'The version could not be determined.' }
 
-    $commit = (git rev-parse HEAD).Trim()
+    $commit = if ($env:DBPINBALL_BUILD_COMMIT) { $env:DBPINBALL_BUILD_COMMIT } else { (git rev-parse HEAD).Trim() }
     $dirty = (git status --porcelain)
     if ($dirty) {
         Write-Warning 'The working tree is not clean; provenance records the commit plus a dirty flag.'
@@ -51,6 +51,11 @@ try {
 
     $arch = 'x64'
     $outDir = Join-Path $repoRoot "artifacts\release\v$Version"
+    # Start from an empty directory: a file left by an earlier run must never
+    # travel with this release.
+    if (Test-Path -LiteralPath $outDir) {
+        Remove-Item -LiteralPath $outDir -Recurse -Force
+    }
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
     $artifacts = @()
@@ -81,6 +86,9 @@ try {
         if ($LASTEXITCODE -ne 0 -or -not $reported) {
             throw "The packaged binary did not answer --version; it is not the CLI."
         }
+        if ($reported -ne "dbpinball $Version") {
+            throw "The CLI reports '$reported' but the release is $Version."
+        }
         Write-Host "CLI reports: $reported"
 
         $stage = Join-Path $repoRoot "artifacts\stage\cli-$Version"
@@ -106,12 +114,23 @@ try {
         if (-not (Test-Path -LiteralPath $nsisDir)) {
             $nsisDir = Join-Path $repoRoot 'src-tauri\target\release\bundle\nsis'
         }
-        $setup = Get-ChildItem -LiteralPath $nsisDir -Filter '*-setup.exe' | Select-Object -First 1
-        if (-not $setup) { throw "No NSIS installer found in $nsisDir" }
+        # Select the installer for *this* version. A stale installer from an
+        # earlier build sits in the same directory, and picking the first match
+        # would ship the old binary under the new name.
+        $expectedName = "dbpinball_${Version}_${arch}-setup.exe"
+        $setup = Get-ChildItem -LiteralPath $nsisDir -Filter $expectedName | Select-Object -First 1
+        if (-not $setup) {
+            $found = (Get-ChildItem -LiteralPath $nsisDir -Filter '*-setup.exe' | Select-Object -ExpandProperty Name) -join ', '
+            throw "No installer named $expectedName in $nsisDir (found: $found). Run the Tauri build for version $Version."
+        }
+        $setupVersion = (Get-Item -LiteralPath $setup.FullName).VersionInfo.FileVersion
+        if ($setupVersion -ne $Version) {
+            throw "The installer reports version '$setupVersion' but the release is $Version."
+        }
         $target = Join-Path $outDir "dbpinball_${Version}_${arch}-setup.exe"
         Copy-Item -LiteralPath $setup.FullName -Destination $target -Force
         $artifacts += $target
-        Write-Host "Desktop installer: $target"
+        Write-Host "Desktop installer: $target (FileVersion $setupVersion)"
     }
 
     $sums = foreach ($artifact in $artifacts) {

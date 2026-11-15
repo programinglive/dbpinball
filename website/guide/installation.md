@@ -29,7 +29,7 @@ downloaded with the line for that file:
 
 ```powershell
 # Windows
-Get-FileHash .\dbpinball_0.1.6_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\dbpinball_0.1.7_x64-setup.exe -Algorithm SHA256
 ```
 
 ```bash

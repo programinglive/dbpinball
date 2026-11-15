@@ -17,7 +17,7 @@
     Skips the uninstall step, leaving the application installed.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\scripts\verify-windows-install.ps1 -Installer .\artifacts\release\v0.1.6\dbpinball_0.1.6_x64-setup.exe
+    powershell -ExecutionPolicy Bypass -File .\scripts\verify-windows-install.ps1 -Installer .\artifacts\release\v0.1.7\dbpinball_0.1.7_x64-setup.exe
 #>
 [CmdletBinding()]
 param(

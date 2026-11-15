@@ -1,7 +1,7 @@
 # Release Readiness Checklist — DBPinball
 
 Date: 2026-11-12
-Version under review: `0.1.6` (working tree, uncommitted)
+Version under review: `0.1.7` (release candidate)
 Purpose: evidence that the repository can be published and built by an outside contributor.
 
 Every item below was executed in this environment. Results are recorded as observed, not assumed.
@@ -127,7 +127,7 @@ Current state:
 | Linux packages | CLI tarball, `.deb` and AppImage built by the `Package` workflow |
 | Checksums and provenance | `SHA256SUMS.txt` and `provenance.json` per build |
 | Code signing | **Not in place.** Windows SmartScreen warns, and heuristic antivirus scanners can quarantine an unsigned binary. The release binary embeds a version resource and an `asInvoker` manifest, which removes the most common false positive, but signing is the permanent fix. |
-| Public release | **Not published.** No tag and no GitHub release exists; artifacts are workflow artifacts only. |
+| Public release | **Not published.** No tag and no GitHub release exists for 0.1.7; artifacts are workflow artifacts only. The v0.1.7 release notes describe the intended contents of the release, not a published one. |
 
 Publication additionally requires an authorized release decision and, for a
 frictionless Windows install, a code-signing certificate.

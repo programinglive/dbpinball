@@ -9,6 +9,78 @@ _No unreleased changes yet._
 
 ---
 
+## v0.1.7 (2026-11-15)
+
+The first release that ships an installer, a CLI distribution path, and Safe
+Sync for both PostgreSQL and MariaDB.
+
+### Features
+
+- **Safe Sync for PostgreSQL and MariaDB 10.11+ InnoDB.** Bounded, masked,
+  verified subset synchronization from a read-only source into an enrolled local
+  destination, driven by a signed plan.
+  - Typed root filters: `eq`, `in`, `gte`, `lte` on integer, exact numeric, date
+    and timestamp columns, with an 8-predicate cap and a keyed filter digest.
+  - Parent-directed foreign-key traversal with composite-key support, canonical
+    ordering, and refusal of cycles and self-references.
+  - Deterministic masking with cross-table key-domain consistency, exact
+    `DECIMAL(p,s)` preservation, and microsecond `DATETIME(6)` preservation.
+  - Transactional import with rollback, schema-drift detection, destination
+    identity binding, destination-scoped locking, `AUTO_INCREMENT`
+    reconciliation, and idempotent retry.
+  - Fail-closed refusals: non-InnoDB tables, triggers, unsupported types,
+    non-nullable ordinary integers kept unchanged, unimplemented masking
+    strategies, cross-engine plans, and policy files outside the authorized
+    directory.
+- **Desktop Safe Sync page** with source/destination identity inspection, plan
+  review, explicit acknowledgement, execution and run status, all through the
+  same core pipeline as the CLI.
+- **Windows installer** (NSIS, per-user, no administrator rights) with a Start
+  Menu entry, in-place upgrade and a normal uninstaller.
+- **Windows CLI archive** with `install-cli.ps1`, which installs to
+  `%LOCALAPPDATA%\dbpinball\bin` and adds that folder to the user `PATH`, so a
+  new terminal resolves `dbpinball` with no manual editing. Uninstall removes
+  only the entry it added and restores the previous `PATH` byte for byte.
+- **Linux packages**: CLI tarball, `.deb` and AppImage.
+- **Release provenance**: every build publishes `SHA256SUMS.txt` and
+  `provenance.json` with the version, source commit, architecture and toolchain.
+
+### Bug fixes
+
+- The sidebar showed a hardcoded `0.1.4`; it now renders the packaged version,
+  and `scripts/check-versions.cjs` fails the build when the manifests drift.
+- The CLI archive could contain the desktop binary, because both crates emit
+  `dbpinball.exe`; the CLI is now built into its own target directory and
+  packaging refuses a binary that does not answer `--version`.
+- The release CLI was quarantined by a heuristic antivirus scanner; it now
+  embeds a Windows version resource and an `asInvoker` manifest.
+- The desktop bundle could not be built because the Rust `tauri` crate and
+  `@tauri-apps/api` were on mismatched minor versions.
+
+### Security
+
+- Exact `DECIMAL` precision and scale are enforced at plan and execute time; a
+  narrower destination is refused as schema drift and the destination session
+  is pinned to `STRICT_ALL_TABLES`.
+- Privilege parsing is fail-closed: only provably read-only privileges are
+  accepted, and re-grant clauses, proxy lines, role grants and unterminated
+  quotes are refused.
+- Masking policy files must resolve inside an authorized directory, contain no
+  parent traversal, and be a regular file; the refusal never echoes the
+  operating-system error.
+
+### Known limitations
+
+- The Windows binaries are **not code-signed**. SmartScreen warns and heuristic
+  scanners can flag unsigned binaries; verify the published SHA-256 before
+  running.
+- macOS is not packaged.
+- Non-MariaDB MySQL is refused for Safe Sync.
+- `deterministic_phone`, `date_shift`, `amount_jitter` and `fixed` are declared
+  in the policy schema but not implemented, and are refused.
+
+---
+
 ## v0.1.5 (2025-11-15)
 
 ### ✨ Features
