@@ -66,6 +66,11 @@ jobs:
 
       - name: Build artifacts
         shell: pwsh
+        env:
+          # On a pull_request event github.sha is the ephemeral merge commit, so
+          # record the real head instead. A push to main has no pull_request
+          # payload and falls back to github.sha.
+          DBPINBALL_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: ./scripts/package-windows.ps1
 
       - name: Verify the packaged CLI runs
@@ -208,6 +213,10 @@ jobs:
         run: npm run tauri build -- --bundles deb,appimage
 
       - name: Assemble artifacts
+        env:
+          # On a pull_request event github.sha is the ephemeral merge commit, so
+          # record the real head instead.
+          DBPINBALL_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
@@ -228,7 +237,7 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-          commit=$(git rev-parse HEAD)
+          commit="${DBPINBALL_BUILD_COMMIT:-$(git rev-parse HEAD)}"
           dirty=false
           if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
           cat > provenance.json <<EOF

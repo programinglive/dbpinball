@@ -43,7 +43,7 @@ try {
     }
     if (-not $Version) { throw 'The version could not be determined.' }
 
-    $commit = (git rev-parse HEAD).Trim()
+    $commit = if ($env:DBPINBALL_BUILD_COMMIT) { $env:DBPINBALL_BUILD_COMMIT } else { (git rev-parse HEAD).Trim() }
     $dirty = (git status --porcelain)
     if ($dirty) {
         Write-Warning 'The working tree is not clean; provenance records the commit plus a dirty flag.'
