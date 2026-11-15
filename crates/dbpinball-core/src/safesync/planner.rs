@@ -11,8 +11,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use sqlx::Row;
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
-use crate::safesync::graph::{discover_parents, ForeignKeyEdge, SchemaGraph, TableInfo};
+use crate::safesync::graph::{
+    discover_parents, ColumnInfo, ForeignKeyEdge, SchemaGraph, TableInfo,
+};
+use crate::safesync::mariadb_graph::discover_mariadb_parents_conn;
 use crate::safesync::mask::{ColumnRule, MaskInput, MaskStrategy, MaskedValue, Masker};
 use crate::safesync::session::BoundSession;
 use crate::safesync::spec::{
@@ -48,6 +52,10 @@ pub struct TableRows {
     pub columns: Vec<String>,
     /// Base type names parallel to `columns`, from the catalogue.
     pub types: Vec<String>,
+    /// Declared numeric precision parallel to `columns`, when reported.
+    pub precisions: Vec<Option<u32>>,
+    /// Declared numeric scale parallel to `columns`, when reported.
+    pub scales: Vec<Option<u32>>,
     /// The columns that identify a row, in order.
     pub row_identity: Vec<String>,
     pub schema_hash: String,
@@ -110,19 +118,30 @@ pub async fn build(
 
     let depth = spec.selection.relationships.depth;
     let limits = &spec.limits;
+    let engine = session.engine();
+    let default_schema = match engine {
+        DbEngine::Postgres => "public".to_string(),
+        DbEngine::Mysql => session.identity().database_name.clone(),
+    };
 
     let root_names = spec
         .selection
         .roots
         .iter()
-        .map(|root| QualifiedName::parse(&root.table))
+        .map(|root| QualifiedName::parse_with_default(&root.table, &default_schema))
         .collect::<Result<Vec<_>, _>>()?;
 
     // A non-zero depth needs row values to follow foreign keys; a metadata-only
     // plan is only possible for a flat selection.
     let effective_read = read_rows || depth > 0;
-    let graph =
-        discover_parents(session, &root_names, if effective_read { depth } else { 0 }).await?;
+    let effective_depth = if effective_read { depth } else { 0 };
+    let graph = match engine {
+        DbEngine::Postgres => discover_parents(session, &root_names, effective_depth).await?,
+        DbEngine::Mysql => {
+            discover_mariadb_parents_conn(session.mysql_connection()?, &root_names, effective_depth)
+                .await?
+        }
+    };
 
     // The source role must be safe for every discovered table, not just the
     // roots: a parent the role owns would bypass RLS on it.
@@ -133,10 +152,11 @@ pub async fn build(
     // metadata path agree on what a valid policy is.
     for info in &graph.tables {
         masker.coverage(&info.schema, &info.table, &info.column_shapes(&graph))?;
+        assert_decimal_precision_known(info, masker, engine)?;
     }
 
     if !effective_read {
-        return metadata_only(spec, &graph, masker);
+        return metadata_only(spec, &graph, masker, engine, &default_schema);
     }
 
     let mut selected: BTreeMap<QualifiedName, Vec<RawRow>> = BTreeMap::new();
@@ -148,7 +168,7 @@ pub async fn build(
 
     // Roots.
     for root in &spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
+        let name = QualifiedName::parse_with_default(&root.table, &default_schema)?;
         let info = graph
             .table(&name)
             .ok_or_else(|| missing_table(&name))?
@@ -182,7 +202,7 @@ pub async fn build(
             ));
         }
 
-        roots.push(root_plan_for(&info, root, masker)?);
+        roots.push(root_plan_for_engine(engine, &info, root, masker)?);
     }
 
     // Parent worklist. A request is (parent, parent columns, tuple, level).
@@ -359,13 +379,15 @@ fn metadata_only(
     spec: &SafeSyncSpec,
     graph: &SchemaGraph,
     masker: &Masker,
+    engine: DbEngine,
+    default_schema: &str,
 ) -> Result<SelectionResult, CoreError> {
     let mut roots = Vec::new();
     for root in &spec.selection.roots {
-        let name = QualifiedName::parse(&root.table)?;
+        let name = QualifiedName::parse_with_default(&root.table, default_schema)?;
         let info = graph.table(&name).ok_or_else(|| missing_table(&name))?;
         masker.coverage(&name.schema, &name.table, &info.column_shapes(graph))?;
-        roots.push(root_plan_for(info, root, masker)?);
+        roots.push(root_plan_for_engine(engine, info, root, masker)?);
     }
 
     let names: Vec<QualifiedName> = graph.tables.iter().map(|table| table.name()).collect();
@@ -379,6 +401,8 @@ fn metadata_only(
             table: info.name(),
             columns: info.columns.iter().map(|c| c.name.clone()).collect(),
             types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+            precisions: info.columns.iter().map(|c| c.numeric_precision).collect(),
+            scales: info.columns.iter().map(|c| c.numeric_scale).collect(),
             row_identity: info.row_identity.clone(),
             schema_hash: info.schema_hash.clone(),
             rls_active: info.rls_active,
@@ -722,7 +746,7 @@ async fn fetch_root(
     root: &crate::safesync::spec::RootSelection,
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
-    let (where_clause, binds) = build_filter(info, root)?;
+    let (where_clause, binds) = build_filter_for_engine(session.engine(), info, root)?;
     fetch(session, info, &where_clause, &binds, limits).await
 }
 
@@ -733,6 +757,7 @@ async fn fetch_by_key(
     tuple: &[Option<String>],
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
+    let engine = session.engine();
     let mut clauses = Vec::with_capacity(columns.len());
     let mut binds = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
@@ -747,7 +772,15 @@ async fn fetch_by_key(
                 "invalid_identifier",
             ));
         }
-        clauses.push(format!("{}::text = ${}", quote_ident(column), index + 1));
+        let q_col = quote_ident_for(engine, column);
+        match engine {
+            DbEngine::Postgres => {
+                clauses.push(format!("{q_col}::text = ${}", index + 1));
+            }
+            DbEngine::Mysql => {
+                clauses.push(format!("CAST({q_col} AS CHAR CHARACTER SET utf8mb4) = ?"));
+            }
+        }
         binds.push(tuple[index].clone().unwrap_or_default());
     }
 
@@ -762,42 +795,88 @@ async fn fetch(
     binds: &[String],
     limits: &Limits,
 ) -> Result<Vec<RawRow>, CoreError> {
+    let engine = session.engine();
     let column_list = info
         .columns
         .iter()
-        .map(|column| format!("{}::text", quote_ident(&column.name)))
+        .map(|column| {
+            let q = quote_ident_for(engine, &column.name);
+            match engine {
+                DbEngine::Postgres => format!("{q}::text"),
+                DbEngine::Mysql => format!("CAST({q} AS CHAR CHARACTER SET utf8mb4)"),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
     let sql = format!(
         "SELECT {} FROM {}.{} {} LIMIT {}",
         column_list,
-        quote_ident(&info.schema),
-        quote_ident(&info.table),
+        quote_ident_for(engine, &info.schema),
+        quote_ident_for(engine, &info.table),
         where_clause,
         limits.max_rows_per_table.saturating_add(1)
     );
 
-    let mut query = sqlx::query(&sql);
-    for value in binds {
-        query = query.bind(value);
-    }
+    match engine {
+        DbEngine::Postgres => {
+            let mut query = sqlx::query(&sql);
+            for value in binds {
+                query = query.bind(value);
+            }
 
-    session.begin_read_only().await?;
-    let fetched = query.fetch_all(&mut *session.connection()).await;
-    let _ = session.rollback().await;
-    let rows = fetched.map_err(connection_error)?;
+            session.begin_read_only().await?;
+            let fetched = query.fetch_all(session.pg_connection()?).await;
+            let _ = session.rollback().await;
+            let rows = fetched.map_err(connection_error)?;
 
-    let mut output = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut values = Vec::with_capacity(info.columns.len());
-        for index in 0..info.columns.len() {
-            let value: Option<String> = row.try_get(index).unwrap_or(None);
-            values.push(value);
+            let mut output = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut values = Vec::with_capacity(info.columns.len());
+                for index in 0..info.columns.len() {
+                    let value: Option<String> = row.try_get(index).unwrap_or(None);
+                    values.push(value);
+                }
+                output.push(values);
+            }
+            Ok(output)
         }
-        output.push(values);
+        DbEngine::Mysql => {
+            let mut query = sqlx::query(&sql);
+            for value in binds {
+                query = query.bind(value);
+            }
+
+            session.begin_read_only().await?;
+            let fetched = query.fetch_all(session.mysql_connection()?).await;
+            let _ = session.rollback().await;
+            let rows = fetched.map_err(connection_error)?;
+
+            let mut output = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut values = Vec::with_capacity(info.columns.len());
+                for index in 0..info.columns.len() {
+                    let value: Option<String> = match row.try_get::<Option<String>, _>(index) {
+                        Ok(v) => v,
+                        Err(_) => match row.try_get::<Option<Vec<u8>>, _>(index) {
+                            Ok(Some(bytes)) => Some(String::from_utf8(bytes).map_err(|_| {
+                                CoreError::with_detail(
+                                    ErrorCode::Unsupported,
+                                    "non-UTF-8 column value is not supported",
+                                    "unsupported_encoding",
+                                )
+                            })?),
+                            Ok(None) => None,
+                            Err(_) => None,
+                        },
+                    };
+                    values.push(value);
+                }
+                output.push(values);
+            }
+            Ok(output)
+        }
     }
-    Ok(output)
 }
 
 fn mask_table(
@@ -878,6 +957,7 @@ fn mask_table(
             if let Some(text) = masked.as_text() {
                 total_bytes = total_bytes.saturating_add(text.len() as u64);
             }
+            let masked = validate_decimal_exactness(column, masked)?;
             values.push(masked);
         }
 
@@ -908,6 +988,8 @@ fn mask_table(
         table: info.name(),
         columns: info.columns.iter().map(|c| c.name.clone()).collect(),
         types: info.columns.iter().map(|c| c.type_name.clone()).collect(),
+        precisions: info.columns.iter().map(|c| c.numeric_precision).collect(),
+        scales: info.columns.iter().map(|c| c.numeric_scale).collect(),
         row_identity: info.row_identity.clone(),
         schema_hash: info.schema_hash.clone(),
         rls_active: info.rls_active,
@@ -917,6 +999,124 @@ fn mask_table(
         rows,
         total_bytes,
     })
+}
+
+/// A MariaDB exact numeric is bound through a cast built from its declared
+/// precision and scale. Without that pair the cast cannot be exact, so a keep
+/// rule on such a column is refused at plan time rather than at import time.
+fn assert_decimal_precision_known(
+    info: &TableInfo,
+    masker: &Masker,
+    engine: DbEngine,
+) -> Result<(), CoreError> {
+    if engine != DbEngine::Mysql {
+        return Ok(());
+    }
+    for column in &info.columns {
+        let type_name = column.type_name.to_ascii_lowercase();
+        if !crate::safesync::mask::is_exact_numeric_type(&type_name) {
+            continue;
+        }
+        let Some(rule) = masker
+            .policy()
+            .rule_for(&info.schema, &info.table, &column.name)
+        else {
+            continue;
+        };
+        if rule.strategy != crate::safesync::mask::MaskStrategy::Keep {
+            continue;
+        }
+        if column.numeric_precision.is_none() || column.numeric_scale.is_none() {
+            return Err(CoreError::with_detail(
+                ErrorCode::Unsupported,
+                format!(
+                    "column {} is an exact numeric without a declared precision, so it cannot be kept exactly",
+                    column.name
+                ),
+                "decimal_precision_unknown",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A kept exact numeric must fit the declared precision and scale exactly.
+///
+/// The destination bind uses a cast built from the same pair, so a value that
+/// fits here cannot be truncated there. A value that does not fit is refused
+/// instead of being rounded or truncated.
+fn validate_decimal_exactness(
+    column: &ColumnInfo,
+    value: MaskedValue,
+) -> Result<MaskedValue, CoreError> {
+    let type_name = column.type_name.to_ascii_lowercase();
+    if !crate::safesync::mask::is_exact_numeric_type(&type_name) {
+        return Ok(value);
+    }
+    let Some(text) = value.as_text() else {
+        return Ok(value);
+    };
+    let (Some(precision), Some(scale)) = (column.numeric_precision, column.numeric_scale) else {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} is an exact numeric without a declared precision, so it cannot be kept exactly",
+                column.name
+            ),
+            "decimal_precision_unknown",
+        ));
+    };
+    let (integer_digits, fraction_digits) = decimal_digit_counts(text).ok_or_else(|| {
+        CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} holds a value that is not a plain decimal literal",
+                column.name
+            ),
+            "decimal_value_malformed",
+        )
+    })?;
+    let allowed_integer = precision.saturating_sub(scale);
+    if integer_digits > allowed_integer || fraction_digits > scale {
+        return Err(CoreError::with_detail(
+            ErrorCode::Unsupported,
+            format!(
+                "column {} holds a value that does not fit DECIMAL({precision},{scale})",
+                column.name
+            ),
+            "decimal_value_out_of_range",
+        ));
+    }
+    Ok(value)
+}
+
+/// Count the significant integer digits and the fraction digits of a plain
+/// decimal literal. Returns `None` for anything that is not
+/// `[+-]?digits[.digits]`, so an exponent or a locale form is refused rather
+/// than guessed at.
+fn decimal_digit_counts(text: &str) -> Option<(u32, u32)> {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if body.is_empty() {
+        return None;
+    }
+    let (integer, fraction) = match body.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (body, ""),
+    };
+    if integer.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !integer.chars().all(|c| c.is_ascii_digit()) || !fraction.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let significant = integer.trim_start_matches('0');
+    let integer_digits = if significant.is_empty() {
+        0
+    } else {
+        significant.len() as u32
+    };
+    Some((integer_digits, fraction.len() as u32))
 }
 
 fn identity_string(info: &TableInfo, raw: &RawRow) -> String {
@@ -938,7 +1138,16 @@ fn identity_string(info: &TableInfo, raw: &RawRow) -> String {
     parts.join(",")
 }
 
+#[cfg(test)]
 fn build_filter(
+    info: &TableInfo,
+    root: &crate::safesync::spec::RootSelection,
+) -> Result<(String, Vec<String>), CoreError> {
+    build_filter_for_engine(DbEngine::Postgres, info, root)
+}
+
+fn build_filter_for_engine(
+    engine: DbEngine,
     info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
 ) -> Result<(String, Vec<String>), CoreError> {
@@ -976,12 +1185,19 @@ fn build_filter(
                 )
             })?;
 
-        let column = quote_ident(&predicate.column);
+        let column = quote_ident_for(engine, &predicate.column);
 
         match predicate.op {
             FilterOp::Eq => {
                 binds.push(render_value(&predicate.value)?);
-                clauses.push(format!("{column}::text = ${}", binds.len()));
+                match engine {
+                    DbEngine::Postgres => {
+                        clauses.push(format!("{column}::text = ${}", binds.len()));
+                    }
+                    DbEngine::Mysql => {
+                        clauses.push(format!("CAST({column} AS CHAR CHARACTER SET utf8mb4) = ?"));
+                    }
+                }
             }
             FilterOp::In => {
                 let FilterValue::List(values) = &predicate.value else {
@@ -990,24 +1206,49 @@ fn build_filter(
                 let mut placeholders = Vec::with_capacity(values.len());
                 for value in values {
                     binds.push(render_value(value)?);
-                    placeholders.push(format!("${}", binds.len()));
+                    match engine {
+                        DbEngine::Postgres => placeholders.push(format!("${}", binds.len())),
+                        DbEngine::Mysql => placeholders.push("?".to_string()),
+                    }
                 }
-                clauses.push(format!("{column}::text IN ({})", placeholders.join(", ")));
+                match engine {
+                    DbEngine::Postgres => {
+                        clauses.push(format!("{column}::text IN ({})", placeholders.join(", ")));
+                    }
+                    DbEngine::Mysql => {
+                        clauses.push(format!(
+                            "CAST({column} AS CHAR CHARACTER SET utf8mb4) IN ({})",
+                            placeholders.join(", ")
+                        ));
+                    }
+                }
             }
             FilterOp::Gte | FilterOp::Lte => {
-                let typed =
-                    crate::safesync::typed::parse_typed_value(&col.type_name, &predicate.value)?;
-                binds.push(typed.canonical());
+                let typed = crate::safesync::typed::parse_typed_value_for_engine(
+                    engine,
+                    &col.type_name,
+                    &predicate.value,
+                )?;
                 let op_sql = match predicate.op {
                     FilterOp::Gte => ">=",
                     FilterOp::Lte => "<=",
                     _ => unreachable!(),
                 };
-                clauses.push(format!(
-                    "{column} {op_sql} ${}::{}",
-                    binds.len(),
-                    typed.cast()
-                ));
+                match engine {
+                    DbEngine::Postgres => {
+                        binds.push(typed.canonical());
+                        clauses.push(format!(
+                            "{column} {op_sql} ${}::{}",
+                            binds.len(),
+                            typed.cast()
+                        ));
+                    }
+                    DbEngine::Mysql => {
+                        let mdb_cast = typed.mariadb_cast()?;
+                        binds.push(typed.mariadb_bind());
+                        clauses.push(format!("{column} {op_sql} CAST(? AS {mdb_cast})"));
+                    }
+                }
             }
         }
     }
@@ -1015,7 +1256,8 @@ fn build_filter(
     Ok((format!("WHERE {}", clauses.join(" AND ")), binds))
 }
 
-fn root_plan_for(
+fn root_plan_for_engine(
+    engine: DbEngine,
     info: &TableInfo,
     root: &crate::safesync::spec::RootSelection,
     masker: &Masker,
@@ -1035,7 +1277,11 @@ fn root_plan_for(
                 )
             })?;
         type_map.insert(col.name.clone(), col.type_name.clone());
-        let encoded = crate::safesync::spec::canonical_predicate(predicate, &col.type_name)?;
+        let encoded = crate::safesync::spec::canonical_predicate_for_engine(
+            engine,
+            predicate,
+            &col.type_name,
+        )?;
         canonicalized.push((
             encoded,
             predicate.column.clone(),
@@ -1046,7 +1292,8 @@ fn root_plan_for(
     canonicalized.sort_by(|a, b| a.0.cmp(&b.0));
     canonicalized.dedup_by(|a, b| a.0 == b.0);
 
-    let canonical = crate::safesync::spec::canonical_filter(&root.filter, &type_map)?;
+    let canonical =
+        crate::safesync::spec::canonical_filter_for_engine(engine, &root.filter, &type_map)?;
     Ok(RootPlan {
         schema: info.schema.clone(),
         table: info.table.clone(),
@@ -1082,7 +1329,17 @@ pub async fn extract_table(
     limits: &Limits,
 ) -> Result<TableRows, CoreError> {
     let name = info.name();
-    let graph = discover_parents(session, std::slice::from_ref(&name), 0).await?;
+    let graph = match session.engine() {
+        DbEngine::Postgres => discover_parents(session, std::slice::from_ref(&name), 0).await?,
+        DbEngine::Mysql => {
+            discover_mariadb_parents_conn(
+                session.mysql_connection()?,
+                std::slice::from_ref(&name),
+                0,
+            )
+            .await?
+        }
+    };
     if !graph.edges.is_empty() {
         return Err(CoreError::with_detail(
             ErrorCode::Unsupported,
@@ -1114,10 +1371,18 @@ fn invalid_filter(message: &str) -> CoreError {
     CoreError::with_detail(ErrorCode::Usage, message, "invalid_spec")
 }
 
-/// Quote an identifier. The catalogue already validated it, but quoting keeps a
-/// future caller from reintroducing string concatenation.
+/// Quote an identifier for PostgreSQL. The catalogue already validated it, but
+/// quoting keeps a future caller from reintroducing string concatenation.
 pub fn quote_ident(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+    quote_ident_for(DbEngine::Postgres, identifier)
+}
+
+/// Quote an identifier for the specified engine.
+pub fn quote_ident_for(engine: DbEngine, identifier: &str) -> String {
+    match engine {
+        DbEngine::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        DbEngine::Mysql => format!("`{}`", identifier.replace('`', "``")),
+    }
 }
 
 fn connection_error(error: sqlx::Error) -> CoreError {
@@ -1314,6 +1579,8 @@ mod tests {
             identity_always: false,
             generated_expression: None,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         };
         let info = TableInfo {
             schema: "public".into(),
@@ -1387,6 +1654,8 @@ mod tests {
                     identity_always: false,
                     generated_expression: None,
                     max_len: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
                 })
                 .collect(),
             primary_key: vec!["c0".into()],
@@ -1408,5 +1677,69 @@ mod tests {
         let err = build_filter(&info, &root).unwrap_err();
         assert_eq!(err.code, ErrorCode::Usage);
         assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
+    }
+
+    fn decimal_column(precision: Option<u32>, scale: Option<u32>) -> ColumnInfo {
+        ColumnInfo {
+            name: "amount".into(),
+            type_name: "decimal".into(),
+            nullable: false,
+            is_primary_key: false,
+            is_generated: false,
+            is_identity: false,
+            identity_always: false,
+            generated_expression: None,
+            max_len: None,
+            numeric_precision: precision,
+            numeric_scale: scale,
+        }
+    }
+
+    #[test]
+    fn decimal_digit_counts_are_exact() {
+        assert_eq!(decimal_digit_counts("999.95"), Some((3, 2)));
+        assert_eq!(decimal_digit_counts("-0.5"), Some((0, 1)));
+        assert_eq!(decimal_digit_counts("0"), Some((0, 0)));
+        assert_eq!(decimal_digit_counts("000123"), Some((3, 0)));
+        assert_eq!(decimal_digit_counts("1e5"), None);
+        assert_eq!(decimal_digit_counts("1,5"), None);
+        assert_eq!(decimal_digit_counts(""), None);
+        assert_eq!(decimal_digit_counts("."), None);
+    }
+
+    #[test]
+    fn a_decimal_value_that_fits_is_kept() {
+        let column = decimal_column(Some(12), Some(2));
+        let value =
+            validate_decimal_exactness(&column, MaskedValue::Text("999.95".into())).unwrap();
+        assert_eq!(value, MaskedValue::Text("999.95".into()));
+    }
+
+    #[test]
+    fn a_decimal_value_that_does_not_fit_is_refused() {
+        let column = decimal_column(Some(5), Some(2));
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1234.56".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_out_of_range"));
+
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1.234".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_out_of_range"));
+    }
+
+    #[test]
+    fn a_decimal_without_a_declared_precision_is_refused() {
+        let column = decimal_column(None, None);
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1.00".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_precision_unknown"));
+    }
+
+    #[test]
+    fn a_malformed_decimal_literal_is_refused() {
+        let column = decimal_column(Some(12), Some(2));
+        let error =
+            validate_decimal_exactness(&column, MaskedValue::Text("1e5".into())).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("decimal_value_malformed"));
     }
 }

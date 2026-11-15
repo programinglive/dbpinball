@@ -3,11 +3,11 @@
 //! decision.
 
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::domain::connection::DbConnection;
+use crate::domain::connection::{DbConnection, DbEngine};
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::ports::credentials::CredentialProvider;
 use crate::safesync::audit::{AuditRecord, TableAudit};
@@ -48,16 +48,108 @@ pub async fn inspect(
 }
 
 /// Resolve the installed masking policy named by the spec.
+///
+/// A builtin name is used as-is. A file path is only read when it resolves
+/// inside an authorized policy directory, contains no parent traversal, and is
+/// a regular file. The refusal never echoes the operating-system error, so the
+/// path cannot be used as an existence oracle.
 pub fn resolve_policy(name: &str) -> Result<MaskingPolicy, CoreError> {
     match name {
         "development-default@1" | "development-default" => Ok(MaskingPolicy::builtin_default()),
         "development-default@2" => Ok(MaskingPolicy::builtin_v2()),
+        other if other.ends_with(".yaml") || other.ends_with(".yml") => {
+            let mut file = open_policy_file(other)?;
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text).map_err(|_| {
+                CoreError::with_detail(
+                    ErrorCode::Usage,
+                    "the masking policy file could not be read",
+                    "mask_policy_invalid",
+                )
+            })?;
+            MaskingPolicy::parse_yaml(&text)
+        }
         other => Err(CoreError::with_detail(
             ErrorCode::Usage,
             format!("masking policy '{other}' is not installed"),
             "mask_policy_invalid",
         )),
     }
+}
+
+/// The directories a masking policy file may be read from.
+///
+/// `DBPINBALL_POLICY_DIR` wins when set (several roots may be separated by `;`
+/// or `:`); otherwise the process working directory is the only root.
+fn authorized_policy_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(value) = std::env::var("DBPINBALL_POLICY_DIR") {
+        // Windows paths contain a drive colon, so only `;` separates roots
+        // there; Unix uses `:`.
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for part in value.split(separator) {
+            let part = part.trim();
+            if !part.is_empty() {
+                roots.push(PathBuf::from(part));
+            }
+        }
+    }
+    if roots.is_empty() {
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(cwd);
+        }
+    }
+    roots
+}
+
+fn policy_path_refused() -> CoreError {
+    CoreError::with_detail(
+        ErrorCode::Usage,
+        "the masking policy path is not inside an authorized policy directory",
+        "policy_path_not_authorized",
+    )
+}
+
+fn resolve_policy_path(name: &str) -> Result<PathBuf, CoreError> {
+    let candidate = Path::new(name);
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(policy_path_refused());
+    }
+
+    let roots = authorized_policy_roots();
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        let root = roots.first().ok_or_else(policy_path_refused)?;
+        root.join(candidate)
+    };
+
+    let canonical = std::fs::canonicalize(&absolute).map_err(|_| policy_path_refused())?;
+    let authorized = roots.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .map(|root| canonical.starts_with(&root))
+            .unwrap_or(false)
+    });
+    if !authorized {
+        return Err(policy_path_refused());
+    }
+
+    Ok(canonical)
+}
+
+/// Open an authorized policy file and prove it is a regular file through the
+/// open handle, so the check and the read cannot disagree about the target.
+fn open_policy_file(name: &str) -> Result<std::fs::File, CoreError> {
+    let canonical = resolve_policy_path(name)?;
+    let file = std::fs::File::open(&canonical).map_err(|_| policy_path_refused())?;
+    let metadata = file.metadata().map_err(|_| policy_path_refused())?;
+    if !metadata.is_file() {
+        return Err(policy_path_refused());
+    }
+    Ok(file)
 }
 
 /// Build a masker from the spec and the key store.
@@ -81,9 +173,10 @@ pub async fn plan(
     replace: bool,
 ) -> Result<DryRunPlan, CoreError> {
     spec.validate()?;
+    assert_same_engine(source, destination)?;
     let masker = masker_for(spec, keys)?;
 
-    let root_tables = root_tables(spec)?;
+    let root_tables = root_tables_for(spec, source)?;
 
     let mut source_session =
         BoundSession::open(SessionRole::Source, source, credentials, &spec.limits).await?;
@@ -185,7 +278,7 @@ pub async fn validate(
         ));
     }
     check_filter_digests(plan, spec, &masker)?;
-    let root_tables = root_tables(spec)?;
+    let root_tables = root_tables_for(spec, source)?;
 
     let mut source_session =
         BoundSession::open(SessionRole::Source, source, credentials, &spec.limits).await?;
@@ -260,8 +353,15 @@ pub fn check_filter_digests(
         return Err(filter_mismatch("the plan does not match the specification"));
     }
 
+    let engine = if plan.source.engine == "mariadb" || plan.source.engine == "mysql" {
+        DbEngine::Mysql
+    } else {
+        DbEngine::Postgres
+    };
+
     for (planned, root) in plan.selection.roots.iter().zip(&spec.selection.roots) {
-        let root_name = crate::safesync::spec::QualifiedName::parse(&root.table)?;
+        let root_name =
+            crate::safesync::spec::QualifiedName::parse_with_default(&root.table, &planned.schema)?;
         if root_name.schema != planned.schema || root_name.table != planned.table {
             return Err(filter_mismatch(
                 "the specification does not match the plan's root table",
@@ -293,7 +393,8 @@ pub fn check_filter_digests(
                 ));
             }
         }
-        let canonical = crate::safesync::spec::canonical_filter(&root.filter, &types)?;
+        let canonical =
+            crate::safesync::spec::canonical_filter_for_engine(engine, &root.filter, &types)?;
         let digest = masker.filter_digest(&planned.schema, &planned.table, &canonical);
         if digest != planned.filter_digest {
             return Err(filter_mismatch(
@@ -343,11 +444,32 @@ fn refusal(decision: PolicyDecision) -> CoreError {
     )
 }
 
-fn root_tables(spec: &SafeSyncSpec) -> Result<Vec<QualifiedName>, CoreError> {
+/// A plan is bound to one engine. A PostgreSQL source with a MariaDB
+/// destination (or the reverse) is refused explicitly instead of failing later
+/// as an accidental schema-hash mismatch.
+fn assert_same_engine(source: &DbConnection, destination: &DbConnection) -> Result<(), CoreError> {
+    if source.engine != destination.engine {
+        return Err(CoreError::with_detail(
+            ErrorCode::PolicyRefusal,
+            "the source and destination must use the same engine",
+            "engine_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn root_tables_for(
+    spec: &SafeSyncSpec,
+    source: &DbConnection,
+) -> Result<Vec<QualifiedName>, CoreError> {
+    let default_schema = match source.engine {
+        DbEngine::Postgres => "public",
+        DbEngine::Mysql => source.database.as_str(),
+    };
     spec.selection
         .roots
         .iter()
-        .map(|root| QualifiedName::parse(&root.table))
+        .map(|root| QualifiedName::parse_with_default(&root.table, default_schema))
         .collect()
 }
 
@@ -405,6 +527,7 @@ pub async fn execute(
     cancel: Arc<AtomicBool>,
 ) -> Result<RunReport, CoreError> {
     request.spec.validate()?;
+    assert_same_engine(request.source, request.destination)?;
     request.plan.check_version()?;
     request.plan.check_expiry_contract(now_ms)?;
 
@@ -482,7 +605,7 @@ pub async fn execute(
     }
 
     check_filter_digests(request.plan, request.spec, &masker)?;
-    let root_tables = root_tables(request.spec)?;
+    let root_tables = root_tables_for(request.spec, request.source)?;
 
     let mut source_session = BoundSession::open(
         SessionRole::Source,
@@ -680,6 +803,10 @@ pub async fn status(
     let mut session =
         BoundSession::open(SessionRole::Destination, destination, credentials, limits).await?;
 
+    if session.engine() == DbEngine::Mysql {
+        return crate::safesync::import_mariadb::read_run_status(&mut session, run_id).await;
+    }
+
     let statement = format!(
         "SELECT run_id::text, plan_fingerprint, status, rows_written, destination_digest, sequence_status, finished_at::text
          FROM {}
@@ -758,6 +885,66 @@ mod tests {
     fn an_unknown_policy_is_refused() {
         let error = resolve_policy("production-safe@7").unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("mask_policy_invalid"));
+    }
+
+    const POLICY_YAML: &str = "name: test\nversion: 1\nrules:\n  - schema: app\n    table: t\n    column: c\n    strategy: keep\n";
+
+    /// The policy root is process-global, so the tests that set it must not run
+    /// concurrently with each other.
+    fn policy_root_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn a_policy_inside_the_authorized_root_loads() {
+        let _guard = policy_root_lock().lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("policy.yaml");
+        std::fs::write(&path, POLICY_YAML).unwrap();
+        std::env::set_var("DBPINBALL_POLICY_DIR", root.path());
+        let policy = resolve_policy(&path.to_string_lossy()).unwrap();
+        assert_eq!(policy.name, "test");
+        std::env::remove_var("DBPINBALL_POLICY_DIR");
+    }
+
+    #[test]
+    fn a_policy_outside_the_authorized_root_is_refused() {
+        let _guard = policy_root_lock().lock().unwrap();
+        let authorized = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let path = elsewhere.path().join("policy.yaml");
+        std::fs::write(&path, POLICY_YAML).unwrap();
+        std::env::set_var("DBPINBALL_POLICY_DIR", authorized.path());
+        let error = resolve_policy(&path.to_string_lossy()).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("policy_path_not_authorized"));
+        assert!(
+            !error.message.contains("policy.yaml"),
+            "the refusal must not echo the path"
+        );
+        std::env::remove_var("DBPINBALL_POLICY_DIR");
+    }
+
+    #[test]
+    fn a_policy_path_with_parent_traversal_is_refused() {
+        let _guard = policy_root_lock().lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("DBPINBALL_POLICY_DIR", root.path());
+        let error = resolve_policy("../policy.yaml").unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("policy_path_not_authorized"));
+        std::env::remove_var("DBPINBALL_POLICY_DIR");
+    }
+
+    #[test]
+    fn a_policy_directory_is_not_a_policy_file() {
+        let _guard = policy_root_lock().lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("policies.yaml");
+        std::fs::create_dir(&directory).unwrap();
+        std::env::set_var("DBPINBALL_POLICY_DIR", root.path());
+        let error = resolve_policy(&directory.to_string_lossy()).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("policy_path_not_authorized"));
+        std::env::remove_var("DBPINBALL_POLICY_DIR");
     }
 
     #[test]

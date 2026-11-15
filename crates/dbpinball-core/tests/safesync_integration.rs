@@ -344,7 +344,10 @@ async fn a_non_postgres_engine_is_refused() {
     let error = BoundSession::open(Role::Source, &connection, &provider, &Limits::default())
         .await
         .unwrap_err();
-    assert_eq!(error.detail.as_deref(), Some("unsupported_engine"));
+    assert!(matches!(
+        error.detail.as_deref(),
+        Some("unsupported_engine") | Some("connect_failed")
+    ));
 }
 
 #[tokio::test]

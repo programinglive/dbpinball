@@ -7,6 +7,7 @@
 
 use sqlx::types::chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::spec::FilterValue;
 
@@ -45,21 +46,87 @@ impl TypedValue {
             TypedValue::TimestampTz(_) => "timestamptz",
         }
     }
+
+    /// Explicit MariaDB cast for the bound parameter (`CAST(? AS <cast>)`).
+    pub fn mariadb_cast(&self) -> Result<&'static str, CoreError> {
+        match self {
+            TypedValue::Integer { .. } => Ok("SIGNED"),
+            TypedValue::Numeric(raw) => {
+                let digits = raw.strip_prefix('-').unwrap_or(raw);
+                let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
+                if frac_part.len() > 30 || int_part.len() + frac_part.len() > 65 {
+                    return Err(invalid_filter(
+                        "numeric literal exceeds MariaDB DECIMAL(65,30) precision",
+                    ));
+                }
+                Ok("DECIMAL(65, 30)")
+            }
+            TypedValue::Date(_) => Ok("DATE"),
+            TypedValue::Timestamp(_) | TypedValue::TimestampTz(_) => Ok("DATETIME(6)"),
+        }
+    }
+
+    /// Bound string representation formatted for MariaDB UTC sessions.
+    pub fn mariadb_bind(&self) -> String {
+        match self {
+            TypedValue::Timestamp(value) => value.replace('T', " "),
+            TypedValue::TimestampTz(value) => {
+                value.strip_suffix('Z').unwrap_or(value).replace('T', " ")
+            }
+            _ => self.canonical(),
+        }
+    }
 }
 
 /// Parse and canonicalize a filter bound against a PostgreSQL column type.
 pub fn parse_typed_value(type_name: &str, value: &FilterValue) -> Result<TypedValue, CoreError> {
-    match type_name {
-        "smallint" => parse_int(value, i64::from(i16::MIN), i64::from(i16::MAX), "smallint"),
-        "integer" => parse_int(value, i64::from(i32::MIN), i64::from(i32::MAX), "integer"),
-        "bigint" => parse_int(value, i64::MIN, i64::MAX, "bigint"),
-        "numeric" | "decimal" => parse_numeric(value),
-        "date" => parse_date(value),
-        "timestamp without time zone" => parse_timestamp(value),
-        "timestamp with time zone" => parse_timestamptz(value),
-        other => Err(invalid_filter(format!(
-            "range filters are not supported on column type '{other}'"
-        ))),
+    parse_typed_value_for_engine(DbEngine::Postgres, type_name, value)
+}
+
+/// Parse and canonicalize a filter bound against an engine-specific column type.
+pub fn parse_typed_value_for_engine(
+    engine: DbEngine,
+    type_name: &str,
+    value: &FilterValue,
+) -> Result<TypedValue, CoreError> {
+    match engine {
+        DbEngine::Postgres => match type_name {
+            "smallint" => parse_int(value, i64::from(i16::MIN), i64::from(i16::MAX), "smallint"),
+            "integer" => parse_int(value, i64::from(i32::MIN), i64::from(i32::MAX), "integer"),
+            "bigint" => parse_int(value, i64::MIN, i64::MAX, "bigint"),
+            "numeric" | "decimal" => parse_numeric(value),
+            "date" => parse_date(value),
+            "timestamp without time zone" => parse_timestamp(value),
+            "timestamp with time zone" => parse_timestamptz(value),
+            other => Err(invalid_filter(format!(
+                "range filters are not supported on column type '{other}'"
+            ))),
+        },
+        DbEngine::Mysql => {
+            let parsed = match type_name {
+                "tinyint" => parse_int(value, i64::from(i8::MIN), i64::from(i8::MAX), "tinyint")?,
+                "smallint" => {
+                    parse_int(value, i64::from(i16::MIN), i64::from(i16::MAX), "smallint")?
+                }
+                "mediumint" => parse_int(value, -8_388_608, 8_388_607, "mediumint")?,
+                "int" | "integer" => {
+                    parse_int(value, i64::from(i32::MIN), i64::from(i32::MAX), "integer")?
+                }
+                "bigint" => parse_int(value, i64::MIN, i64::MAX, "bigint")?,
+                "numeric" | "decimal" => parse_numeric(value)?,
+                "date" => parse_date(value)?,
+                "datetime" => parse_timestamp(value)?,
+                "timestamp" => parse_timestamptz(value)?,
+                other => {
+                    return Err(invalid_filter(format!(
+                        "range filters are not supported on MariaDB column type '{other}'"
+                    )))
+                }
+            };
+            // Verify MariaDB cast compatibility up front (e.g. DECIMAL(65,30) bounds).
+            let _ = parsed.mariadb_cast()?;
+            Ok(parsed)
+        }
     }
 }
 
@@ -568,5 +635,44 @@ mod tests {
                 "type_name={type_name}"
             );
         }
+    }
+
+    #[test]
+    fn mariadb_typed_values_parse_and_format_for_utc_casts() {
+        let dt = parse_typed_value_for_engine(
+            DbEngine::Mysql,
+            "datetime",
+            &FilterValue::Text("2026-01-02T03:04:05.123".into()),
+        )
+        .unwrap();
+        assert_eq!(dt.canonical(), "2026-01-02 03:04:05.123");
+        assert_eq!(dt.mariadb_bind(), "2026-01-02 03:04:05.123");
+        assert_eq!(dt.mariadb_cast().unwrap(), "DATETIME(6)");
+
+        let ts = parse_typed_value_for_engine(
+            DbEngine::Mysql,
+            "timestamp",
+            &FilterValue::Text("2026-01-02T10:04:05+07:00".into()),
+        )
+        .unwrap();
+        assert_eq!(ts.canonical(), "2026-01-02T03:04:05Z");
+        assert_eq!(ts.mariadb_bind(), "2026-01-02 03:04:05");
+
+        let tiny = parse_typed_value_for_engine(DbEngine::Mysql, "tinyint", &FilterValue::Int(127))
+            .unwrap();
+        assert_eq!(tiny.mariadb_cast().unwrap(), "SIGNED");
+
+        let overflow =
+            parse_typed_value_for_engine(DbEngine::Mysql, "tinyint", &FilterValue::Int(128))
+                .unwrap_err();
+        assert_eq!(overflow.detail.as_deref(), Some("invalid_filter"));
+
+        let dec_too_wide = parse_typed_value_for_engine(
+            DbEngine::Mysql,
+            "decimal",
+            &FilterValue::Text(format!("1.{}", "1".repeat(31))),
+        )
+        .unwrap_err();
+        assert_eq!(dec_too_wide.detail.as_deref(), Some("invalid_filter"));
     }
 }

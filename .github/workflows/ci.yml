@@ -507,7 +507,7 @@ jobs:
           ! grep -q "test result: ok. 0 passed" /tmp/safesync-cli.log
 
   mariadb-graph-integration:
-    name: MariaDB graph integration (two instances)
+    name: MariaDB Safe Sync integration (two instances)
     runs-on: ubuntu-latest
     services:
       source:
@@ -542,11 +542,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create unprivileged MariaDB test user
+      - name: Create MariaDB test users
         run: |
           sudo apt-get update
           sudo apt-get install -y mariadb-client
-          mariadb --skip-ssl -h 127.0.0.1 -P 33306 -u root -pmdb_root -e "CREATE USER 'mdb_nopriv'@'%' IDENTIFIED BY 'mdb_nopriv'; GRANT USAGE ON *.* TO 'mdb_nopriv'@'%';"
+          mariadb --skip-ssl -h 127.0.0.1 -P 33306 -u root -pmdb_root -e "CREATE USER 'mdb_nopriv'@'%' IDENTIFIED BY 'mdb_nopriv'; GRANT USAGE ON *.* TO 'mdb_nopriv'@'%'; CREATE USER 'mdb_ro'@'%' IDENTIFIED BY 'mdb_ro'; GRANT SELECT ON mdb_src.* TO 'mdb_ro'@'%';"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -566,6 +566,17 @@ jobs:
           cargo test -p dbpinball-core --features integration --test mariadb_graph_integration -- --nocapture | tee /tmp/mariadb-graph.log
           ! grep -q "test result: ok. 0 passed" /tmp/mariadb-graph.log
           ! grep -q "skipped:" /tmp/mariadb-graph.log
+
+      - name: Run MariaDB 10.11 Safe Sync acceptance suite
+        env:
+          DBPINBALL_TEST_MARIADB_URL: mysql://mdb_user:mdb_pass@127.0.0.1:33306/mdb_src
+          DBPINBALL_TEST_MARIADB_RO_URL: mysql://mdb_ro:mdb_ro@127.0.0.1:33306/mdb_src
+          DBPINBALL_TEST_MARIADB_DST_URL: mysql://mdb_user:mdb_pass@127.0.0.1:33307/mdb_dst
+        run: |
+          set -euo pipefail
+          cargo test -p dbpinball-core --features integration --test mariadb_safesync_integration -- --nocapture | tee /tmp/mariadb-safesync.log
+          ! grep -q "test result: ok. 0 passed" /tmp/mariadb-safesync.log
+          ! grep -q "skipped:" /tmp/mariadb-safesync.log
 
   audit:
     name: Dependency audit

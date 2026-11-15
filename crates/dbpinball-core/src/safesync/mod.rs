@@ -17,6 +17,7 @@
 pub mod audit;
 pub mod graph;
 pub mod import;
+pub mod import_mariadb;
 pub mod key;
 pub mod mariadb_graph;
 pub mod mask;

@@ -900,7 +900,7 @@ async fn a_missing_mask_key_is_refused() {
 }
 
 #[tokio::test]
-async fn a_non_postgres_source_is_refused() {
+async fn an_unreachable_mysql_source_fails_closed() {
     let _guard = serial().lock().await;
     let (Some(source), Some(destination)) = (
         target("DBPINBALL_TEST_PG_SOURCE_URL", "source"),
@@ -912,7 +912,9 @@ async fn a_non_postgres_source_is_refused() {
 
     let directory = tempfile::tempdir().unwrap();
     let config = config_with(directory.path(), &[&source, &destination]);
-    // A MySQL profile that is never connected to: the engine check fires first.
+    // MySQL is a supported engine, so the engine gate no longer fires before the
+    // connection. A profile that cannot be reached must still fail closed with
+    // the documented connection exit code and a redacted detail.
     let mysql = serde_json::json!([{
         "id": "mysql", "name": "mysql", "engine": "mysql", "host": "127.0.0.1",
         "port": 3306, "database": "app", "username": "u", "useSsl": false
@@ -934,8 +936,14 @@ async fn a_non_postgres_source_is_refused() {
         &source,
         &destination,
     );
-    assert_eq!(code(&output), 5);
-    assert_eq!(envelope(&output)["error"]["detail"], "unsupported_engine");
+    assert_eq!(code(&output), 3, "a connection failure exits three");
+    assert_eq!(envelope(&output)["error"]["detail"], "connect_failed");
+    let rendered = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !rendered.contains("127.0.0.1:3306"),
+        "the failure must not echo the connection target"
+    );
 }
 
 #[tokio::test]

@@ -100,7 +100,7 @@ pub fn key_id_for(bytes: &[u8; 32]) -> String {
 }
 
 /// Where masking keys are stored.
-pub trait MaskKeyStore {
+pub trait MaskKeyStore: Send + Sync {
     /// The current key, or `mask_key_missing` when none is configured.
     fn load(&self) -> Result<MaskKey, CoreError>;
     /// Persist a key. Never returns the key material.

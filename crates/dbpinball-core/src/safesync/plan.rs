@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::connection::DbEngine;
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::safesync::mask::{digest, hex_lower, Masker};
 use crate::safesync::planner::SelectionResult;
@@ -49,7 +50,14 @@ impl PlanIdentity {
         Self {
             identity_key: identity.identity_key.clone(),
             current_user: identity.current_user.clone(),
-            engine: "postgres".to_string(),
+            engine: match identity.engine {
+                DbEngine::Postgres => "postgres".to_string(),
+                DbEngine::Mysql => identity
+                    .server
+                    .engine
+                    .clone()
+                    .unwrap_or_else(|| "mariadb".to_string()),
+            },
         }
     }
 }
@@ -576,6 +584,8 @@ mod tests {
             table: QualifiedName::parse("public.accounts").unwrap(),
             columns: vec!["id".into()],
             types: vec!["uuid".into()],
+            precisions: vec![None],
+            scales: vec![None],
             row_identity: vec!["id".into()],
             schema_hash: "hash".into(),
             rls_active: false,

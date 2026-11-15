@@ -1,19 +1,21 @@
-import { useRef, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { BrowserRouter as Router } from "react-router-dom";
 import ConnectionsPage, { type ConnectionsPageHandle } from "@/pages/connections";
+import SafeSyncPage from "@/pages/safesync";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Plus, Search, UploadCloud, RotateCcw, PlugZap } from "lucide-react";
+import { Plus, Search, UploadCloud, RotateCcw, PlugZap, ShieldCheck } from "lucide-react";
 import "./App.css";
 
 const Panel = ({ children }: { children: ReactNode }) => <section className="panel">{children}</section>;
 
 function App() {
   const connectionsRef = useRef<ConnectionsPageHandle | null>(null);
+  const [activeView, setActiveView] = useState<"connections" | "safesync">("connections");
 
   return (
     <Router>
@@ -51,11 +53,24 @@ function App() {
                 type="button"
                 className="nav-rail__cta"
                 aria-label="Create connection"
-                onClick={() => connectionsRef.current?.openNewConnection()}
+                onClick={() => {
+                  setActiveView("connections");
+                  connectionsRef.current?.openNewConnection();
+                }}
                 data-tauri-drag-region="false"
               >
                 <PlugZap size={16} className="nav-rail__cta-icon" />
                 <span>Create connection…</span>
+              </button>
+              <button
+                type="button"
+                className="nav-rail__cta"
+                aria-label="Safe Sync"
+                onClick={() => setActiveView((prev) => (prev === "safesync" ? "connections" : "safesync"))}
+                data-tauri-drag-region="false"
+              >
+                <ShieldCheck size={16} className="nav-rail__cta-icon" />
+                <span>{activeView === "safesync" ? "Connections" : "Safe Sync…"}</span>
               </button>
             </div>
           </aside>
@@ -103,7 +118,11 @@ function App() {
 
             <section className="main-stage__content">
               <Panel>
-                <ConnectionsPage ref={connectionsRef} />
+                {activeView === "safesync" ? (
+                  <SafeSyncPage />
+                ) : (
+                  <ConnectionsPage ref={connectionsRef} />
+                )}
               </Panel>
             </section>
           </main>

@@ -96,6 +96,10 @@ pub struct ColumnShape {
     pub is_identity_reference: bool,
     /// An explicit destination length limit, when the policy supplies one.
     pub max_len: Option<usize>,
+    /// The declared numeric precision, when the catalogue reports one.
+    pub numeric_precision: Option<u32>,
+    /// The declared numeric scale, when the catalogue reports one.
+    pub numeric_scale: Option<u32>,
 }
 
 /// The referenced key a `deterministic_key` column belongs to.
@@ -810,6 +814,12 @@ fn validate_rule_for_type(rule: &ColumnRule, column: &ColumnShape) -> Result<(),
                         "integer_keep_requires_identity",
                     ));
                 }
+            } else if is_exact_numeric_type(&type_name) || is_temporal_type(&type_name) {
+                // Exact numerics and temporal values are kept as their literal
+                // text form and bound back through an explicit cast, so no
+                // floating-point round trip and no timezone reinterpretation
+                // can change them. Like every other keep, this needs an
+                // explicit per-column rule; there is no type-based default.
             } else {
                 return Err(unsupported_type(format!(
                     "column {} cannot be kept unchanged",
@@ -879,7 +889,16 @@ fn fit_text(value: &str, max_len: Option<usize>, strategy: &str) -> Result<Maske
 pub fn is_text_type(type_name: &str) -> bool {
     matches!(
         type_name,
-        "text" | "character varying" | "varchar" | "citext" | "name"
+        "text"
+            | "character varying"
+            | "character"
+            | "varchar"
+            | "char"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "citext"
+            | "name"
     )
 }
 
@@ -893,14 +912,62 @@ pub fn is_keepable_type(type_name: &str) -> bool {
 
 /// Integer types that an identity column can use.
 pub fn is_integer_type(type_name: &str) -> bool {
-    matches!(type_name, "bigint" | "integer" | "smallint")
+    matches!(
+        type_name,
+        "bigint" | "integer" | "int" | "mediumint" | "smallint" | "tinyint"
+    )
+}
+
+/// Exact numeric types whose literal text form round-trips without loss.
+///
+/// Floating-point types are deliberately absent: a `double` or `real` value
+/// cannot be preserved exactly through a text literal, so it stays refused.
+pub fn is_exact_numeric_type(type_name: &str) -> bool {
+    matches!(type_name, "decimal" | "numeric")
+}
+
+/// Temporal types that the import path can bind back through an explicit cast.
+///
+/// The list is kept aligned with `cast_for` (PostgreSQL) and
+/// `mariadb_cast_for` (MariaDB): a type that cannot be bound is not offered as
+/// keepable, so a plan never promises a preservation the import cannot honour.
+pub fn is_temporal_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "date"
+            | "datetime"
+            | "timestamp"
+            | "timestamptz"
+            | "timestamp without time zone"
+            | "timestamp with time zone"
+    )
 }
 
 pub fn is_risky_type(type_name: &str) -> bool {
     type_name.ends_with("[]")
         || matches!(
             type_name,
-            "json" | "jsonb" | "bytea" | "xml" | "tsvector" | "tsquery"
+            "json"
+                | "jsonb"
+                | "bytea"
+                | "blob"
+                | "tinyblob"
+                | "mediumblob"
+                | "longblob"
+                | "binary"
+                | "varbinary"
+                | "geometry"
+                | "point"
+                | "linestring"
+                | "polygon"
+                | "multipoint"
+                | "multilinestring"
+                | "multipolygon"
+                | "geometrycollection"
+                | "geomcollection"
+                | "xml"
+                | "tsvector"
+                | "tsquery"
         )
 }
 
@@ -1034,6 +1101,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
             ColumnShape {
                 name: "email".into(),
@@ -1043,6 +1112,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
             ColumnShape {
                 name: "full_name".into(),
@@ -1052,6 +1123,8 @@ mod tests {
                 is_identity: false,
                 is_identity_reference: false,
                 max_len: None,
+                numeric_precision: None,
+                numeric_scale: None,
             },
         ]
     }
@@ -1181,6 +1254,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         });
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unmapped_column"));
@@ -1208,6 +1283,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unmapped_column"));
@@ -1234,6 +1311,8 @@ mod tests {
             is_identity: false,
             is_identity_reference: false,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }];
         let error = masker.coverage("public", "accounts", &columns).unwrap_err();
         assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
@@ -1554,6 +1633,8 @@ mod tests {
             is_identity: identity,
             is_identity_reference: reference,
             max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }
     }
 
@@ -1598,6 +1679,101 @@ mod tests {
         let masker = Masker::new(policy, key()).unwrap();
         let columns = vec![integer_column("parent_id", false, true)];
         masker.coverage("public", "accounts", &columns).unwrap();
+    }
+
+    fn typed_column(name: &str, type_name: &str) -> ColumnShape {
+        ColumnShape {
+            name: name.into(),
+            type_name: type_name.into(),
+            nullable: false,
+            is_primary_key: false,
+            is_identity: false,
+            is_identity_reference: false,
+            max_len: None,
+            numeric_precision: None,
+            numeric_scale: None,
+        }
+    }
+
+    #[test]
+    fn an_exact_numeric_can_be_kept_when_explicitly_ruled() {
+        let mut policy = MaskingPolicy::builtin_default();
+        policy.rules.push(keep_rule("orders", "amount"));
+        let masker = Masker::new(policy, key()).unwrap();
+        let columns = vec![typed_column("amount", "decimal")];
+        masker.coverage("public", "orders", &columns).unwrap();
+
+        let value = masker
+            .mask_value(
+                &keep_rule("orders", "amount"),
+                "id=1",
+                MaskInput::Text("999.95"),
+            )
+            .unwrap();
+        assert_eq!(value, MaskedValue::Text("999.95".into()));
+    }
+
+    #[test]
+    fn a_temporal_value_can_be_kept_when_explicitly_ruled() {
+        for type_name in [
+            "date",
+            "datetime",
+            "timestamp",
+            "timestamp without time zone",
+            "timestamp with time zone",
+        ] {
+            let mut policy = MaskingPolicy::builtin_default();
+            policy.rules.push(keep_rule("orders", "created_at"));
+            let masker = Masker::new(policy, key()).unwrap();
+            let columns = vec![typed_column("created_at", type_name)];
+            masker
+                .coverage("public", "orders", &columns)
+                .unwrap_or_else(|error| panic!("{type_name} should be keepable: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn a_floating_point_column_cannot_be_kept() {
+        for type_name in ["double", "real", "float"] {
+            let mut policy = MaskingPolicy::builtin_default();
+            policy.rules.push(keep_rule("orders", "ratio"));
+            let masker = Masker::new(policy, key()).unwrap();
+            let columns = vec![typed_column("ratio", type_name)];
+            let error = masker
+                .coverage("public", "orders", &columns)
+                .expect_err("a float cannot be preserved exactly");
+            assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
+        }
+    }
+
+    #[test]
+    fn a_spatial_column_cannot_be_kept() {
+        for type_name in [
+            "multipoint",
+            "multilinestring",
+            "multipolygon",
+            "geometrycollection",
+            "geomcollection",
+        ] {
+            let mut policy = MaskingPolicy::builtin_default();
+            policy.rules.push(keep_rule("shapes", "shape"));
+            let masker = Masker::new(policy, key()).unwrap();
+            let columns = vec![typed_column("shape", type_name)];
+            let error = masker
+                .coverage("public", "shapes", &columns)
+                .expect_err("a spatial type is risky");
+            assert_eq!(error.detail.as_deref(), Some("unsupported_type"));
+        }
+    }
+
+    #[test]
+    fn a_sensitive_named_column_cannot_be_kept_even_when_numeric() {
+        let mut policy = MaskingPolicy::builtin_default();
+        policy
+            .rules
+            .push(keep_rule("accounts", "credit_card_limit"));
+        let error = Masker::new(policy, key()).unwrap_err();
+        assert_eq!(error.detail.as_deref(), Some("mask_policy_invalid"));
     }
 
     #[test]
