@@ -174,6 +174,22 @@ jobs:
             }
           }
 
+      - name: Verify the upload set is complete
+        shell: pwsh
+        run: |
+          $dir = "artifacts/release/v$env:RELEASE_VERSION"
+          $expected = @(
+            "dbpinball_$($env:RELEASE_VERSION)_x64-setup.exe",
+            "dbpinball-cli-$($env:RELEASE_VERSION)-x64.zip",
+            "SHA256SUMS.txt",
+            "provenance.json"
+          )
+          foreach ($name in $expected) {
+            if (-not (Test-Path -LiteralPath (Join-Path $dir $name))) {
+              throw "missing release file: $name"
+            }
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -284,6 +300,22 @@ jobs:
           }
           EOF
           cat provenance.json
+
+      - name: Verify the upload set is complete
+        run: |
+          set -euo pipefail
+          dir="artifacts/release/v$RELEASE_VERSION"
+          for name in \
+            "dbpinball-cli-$RELEASE_VERSION-x64-linux.tar.gz" \
+            "dbpinball_${RELEASE_VERSION}_amd64.deb" \
+            "dbpinball_${RELEASE_VERSION}_amd64.AppImage" \
+            "SHA256SUMS.txt" \
+            "provenance.json"; do
+            if [ ! -f "$dir/$name" ]; then
+              echo "missing release file: $name" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
