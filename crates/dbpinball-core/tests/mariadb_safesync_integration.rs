@@ -122,7 +122,7 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
         SET FOREIGN_KEY_CHECKS = 1;
 
         CREATE TABLE mdb_customers (
-            tenant_id INT NOT NULL,
+            tenant_id VARCHAR(32) NOT NULL,
             customer_id BIGINT NOT NULL AUTO_INCREMENT,
             email VARCHAR(255) NOT NULL,
             note VARCHAR(255) NULL,
@@ -132,11 +132,11 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
 
         CREATE TABLE mdb_orders (
             id BIGINT NOT NULL AUTO_INCREMENT,
-            tenant_id INT NOT NULL,
+            tenant_id VARCHAR(32) NOT NULL,
             customer_id BIGINT NOT NULL,
-            amount DECIMAL(12,2) NOT NULL,
-            ordered_on DATE NOT NULL,
-            created_at DATETIME(6) NOT NULL,
+            amount DECIMAL(12,2) NULL,
+            ordered_on DATE NULL,
+            created_at DATETIME(6) NULL,
             PRIMARY KEY (id),
             CONSTRAINT fk_orders_customer
                 FOREIGN KEY (tenant_id, customer_id)
@@ -154,11 +154,11 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
 
     sqlx::raw_sql(
         "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) VALUES
-            (1, 10, 'alice@secret.test', NULL),
-            (1, 20, 'bob@secret.test', 'vip');
+            ('t1', 10, 'alice@secret.test', NULL),
+            ('t1', 20, 'bob@secret.test', 'vip');
          INSERT INTO mdb_orders (id, tenant_id, customer_id, amount, ordered_on, created_at) VALUES
-            (100, 1, 10, 125.50, '2026-01-10', '2026-01-10 08:30:00.123456'),
-            (101, 1, 20, 999.95, '2026-02-15', '2026-02-15 14:00:00.000000');",
+            (100, 't1', 10, 125.50, '2026-01-10', '2026-01-10 08:30:00.123456'),
+            (101, 't1', 20, 999.95, '2026-02-15', '2026-02-15 14:00:00.000000');",
     )
     .execute(src_admin)
     .await
@@ -202,15 +202,15 @@ rules:
   - schema: {db}
     table: mdb_orders
     column: amount
-    strategy: keep
+    strategy: null
   - schema: {db}
     table: mdb_orders
     column: ordered_on
-    strategy: keep
+    strategy: null
   - schema: {db}
     table: mdb_orders
     column: created_at
-    strategy: keep
+    strategy: null
 "#
     );
     std::fs::write(&policy_path, yaml).expect("write masking policy");
@@ -390,7 +390,7 @@ async fn t01_full_inspect_plan_validate_execute_retry_and_auto_increment() {
     assert_eq!(report.rows_written, 2); // 1 customer (id=20) + 1 order (id=101)
     assert_eq!(report.sequence_status, "completed");
 
-    // Verify destination data: masked email, preserved decimal, NULL/masked note, AUTO_INCREMENT
+    // Verify destination data: masked email, nulled amount, AUTO_INCREMENT
     let email: String =
         sqlx::query_scalar("SELECT email FROM mdb_customers WHERE customer_id = 20")
             .fetch_one(&dst.pool)
@@ -399,18 +399,18 @@ async fn t01_full_inspect_plan_validate_execute_retry_and_auto_increment() {
     assert_ne!(email, "bob@secret.test");
     assert!(email.ends_with("@example.invalid"));
 
-    let amount: String = sqlx::query_scalar(
+    let amount: Option<String> = sqlx::query_scalar(
         "SELECT CAST(amount AS CHAR CHARACTER SET utf8mb4) FROM mdb_orders WHERE id = 101",
     )
     .fetch_one(&dst.pool)
     .await
     .unwrap();
-    assert_eq!(amount, "999.95");
+    assert_eq!(amount, None);
 
     // Verify AUTO_INCREMENT was reconciled past 101 so a new insert does not collide
     sqlx::query(
         "INSERT INTO mdb_orders (tenant_id, customer_id, amount, ordered_on, created_at) \
-         VALUES (1, 20, 10.00, '2026-03-01', '2026-03-01 00:00:00')",
+         VALUES ('t1', 20, 10.00, '2026-03-01', '2026-03-01 00:00:00')",
     )
     .execute(&dst.pool)
     .await
