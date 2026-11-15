@@ -491,8 +491,7 @@ fn compute_mariadb_schema_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"dbpinball/mariadb-schema/v1|");
-    hasher.update(table.schema.as_bytes());
-    hasher.update(b".");
+    // Omit database/schema name so identical table shapes across differently named source/destination databases match.
     hasher.update(table.table.as_bytes());
     hasher.update(b"|engine=innodb|pk=");
     hasher.update(primary_key.join(",").as_bytes());
