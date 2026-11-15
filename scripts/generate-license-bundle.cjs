@@ -192,6 +192,29 @@ function npmPackages(directory) {
  * or CopyrightNotice file; those lines are collected verbatim. Nothing is
  * invented: when a package publishes no notice, the entry says so.
  */
+function isValidNoticeLine(trimmed) {
+  // A real notice starts with "Copyright" and names a holder. License prose
+  // also contains the word ("copyright notice that is included in ..."), so
+  // reject the sentence forms rather than presenting them as notices.
+  if (!/^copyright\b/i.test(trimmed) && !/^\(c\)\s/i.test(trimmed)) {
+    return false;
+  }
+  if (/^copyright(?:\s+notices?)?[:.\s]*$/i.test(trimmed)) {
+    return false;
+  }
+  if (/\b(?:liable|warrant|damages|holders be)\b/i.test(trimmed)) {
+    return false;
+  }
+  if (
+    /\b(that|shall|must|license|permission|included|applies|reproduce|retain|attached)\b/i.test(
+      trimmed,
+    )
+  ) {
+    return false;
+  }
+  return trimmed.length <= 120;
+}
+
 function copyrightNotices(installPath) {
   if (!installPath || !fs.existsSync(installPath)) {
     return [];
@@ -213,29 +236,9 @@ function copyrightNotices(installPath) {
     }
     for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
       const trimmed = line.trim();
-      // A real notice starts with "Copyright" and names a holder. License prose
-      // also contains the word ("copyright notice that is included in ..."), so
-      // reject the sentence forms rather than presenting them as notices.
-      if (!/^copyright\b/i.test(trimmed) && !/^\(c\)\s/i.test(trimmed)) {
-        continue;
+      if (isValidNoticeLine(trimmed)) {
+        notices.add(trimmed);
       }
-      if (/^copyright(?:\s+notices?)?[:.\s]*$/i.test(trimmed)) {
-        continue;
-      }
-      if (/liable|warrant|damages|holders be/i.test(trimmed)) {
-        continue;
-      }
-      if (
-        /\b(that|shall|must|license|permission|included|applies|reproduce|retain|attached)\b/i.test(
-          trimmed,
-        )
-      ) {
-        continue;
-      }
-      if (trimmed.length > 120) {
-        continue;
-      }
-      notices.add(trimmed);
     }
   }
   return [...notices];
@@ -496,21 +499,24 @@ if (process.argv.includes("--verify")) {
   }
 
   // At least one real copyright notice must survive extraction inside the
-  // Copyright notices section, with a non-empty notice cell.
+  // Copyright notices section, and every table row must have a non-empty valid
+  // notice cell (sharing the same validator as the extractor).
   const noticeSection = extractTopSection(committed, "Copyright notices");
-  const validNoticeRows = noticeSection.split("\n").filter((line) => {
-    if (!line.startsWith("| `")) {
-      return false;
-    }
-    const cells = line
-      .replace(/\\\|/g, " ")
-      .split("|")
-      .slice(1, -1)
-      .map((cell) => cell.trim());
-    return cells.length >= 3 && /(?:copyright|\(c\))\s+\S+/i.test(cells[2]);
-  });
-  if (validNoticeRows.length === 0) {
+  const noticeRows = noticeSection.split("\n").filter((line) => line.startsWith("| `"));
+  if (noticeRows.length === 0) {
     failures.push("no per-package copyright notices were recorded");
+  } else {
+    for (const line of noticeRows) {
+      const cells = line
+        .replace(/\\\|/g, " ")
+        .split("|")
+        .slice(1, -1)
+        .map((cell) => cell.trim());
+      const parts = (cells[2] || "").split(/<br\s*\/?>/i).map((p) => p.trim()).filter(Boolean);
+      if (cells.length < 3 || parts.length === 0 || !parts.every(isValidNoticeLine)) {
+        failures.push(`invalid or empty copyright notice row: ${line}`);
+      }
+    }
   }
 
   if (failures.length > 0) {
