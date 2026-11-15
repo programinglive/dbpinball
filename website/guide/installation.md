@@ -3,29 +3,25 @@
 DBPinball is a desktop application with an optional command-line interface. You
 do not need Rust, Cargo, Node.js or a source checkout to install it.
 
-::: warning Public release status
-No public release has been published yet, so the
-[releases page](https://github.com/programinglive/dbpinball/releases) is empty.
-Until the first authorized release, download the artifacts from the **Package**
-workflow run: open the repository's **Actions → Package → latest run** and
-download the `dbpinball-windows-x64` or `dbpinball-linux-x64` artifact. Build
-from source only if you are developing DBPinball; see
-[Building from source](/development/building).
+::: tip Download DBPinball v0.1.7
+The current release is
+[v0.1.7](https://github.com/programinglive/dbpinball/releases/tag/v0.1.7).
+Download the installer or archive for your platform from the release page.
 :::
 
 ## 1. Download DBPinball
 
-Get the artifact for your platform from the Package workflow run (or from the
-releases page once a release exists):
+Open the [v0.1.7 release](https://github.com/programinglive/dbpinball/releases/tag/v0.1.7)
+and pick the file for your platform:
 
 | Platform | Desktop | CLI |
 | --- | --- | --- |
-| Windows 10/11 (x64) | `dbpinball_<version>_x64-setup.exe` | `dbpinball-cli-<version>-x64.zip` |
-| Linux (x64) | `dbpinball_<version>_amd64.deb` or `.AppImage` | `dbpinball-cli-<version>-x64-linux.tar.gz` |
+| Windows 10/11 (x64) | `dbpinball_0.1.7_x64-setup.exe` | `dbpinball-cli-0.1.7-x64.zip` |
+| Linux (x64) | `dbpinball_0.1.7_amd64.deb` or `.AppImage` | `dbpinball-cli-0.1.7-x64-linux.tar.gz` |
 | macOS | Not packaged yet; build from source | Not packaged yet |
 
-Every build also publishes `SHA256SUMS.txt`. Compare the hash of the file you
-downloaded with the line for that file:
+The release also publishes `SHA256SUMS-windows.txt` and `SHA256SUMS-linux.txt`.
+Compare the hash of the file you downloaded with the line for that file:
 
 ```powershell
 # Windows
@@ -34,7 +30,7 @@ Get-FileHash .\dbpinball_0.1.7_x64-setup.exe -Algorithm SHA256
 
 ```bash
 # Linux: run this in the folder that contains every listed file
-sha256sum -c SHA256SUMS.txt
+sha256sum -c SHA256SUMS-linux.txt
 ```
 
 `sha256sum -c` checks every file named in the list, so download the whole set or
