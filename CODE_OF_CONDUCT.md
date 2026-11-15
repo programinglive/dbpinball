@@ -59,12 +59,12 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement.
-
-This project does not publish a dedicated conduct email address. Until one is
-configured, report incidents through GitHub's private reporting channel on the
-repository, or contact the maintainer through their GitHub profile. Do not
-include sensitive personal information in a public issue.
+reported to the community leaders responsible for enforcement at
+https://github.com/programinglive (open any repository issue that contains no
+details of the incident and asks for a private channel; a maintainer will reply
+with one). Do not use the security advisory form for conduct reports: that
+channel is for vulnerabilities. This project does not publish a dedicated
+conduct email address.
 
 All complaints will be reviewed and investigated promptly and fairly.
 

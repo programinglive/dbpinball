@@ -25,6 +25,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../THIRD_PARTY_LICENSES.md": "THIRD_PARTY_LICENSES.md"
+    },
     "shortDescription": "Inspect and safely sync PostgreSQL and MariaDB databases",
     "longDescription": "DBPinball inspects PostgreSQL and MariaDB databases, verifies destinations, and copies bounded, masked data into a local development database.",
     "category": "DeveloperTool",

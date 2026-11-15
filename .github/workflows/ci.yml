@@ -80,6 +80,13 @@ jobs:
       - name: Check version consistency
         run: node scripts/check-versions.cjs
 
+      # A dependency change must not silently invalidate the license bundle.
+      # Verification checks coverage rather than byte equality, because the
+      # generated notice table depends on the installed npm tree, which differs
+      # between platforms.
+      - name: Verify the third-party license bundle
+        run: node scripts/generate-license-bundle.cjs --verify
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

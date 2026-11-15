@@ -14,7 +14,7 @@ Thanks for taking the time to contribute. This guide covers setup, the rules tha
 
 - Node.js 20.19+ or 22.12+
 - Rust 1.77.2+
-- A MySQL or PostgreSQL server for manual testing
+- A PostgreSQL, MariaDB or MySQL server for manual testing
 - Tauri platform prerequisites: <https://tauri.app/start/prerequisites/>
 
 ### Install and run
@@ -130,7 +130,7 @@ npm audit --audit-level=high
 cargo audit
 ```
 
-`cargo audit` reads `src-tauri/.cargo/audit.toml`. Do not add an ignore entry without a written reachability argument.
+`cargo audit` reads `.cargo/audit.toml`. Do not add an ignore entry without a written reachability argument, a reachability proof and a reassessment date.
 
 ## Pull request expectations
 
@@ -149,7 +149,7 @@ Changes to any of the following need extra care and a clear description of the t
 - Connection URL construction.
 - SQL execution paths.
 - Anything that writes to a database.
-- The planned Safe Sync pipeline, masking, or destination verification.
+- The Safe Sync pipeline, masking, plan authorization, or destination verification.
 
 Rules:
 
@@ -170,7 +170,7 @@ A new engine adapter must:
 
 ## Documentation requirements
 
-- `README.md` must reflect only what is implemented. Move a capability between "Available", "In development", and "Planned" when its state changes.
+- `README.md` must reflect only what is implemented. Update the capability table and the known-limitations list when a state changes.
 - Do not describe a planned feature as available.
 - Do not describe raw backup, restore, or copy as sanitized or safe to share.
 - Keep commands in the documentation runnable. If a command does not work, fix it or remove it.

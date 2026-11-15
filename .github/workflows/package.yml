@@ -267,7 +267,11 @@ jobs:
           # travel with this release.
           rm -rf "$out"
           mkdir -p "$out"
-          tar -C target/cli-dist/release -czf "$out/dbpinball-cli-$version-x64-linux.tar.gz" dbpinball
+          # MIT and Apache-2.0 both require the notices to travel with a binary
+          # distribution, so the tarball carries them next to the binary.
+          tar -C target/cli-dist/release -cf "$out/dbpinball-cli-$version-x64-linux.tar" dbpinball
+          tar -rf "$out/dbpinball-cli-$version-x64-linux.tar" --transform 's|^|dbpinball-notices/|' LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md
+          gzip -f "$out/dbpinball-cli-$version-x64-linux.tar"
 
           # The workspace target directory is the repository's `target`, not
           # `src-tauri/target`. Fail loudly instead of uploading a CLI-only set.
