@@ -87,15 +87,20 @@ jobs:
 
           $envKey = 'HKCU:\Environment'
           $before = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $installDir = Join-Path $env:LOCALAPPDATA 'dbpinball/bin'
+          $hasEntry = {
+            param([string]$value)
+            [bool](($value -split ';') | Where-Object { $_.TrimEnd('\') -ieq $installDir.TrimEnd('\') })
+          }
+          if (& $hasEntry $before) {
+            throw "the runner already has $installDir on its user PATH, so the add/remove cycle cannot be proven"
+          }
 
           & "$extract/install-cli.ps1" -Quiet
           if ($LASTEXITCODE -ne 0) { throw "install-cli.ps1 failed" }
 
           $after = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-          $installDir = Join-Path $env:LOCALAPPDATA 'dbpinball/bin'
-          if (-not (($after -split ';') | Where-Object { $_.TrimEnd('\') -ieq $installDir.TrimEnd('\') })) {
-            throw "the installer did not add $installDir to the user PATH"
-          }
+          if (-not (& $hasEntry $after)) { throw "the installer did not add $installDir to the user PATH" }
 
           # Resolve the command the way a new terminal would: from the persisted
           # user PATH, not from an absolute path.
@@ -111,10 +116,16 @@ jobs:
           dbpinball --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "dbpinball --help failed" }
 
+          # A reinstall must keep ownership, so the uninstall below still removes
+          # the entry the first install added.
+          & "$extract/install-cli.ps1" -Quiet
+          if ($LASTEXITCODE -ne 0) { throw "the reinstall failed" }
+
           & "$extract/install-cli.ps1" -Uninstall -Quiet
           if ($LASTEXITCODE -ne 0) { throw "install-cli.ps1 -Uninstall failed" }
           $restored = [string](Get-Item $envKey).GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-          if ($restored -ne $before) {
+          if (& $hasEntry $restored) { throw "uninstall left $installDir on the user PATH" }
+          if ($restored -cne $before) {
             throw "uninstall did not restore the original user PATH`nbefore: $before`nafter:  $restored"
           }
 
@@ -124,7 +135,15 @@ jobs:
           $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $dir = "artifacts/release/v$version"
           $lines = @(Get-Content "$dir/SHA256SUMS.txt" | Where-Object { $_ -match '^[0-9a-f]{64}\s+' })
-          if ($lines.Count -lt 2) { throw "SHA256SUMS.txt must cover at least the installer and the CLI archive" }
+          $expected = @(
+            "dbpinball_${version}_x64-setup.exe",
+            "dbpinball-cli-$version-x64.zip"
+          )
+          foreach ($name in $expected) {
+            if (-not ($lines | Where-Object { $_ -match "\s$([regex]::Escape($name))$" })) {
+              throw "SHA256SUMS.txt has no line for $name"
+            }
+          }
           foreach ($line in $lines) {
             if ($line -match '^([0-9a-f]{64})\s+(.+)$') {
               $expected = $Matches[1]

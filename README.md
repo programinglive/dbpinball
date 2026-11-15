@@ -63,7 +63,7 @@ These exist in the codebase but are **not reachable from the current UI**, or ar
 | MySQL Safe Sync | M6 |
 | Advanced snapshots and relational dependency resolution | M7 |
 
-Safe Sync is **not available**. No command in this README should be assumed to exist until the corresponding milestone ships.
+Safe Sync is available for PostgreSQL and MariaDB 10.11+ InnoDB through `dbpinball safe-sync` and the Desktop Safe Sync page. The milestone table above is the original plan and is kept for history; see the [Safe Sync design](https://dbpinball.programinglive.com/security/safe-sync-design) for the supported types and the refusals.
 
 ## Monorepo Packages
 

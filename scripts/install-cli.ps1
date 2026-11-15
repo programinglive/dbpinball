@@ -58,14 +58,17 @@ try {
     $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
     if (-not $acquired) { throw 'Another DBPinball CLI install or uninstall is running.' }
 
-    # The raw value, with %VARIABLES% left unexpanded.
+    # The raw value, with %VARIABLES% left unexpanded. A read error is fatal:
+    # treating it as an empty PATH would let the installer overwrite the value.
     function Get-RawUserPath {
         $key = Get-Item -Path $EnvironmentKey
         try {
-            return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $value = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         } catch {
-            return ''
+            throw "The user PATH could not be read, so it will not be modified: $($_.Exception.Message)"
         }
+        if ($null -eq $value) { return '' }
+        return [string]$value
     }
 
     function Get-UserPathKind {
@@ -190,9 +193,20 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     Write-Step "Installed $reported to $TargetExe"
 
     $current = Get-RawUserPath
+    $previousState = Read-State
+    $entryPresent = Test-PathEntry -Value $current -Entry $InstallDir
+
+    # Ownership survives a reinstall: if an earlier run added the entry, a later
+    # run must not downgrade that to "pre-existing", or uninstall would leave it
+    # behind.
     $addedByUs = $false
-    if (Test-PathEntry -Value $current -Entry $InstallDir) {
-        Write-Step "$InstallDir is already on the user PATH."
+    if ($entryPresent) {
+        if ($null -ne $previousState -and $previousState.pathEntryAdded -eq $true) {
+            $addedByUs = $true
+            Write-Step "$InstallDir is already on the user PATH (added by an earlier install)."
+        } else {
+            Write-Step "$InstallDir is already on the user PATH."
+        }
     } else {
         $updated = if ([string]::IsNullOrEmpty($current)) { $InstallDir } else { $current + ';' + $InstallDir }
         Set-RawUserPath -Value $updated -Kind (Get-UserPathKind)
@@ -201,13 +215,23 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
         Write-Step "Added $InstallDir to the user PATH."
     }
 
-    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
-    [ordered]@{
-        installDir     = $InstallDir
-        pathEntryAdded = $addedByUs
-        version        = $reported
-        installedAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    } | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding utf8
+    # Record ownership. If the state cannot be written, undo the PATH edit so a
+    # later uninstall is never left guessing.
+    try {
+        New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+        [ordered]@{
+            installDir     = $InstallDir
+            pathEntryAdded = $addedByUs
+            version        = $reported
+            installedAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        } | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding utf8
+    } catch {
+        if (-not $entryPresent) {
+            Set-RawUserPath -Value $current -Kind (Get-UserPathKind)
+            Send-EnvironmentChanged
+        }
+        throw "The install state could not be recorded, so the PATH change was reverted: $($_.Exception.Message)"
+    }
 
     $installed = & $TargetExe --version
     if ($LASTEXITCODE -ne 0 -or -not ($installed -match '^dbpinball \d+\.\d+\.\d+')) {
