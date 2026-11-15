@@ -191,7 +191,7 @@ jobs:
           }
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dbpinball-windows-x64
           # Upload only the files this release produced, not everything under
@@ -322,7 +322,7 @@ jobs:
           done
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dbpinball-linux-x64
           # Upload only the files this release produced, not everything under
