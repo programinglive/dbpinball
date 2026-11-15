@@ -71,6 +71,17 @@ dbpinball schema inspect --connection <id>
 dbpinball schema inspect --connection <id> --database app
 ```
 
+## `dbpinball safe-sync`
+
+Run the PostgreSQL Safe Sync workflow (`inspect`, `plan`, `validate`, `execute`,
+`status`, `key rotate`). Root selection filters accept `eq`, `in` (up to 100
+values) and inclusive typed range bounds `gte` and `lte` (up to 8 predicates per
+root, combined with `AND`) on `smallint`, `integer`, `bigint`,
+`numeric`/`decimal`, `date`, `timestamp without time zone`, and
+`timestamp with time zone` (with an explicit numeric offset or `Z`). Filter
+literals remain in the spec file and never appear in the plan file. See
+[Safe Sync design](/security/safe-sync-design).
+
 ## Exit codes
 
 | Code | Meaning |

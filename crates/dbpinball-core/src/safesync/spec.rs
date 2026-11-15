@@ -4,6 +4,8 @@
 //! anything reaches SQL, and unknown fields are rejected so a typo cannot silently
 //! remove a limit or a masking rule.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -126,6 +128,17 @@ impl SafeSyncSpec {
             QualifiedName::parse(&root.table)
                 .map_err(|_| invalid_spec(format!("'{}' is not a valid table name", root.table)))?;
 
+            if root.filter.len() > MAX_FILTER_PREDICATES {
+                return Err(CoreError::with_detail(
+                    ErrorCode::Usage,
+                    format!(
+                        "root filter for '{}' exceeds the maximum of {} predicates",
+                        root.table, MAX_FILTER_PREDICATES
+                    ),
+                    "limit_exceeded",
+                ));
+            }
+
             for filter in &root.filter {
                 if !is_identifier(&filter.column) {
                     return Err(invalid_identifier(format!(
@@ -211,6 +224,8 @@ pub struct FilterPredicate {
     pub value: FilterValue,
 }
 
+pub const MAX_FILTER_PREDICATES: usize = 8;
+
 impl FilterPredicate {
     /// A canonical, injective rendering used for the keyed filter digest.
     pub fn canonical(&self) -> String {
@@ -218,12 +233,53 @@ impl FilterPredicate {
     }
 }
 
-/// Canonical, injective rendering of a whole filter list.
+/// Canonical, collision-free rendering of one predicate, using the column's
+/// PostgreSQL type name and typed canonical value for range operators.
+pub fn canonical_predicate(
+    predicate: &FilterPredicate,
+    type_name: &str,
+) -> Result<String, CoreError> {
+    let canonical_value: serde_json::Value = match predicate.op {
+        FilterOp::Gte | FilterOp::Lte => serde_json::Value::String(
+            crate::safesync::typed::parse_typed_value(type_name, &predicate.value)?.canonical(),
+        ),
+        FilterOp::Eq | FilterOp::In => serde_json::to_value(&predicate.value).unwrap_or_default(),
+    };
+    Ok(serde_json::to_string(&(
+        &predicate.column,
+        predicate.op.rank(),
+        type_name,
+        canonical_value,
+    ))
+    .unwrap_or_default())
+}
+
+/// Canonical, injective, order-independent rendering of a root filter list.
 ///
-/// JSON is used instead of delimiter-joined fields: a value containing `|`,
-/// `,` or a separator byte cannot make two different filters look identical.
-pub fn canonical_filter(filter: &[FilterPredicate]) -> String {
-    serde_json::to_string(filter).unwrap_or_default()
+/// Predicates are encoded as JSON arrays, sorted, and deduplicated so incidental
+/// ordering, duplicate predicates, and equivalent typed literals produce the
+/// exact same digest.
+pub fn canonical_filter(
+    filter: &[FilterPredicate],
+    types: &BTreeMap<String, String>,
+) -> Result<String, CoreError> {
+    if filter.len() > MAX_FILTER_PREDICATES {
+        return Err(CoreError::with_detail(
+            ErrorCode::Usage,
+            format!("a root filter may contain at most {MAX_FILTER_PREDICATES} predicates"),
+            "limit_exceeded",
+        ));
+    }
+    let mut encoded = Vec::with_capacity(filter.len());
+    for predicate in filter {
+        let type_name = types.get(&predicate.column).ok_or_else(|| {
+            invalid_identifier(format!("filter column {} does not exist", predicate.column))
+        })?;
+        encoded.push(canonical_predicate(predicate, type_name)?);
+    }
+    encoded.sort();
+    encoded.dedup();
+    Ok(serde_json::to_string(&encoded).unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +298,15 @@ impl FilterOp {
             FilterOp::In => "in",
             FilterOp::Gte => "gte",
             FilterOp::Lte => "lte",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            FilterOp::Eq => 1,
+            FilterOp::In => 2,
+            FilterOp::Gte => 3,
+            FilterOp::Lte => 4,
         }
     }
 }
@@ -523,6 +588,7 @@ mod tests {
 
     #[test]
     fn the_filter_canonical_form_is_unambiguous() {
+        let types = BTreeMap::from([("id".to_string(), "text".to_string())]);
         let filter = FilterPredicate {
             column: "id".into(),
             op: FilterOp::Eq,
@@ -546,8 +612,8 @@ mod tests {
             value: FilterValue::List(vec![FilterValue::Text("a,t:b".into())]),
         };
         assert_ne!(
-            canonical_filter(std::slice::from_ref(&list)),
-            canonical_filter(std::slice::from_ref(&smuggled))
+            canonical_filter(std::slice::from_ref(&list), &types).unwrap(),
+            canonical_filter(std::slice::from_ref(&smuggled), &types).unwrap()
         );
 
         let first = FilterPredicate {
@@ -566,8 +632,119 @@ mod tests {
             value: FilterValue::Text("a|{}".into()),
         };
         assert_ne!(
-            canonical_filter(&[first, second]),
-            canonical_filter(std::slice::from_ref(&single))
+            canonical_filter(&[first, second], &types).unwrap(),
+            canonical_filter(std::slice::from_ref(&single), &types).unwrap()
         );
+    }
+
+    #[test]
+    fn canonical_filter_is_order_independent_and_collapses_duplicates() {
+        let types = BTreeMap::from([
+            ("amount".to_string(), "numeric".to_string()),
+            (
+                "created_at".to_string(),
+                "timestamp with time zone".to_string(),
+            ),
+        ]);
+        let p1 = FilterPredicate {
+            column: "amount".into(),
+            op: FilterOp::Gte,
+            value: FilterValue::Text("1.10".into()),
+        };
+        let p1_dup = FilterPredicate {
+            column: "amount".into(),
+            op: FilterOp::Gte,
+            value: FilterValue::Text("1.1".into()),
+        };
+        let p2 = FilterPredicate {
+            column: "created_at".into(),
+            op: FilterOp::Lte,
+            value: FilterValue::Text("2026-01-01T07:00:00+07:00".into()),
+        };
+        let p2_utc = FilterPredicate {
+            column: "created_at".into(),
+            op: FilterOp::Lte,
+            value: FilterValue::Text("2026-01-01T00:00:00Z".into()),
+        };
+
+        let a = canonical_filter(&[p1.clone(), p2.clone(), p1_dup], &types).unwrap();
+        let b = canonical_filter(&[p2_utc, p1], &types).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn gt_and_lt_operators_are_rejected_by_serde() {
+        for op in ["gt", "lt"] {
+            let yaml = format!(
+                r#"
+version: 1
+source: src
+destination: dst
+selection:
+  roots:
+    - table: public.orders
+      filter:
+        - column: id
+          op: {op}
+          value: 1
+masking:
+  policy: builtin-default
+"#
+            );
+            assert!(
+                SafeSyncSpec::parse_yaml(&yaml).is_err(),
+                "op={op} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn root_filter_cap_of_eight_predicates_is_enforced() {
+        let mut yaml = String::from(
+            r#"
+version: 1
+source: src
+destination: dst
+selection:
+  roots:
+    - table: public.orders
+      filter:
+"#,
+        );
+        for i in 0..8 {
+            yaml.push_str(&format!(
+                "        - column: c{i}\n          op: gte\n          value: {i}\n"
+            ));
+        }
+        yaml.push_str("masking:\n  policy: builtin-default\n");
+        assert!(SafeSyncSpec::parse_yaml(&yaml).is_ok());
+
+        yaml = yaml.replace(
+            "masking:",
+            "        - column: c8\n          op: lte\n          value: 99\nmasking:",
+        );
+        let err = SafeSyncSpec::parse_yaml(&yaml).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
+    }
+
+    #[test]
+    fn canonical_filter_refuses_nine_predicates_even_with_duplicates() {
+        let mut types = BTreeMap::new();
+        let mut filter = Vec::new();
+        for idx in 0..8 {
+            let col = format!("c{idx}");
+            types.insert(col.clone(), "integer".to_string());
+            filter.push(FilterPredicate {
+                column: col,
+                op: FilterOp::Gte,
+                value: FilterValue::Int(idx),
+            });
+        }
+        // Add a duplicate predicate as the 9th entry; cap must still reject before dedup.
+        filter.push(filter[0].clone());
+        let err = canonical_filter(&filter, &types).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert_eq!(err.detail.as_deref(), Some("limit_exceeded"));
     }
 }
