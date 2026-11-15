@@ -55,7 +55,29 @@
 5. **CLI & Desktop (`dbpinball-cli`, `src-tauri`, `src/pages/safesync.tsx`)**:
    - `dbpinball safe-sync` and the Desktop Safe Sync view (`safe_sync_inspect`, `safe_sync_plan`, `safe_sync_validate`, `safe_sync_execute`, `safe_sync_status`) share the exact same `dbpinball_core::safesync::service` pipeline and require explicit destination acknowledgement before mutation.
 
+## Supported Column Types And Masking Dispositions
+
+Every selected column needs an explicit rule. There is no permissive default, and
+a type never grants a keep by itself.
+
+| Disposition | Allowed column types | Notes |
+|---|---|---|
+| `keep` | text, `char`/`varchar`, `uuid` | Kept only when the rule names the column. |
+| `keep` | integer types, only when `is_identity` or `is_identity_reference` | An ordinary integer (`tenant_id`, salary, birth year) is refused with `integer_keep_requires_identity`. |
+| `keep` | `decimal`/`numeric` | Preserved through the literal text form and bound back with an explicit cast, so no floating-point round trip can change the value. |
+| `keep` | `date`, `datetime`, `timestamp` (and `timestamp with/without time zone`) | Preserved through the literal text form with an explicit cast, so microseconds and the UTC session timezone are never reinterpreted. |
+| `null` | any nullable column | A non-nullable column is refused. |
+| `deterministic_email`, `deterministic_pseudonym`, `deterministic_key`, `redact` | text types only | Integer, numeric, and temporal columns are refused. |
+| refused | `double`, `real`, `float`, `blob`/`binary`/spatial/`json` | A type whose literal form cannot round-trip exactly is never offered as keepable. |
+
+`keep` on exact numeric and temporal columns is a reviewer decision, exactly like
+`keep` on text: the policy author names the column, and a sensitive-looking column
+name (`password`, `secret`, `token`, `ssn`, `national_id`, `credit_card`) is refused
+even when a keep rule exists.
+
 ## Known Scope & Limitations
 
 - MariaDB 10.11+ InnoDB `BASE TABLE` targets are supported; MyISAM/MEMORY/ARCHIVE tables and partitioned or cross-schema views are refused.
 - MySQL (non-MariaDB) servers are not enabled for Safe Sync in this phase.
+- `deterministic_phone`, `date_shift`, `amount_jitter`, and `fixed` are declared in the policy schema but not implemented; a policy that selects them is refused with `unsupported_strategy` rather than silently falling back.
+- Floating-point columns cannot be preserved exactly, so they are refused instead of being copied with a lossy cast.

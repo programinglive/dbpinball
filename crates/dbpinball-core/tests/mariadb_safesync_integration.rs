@@ -134,9 +134,9 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
             id BIGINT NOT NULL AUTO_INCREMENT,
             tenant_id VARCHAR(32) NOT NULL,
             customer_id BIGINT NOT NULL,
-            amount DECIMAL(12,2) NULL,
-            ordered_on DATE NULL,
-            created_at DATETIME(6) NULL,
+            amount DECIMAL(12,2) NOT NULL,
+            ordered_on DATE NOT NULL,
+            created_at DATETIME(6) NOT NULL,
             PRIMARY KEY (id),
             CONSTRAINT fk_orders_customer
                 FOREIGN KEY (tenant_id, customer_id)
@@ -158,7 +158,7 @@ async fn reset_pair_schema(src_admin: &MySqlPool, dst: &MySqlPool) {
             ('t1', 20, 'bob@secret.test', 'vip');
          INSERT INTO mdb_orders (id, tenant_id, customer_id, amount, ordered_on, created_at) VALUES
             (100, 't1', 10, 125.50, '2026-01-10', '2026-01-10 08:30:00.123456'),
-            (101, 't1', 20, 999.95, '2026-02-15', '2026-02-15 14:00:00.000000');",
+            (101, 't1', 20, 999.95, '2026-02-15', '2026-02-15 14:00:00.654321');",
     )
     .execute(src_admin)
     .await
@@ -202,15 +202,15 @@ rules:
   - schema: {db}
     table: mdb_orders
     column: amount
-    strategy: null
+    strategy: keep
   - schema: {db}
     table: mdb_orders
     column: ordered_on
-    strategy: null
+    strategy: keep
   - schema: {db}
     table: mdb_orders
     column: created_at
-    strategy: null
+    strategy: keep
 "#
     );
     std::fs::write(&policy_path, yaml).expect("write masking policy");
@@ -390,7 +390,8 @@ async fn t01_full_inspect_plan_validate_execute_retry_and_auto_increment() {
     assert_eq!(report.rows_written, 2); // 1 customer (id=20) + 1 order (id=101)
     assert_eq!(report.sequence_status, "completed");
 
-    // Verify destination data: masked email, nulled amount, AUTO_INCREMENT
+    // Verify destination data: masked email, exact decimal and temporal
+    // preservation, and AUTO_INCREMENT reconciliation.
     let email: String =
         sqlx::query_scalar("SELECT email FROM mdb_customers WHERE customer_id = 20")
             .fetch_one(&dst.pool)
@@ -399,13 +400,32 @@ async fn t01_full_inspect_plan_validate_execute_retry_and_auto_increment() {
     assert_ne!(email, "bob@secret.test");
     assert!(email.ends_with("@example.invalid"));
 
-    let amount: Option<String> = sqlx::query_scalar(
+    let amount: String = sqlx::query_scalar(
         "SELECT CAST(amount AS CHAR CHARACTER SET utf8mb4) FROM mdb_orders WHERE id = 101",
     )
     .fetch_one(&dst.pool)
     .await
     .unwrap();
-    assert_eq!(amount, None);
+    assert_eq!(amount, "999.95", "an exact decimal must survive unchanged");
+
+    let ordered_on: String = sqlx::query_scalar(
+        "SELECT CAST(ordered_on AS CHAR CHARACTER SET utf8mb4) FROM mdb_orders WHERE id = 101",
+    )
+    .fetch_one(&dst.pool)
+    .await
+    .unwrap();
+    assert_eq!(ordered_on, "2026-02-15", "a DATE must survive unchanged");
+
+    let created_at: String = sqlx::query_scalar(
+        "SELECT CAST(created_at AS CHAR CHARACTER SET utf8mb4) FROM mdb_orders WHERE id = 101",
+    )
+    .fetch_one(&dst.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        created_at, "2026-02-15 14:00:00.654321",
+        "a DATETIME(6) must keep its microseconds"
+    );
 
     // Verify AUTO_INCREMENT was reconciled past 101 so a new insert does not collide
     sqlx::query(
@@ -802,7 +822,7 @@ async fn t04_adversarial_replace_rollback_and_get_lock_concurrency() {
 
     // Seed pre-existing row in destination
     sqlx::raw_sql(
-        "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) VALUES (1, 99, 'old@dst.test', NULL);",
+        "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) VALUES ('t1', 99, 'old@dst.test', NULL);",
     )
     .execute(&dst.pool)
     .await
