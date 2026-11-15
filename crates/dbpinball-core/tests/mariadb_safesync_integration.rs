@@ -1032,21 +1032,34 @@ async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy()
     .await
     .expect("plan");
 
-    // 1. A destination primary-key collision must roll the whole import back.
-    sqlx::raw_sql(
-        "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) \
-         VALUES ('t1', 20, 'collision@dst.test', NULL);",
+    // 1. A failure after the first table is written must roll the whole import
+    // back. A CHECK constraint is invisible to the schema hash, so it fails the
+    // second table's insert at run time, exactly like a real constraint error.
+    let plan_replace = service::plan(
+        &spec,
+        &src_ro.profile,
+        &dst.profile,
+        &creds,
+        &enrollments,
+        &keys,
+        now,
+        true,
+        true,
     )
-    .execute(&dst.pool)
     .await
-    .unwrap();
+    .expect("replace plan");
+
+    sqlx::raw_sql("ALTER TABLE mdb_orders ADD CONSTRAINT ck_amount CHECK (amount < 500)")
+        .execute(&dst.pool)
+        .await
+        .unwrap();
 
     let err = service::execute(
         ExecuteRequest {
-            plan: &plan,
+            plan: &plan_replace,
             spec: &spec,
-            acknowledgement: &plan.plan_fingerprint,
-            replace: false,
+            acknowledgement: &plan_replace.plan_fingerprint,
+            replace: true,
             source: &src_ro.profile,
             destination: &dst.profile,
         },
@@ -1061,19 +1074,26 @@ async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy()
     .unwrap_err();
     assert_eq!(err.detail.as_deref(), Some("destination_import_failed"));
 
-    // Nothing from the failed run may survive: no order rows, and the
-    // pre-existing customer is untouched.
+    // Nothing from the failed run may survive, including the parent rows that
+    // were inserted before the failing child table.
+    let customers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mdb_customers")
+        .fetch_one(&dst.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        customers, 0,
+        "a failed import must not leave partial parent rows"
+    );
     let orders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mdb_orders")
         .fetch_one(&dst.pool)
         .await
         .unwrap();
     assert_eq!(orders, 0, "a failed import must not leave partial rows");
-    let email: String =
-        sqlx::query_scalar("SELECT email FROM mdb_customers WHERE customer_id = 20")
-            .fetch_one(&dst.pool)
-            .await
-            .unwrap();
-    assert_eq!(email, "collision@dst.test");
+
+    sqlx::raw_sql("ALTER TABLE mdb_orders DROP CONSTRAINT ck_amount")
+        .execute(&dst.pool)
+        .await
+        .unwrap();
 
     // 2. A plan bound to another destination identity is refused.
     let mut foreign = plan.clone();
@@ -1104,10 +1124,6 @@ async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy()
     assert_eq!(err.detail.as_deref(), Some("destination_changed"));
 
     // 3. A non-empty destination is refused for a fresh plan.
-    sqlx::raw_sql("DELETE FROM mdb_customers WHERE customer_id = 20;")
-        .execute(&dst.pool)
-        .await
-        .unwrap();
     sqlx::raw_sql(
         "INSERT INTO mdb_customers (tenant_id, customer_id, email, note) \
          VALUES ('t1', 77, 'existing@dst.test', NULL);",
