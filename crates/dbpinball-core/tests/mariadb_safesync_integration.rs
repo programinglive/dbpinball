@@ -1102,6 +1102,7 @@ async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy()
         let policy = dbpinball_core::safesync::resolve_policy(&spec.masking.policy).unwrap();
         dbpinball_core::safesync::Masker::new(policy, keys.load().unwrap()).unwrap()
     };
+    foreign.plan_fingerprint = foreign.fingerprint();
     foreign.seal(&masker);
     let err = service::execute(
         ExecuteRequest {
