@@ -272,10 +272,6 @@ pub async fn inspect_mariadb_foreign_keys_conn(
                 kcu.REFERENCED_TABLE_NAME, \
                 kcu.REFERENCED_COLUMN_NAME \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
-         INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
-           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
-          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
-          AND rc.TABLE_NAME = kcu.TABLE_NAME \
          WHERE kcu.TABLE_SCHEMA = ? \
            AND kcu.TABLE_NAME = ? \
            AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
