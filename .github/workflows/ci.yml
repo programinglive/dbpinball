@@ -501,7 +501,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mariadb-client
-          mariadb -h 127.0.0.1 -P 33306 -u root -pmdb_root -e "CREATE USER 'mdb_nopriv'@'%' IDENTIFIED BY 'mdb_nopriv'; GRANT USAGE ON *.* TO 'mdb_nopriv'@'%';"
+          mariadb --skip-ssl -h 127.0.0.1 -P 33306 -u root -pmdb_root -e "CREATE USER 'mdb_nopriv'@'%' IDENTIFIED BY 'mdb_nopriv'; GRANT USAGE ON *.* TO 'mdb_nopriv'@'%';"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
