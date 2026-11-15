@@ -1178,4 +1178,30 @@ async fn t05_adversarial_rollback_identity_conflict_and_unimplemented_strategy()
     .await
     .unwrap_err();
     assert_eq!(err.detail.as_deref(), Some("unsupported_strategy"));
+
+    // 5. A destination whose DECIMAL is narrower than the source is refused as
+    // schema drift instead of clamping the value.
+    sqlx::raw_sql("ALTER TABLE mdb_orders MODIFY amount DECIMAL(10,2) NOT NULL")
+        .execute(&dst.pool)
+        .await
+        .unwrap();
+    let err = service::execute(
+        ExecuteRequest {
+            plan: &plan,
+            spec: &spec,
+            acknowledgement: &plan.plan_fingerprint,
+            replace: false,
+            source: &src_ro.profile,
+            destination: &dst.profile,
+        },
+        &creds,
+        &enrollments,
+        &keys,
+        None,
+        now,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.detail.as_deref(), Some("schema_drift"));
 }

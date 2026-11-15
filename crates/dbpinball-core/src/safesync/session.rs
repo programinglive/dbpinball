@@ -623,6 +623,14 @@ async fn apply_mariadb_destination_guards(
         .execute(&mut *connection)
         .await
         .map_err(connection_error)?;
+    // A destination that is narrower than the source must fail loudly instead
+    // of clamping or rounding a value that the plan proved exact.
+    sqlx::query(
+        "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@sql_mode, ''), 'STRICT_ALL_TABLES')",
+    )
+    .execute(&mut *connection)
+    .await
+    .map_err(connection_error)?;
     sqlx::query("SET SESSION time_zone = '+00:00'")
         .execute(&mut *connection)
         .await
@@ -849,15 +857,57 @@ fn mariadb_grant_allows_write(grant: &str, database_name: &str, tables: &[Qualif
 }
 
 /// Split `'user'@'host' [options]` into the account and the trailing clauses.
-fn split_mariadb_grant_account(account_and_options: &str) -> (&str, &str) {
-    let upper = account_and_options.to_ascii_uppercase();
-    let mut cut = account_and_options.len();
-    for keyword in [" REQUIRE ", " WITH ", " IDENTIFIED ", " AS "] {
-        if let Some(index) = upper.find(keyword) {
-            cut = cut.min(index);
+///
+/// The account is consumed as a token, so a quoted user name that contains
+/// ` AS ` or ` WITH ` cannot be mistaken for an option clause.
+fn split_mariadb_grant_account(input: &str) -> (&str, &str) {
+    let mut index = 0usize;
+    loop {
+        let rest = &input[index..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '\'' || ch == '`' || ch == '"' {
+            index = skip_quoted(input, index, ch);
+        } else if ch == '@' {
+            index += 1;
+            continue;
+        } else if ch.is_whitespace() {
+            break;
+        } else {
+            index = rest
+                .find(char::is_whitespace)
+                .map(|offset| index + offset)
+                .unwrap_or(input.len());
+        }
+        if input[index..].starts_with('@') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    (&input[..index], &input[index..])
+}
+
+/// The byte index just past the closing quote of the token that starts at
+/// `start`, honouring backslash escapes.
+fn skip_quoted(input: &str, start: usize, quote: char) -> usize {
+    let index = start + quote.len_utf8();
+    let mut escaped = false;
+    for (offset, ch) in input[index..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return index + offset + ch.len_utf8();
         }
     }
-    (&account_and_options[..cut], &account_and_options[cut..])
+    input.len()
 }
 
 /// True when every trailing clause is a known clause that cannot grant a
@@ -1050,6 +1100,13 @@ mod tests {
         ));
         assert!(!write(
             "GRANT SELECT, SHOW VIEW ON `mdb_src`.* TO `mdb_ro`@`%`"
+        ));
+        // A quoted account that contains an option keyword is still an account.
+        assert!(!write(
+            "GRANT SELECT ON `mdb_src`.* TO 'report AS reader'@'%'"
+        ));
+        assert!(!write(
+            "GRANT SELECT ON `mdb_src`.* TO 'with space'@'%' REQUIRE SSL"
         ));
     }
 }

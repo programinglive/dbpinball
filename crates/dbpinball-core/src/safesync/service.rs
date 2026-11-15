@@ -58,8 +58,9 @@ pub fn resolve_policy(name: &str) -> Result<MaskingPolicy, CoreError> {
         "development-default@1" | "development-default" => Ok(MaskingPolicy::builtin_default()),
         "development-default@2" => Ok(MaskingPolicy::builtin_v2()),
         other if other.ends_with(".yaml") || other.ends_with(".yml") => {
-            let path = resolve_policy_path(other)?;
-            let text = std::fs::read_to_string(&path).map_err(|_| {
+            let mut file = open_policy_file(other)?;
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text).map_err(|_| {
                 CoreError::with_detail(
                     ErrorCode::Usage,
                     "the masking policy file could not be read",
@@ -136,12 +137,19 @@ fn resolve_policy_path(name: &str) -> Result<PathBuf, CoreError> {
         return Err(policy_path_refused());
     }
 
-    let metadata = std::fs::metadata(&canonical).map_err(|_| policy_path_refused())?;
+    Ok(canonical)
+}
+
+/// Open an authorized policy file and prove it is a regular file through the
+/// open handle, so the check and the read cannot disagree about the target.
+fn open_policy_file(name: &str) -> Result<std::fs::File, CoreError> {
+    let canonical = resolve_policy_path(name)?;
+    let file = std::fs::File::open(&canonical).map_err(|_| policy_path_refused())?;
+    let metadata = file.metadata().map_err(|_| policy_path_refused())?;
     if !metadata.is_file() {
         return Err(policy_path_refused());
     }
-
-    Ok(canonical)
+    Ok(file)
 }
 
 /// Build a masker from the spec and the key store.
@@ -881,8 +889,16 @@ mod tests {
 
     const POLICY_YAML: &str = "name: test\nversion: 1\nrules:\n  - schema: app\n    table: t\n    column: c\n    strategy: keep\n";
 
+    /// The policy root is process-global, so the tests that set it must not run
+    /// concurrently with each other.
+    fn policy_root_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn a_policy_inside_the_authorized_root_loads() {
+        let _guard = policy_root_lock().lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("policy.yaml");
         std::fs::write(&path, POLICY_YAML).unwrap();
@@ -894,6 +910,7 @@ mod tests {
 
     #[test]
     fn a_policy_outside_the_authorized_root_is_refused() {
+        let _guard = policy_root_lock().lock().unwrap();
         let authorized = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let path = elsewhere.path().join("policy.yaml");
@@ -910,6 +927,7 @@ mod tests {
 
     #[test]
     fn a_policy_path_with_parent_traversal_is_refused() {
+        let _guard = policy_root_lock().lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::env::set_var("DBPINBALL_POLICY_DIR", root.path());
         let error = resolve_policy("../policy.yaml").unwrap_err();
@@ -919,6 +937,7 @@ mod tests {
 
     #[test]
     fn a_policy_directory_is_not_a_policy_file() {
+        let _guard = policy_root_lock().lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("policies.yaml");
         std::fs::create_dir(&directory).unwrap();

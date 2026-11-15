@@ -573,6 +573,15 @@ fn compute_mariadb_schema_hash(
         if let Some(len) = col.max_len {
             hasher.update(format!(":len={len}").as_bytes());
         }
+        // A destination with a narrower DECIMAL would clamp or round a value
+        // that fits the source, so the declared precision and scale are part of
+        // the shape. Without them the drift preflight cannot see the difference.
+        if let Some(precision) = col.numeric_precision {
+            hasher.update(format!(":p={precision}").as_bytes());
+        }
+        if let Some(scale) = col.numeric_scale {
+            hasher.update(format!(":s={scale}").as_bytes());
+        }
     }
 
     format!("sha256:{}", hex_lower(&hasher.finalize()))
