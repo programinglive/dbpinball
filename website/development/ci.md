@@ -14,6 +14,25 @@ on pushes to `main`.
 | Dependency audit | `npm audit`, `cargo audit` |
 | Secret scan | gitleaks |
 
+## Packaging
+
+`.github/workflows/package.yml` builds the installable artifacts. It runs on
+`workflow_dispatch` and on pushes to `main` that touch the code or the packaging
+scripts.
+
+| Job | What it produces |
+| --- | --- |
+| Windows x64 | `dbpinball_<version>_x64-setup.exe`, `dbpinball-cli-<version>-x64.zip`, `SHA256SUMS.txt`, `provenance.json` |
+| Linux x64 | `dbpinball-cli-<version>-x64-linux.tar.gz`, `.deb`, `.AppImage`, `SHA256SUMS.txt` |
+
+The Windows job also installs the CLI archive into a throwaway `LOCALAPPDATA`,
+runs the installed binary, and re-verifies every checksum, so a broken archive
+fails the build instead of reaching a user.
+
+The workflow uploads the files as a workflow artifact. It never creates a tag
+and never publishes a release; publishing is a separate, explicitly authorized
+action.
+
 ## Permissions
 
 Every job only reads the repository (`permissions: contents: read`). No job

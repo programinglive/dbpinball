@@ -4,9 +4,9 @@
 
 | Platform | Desktop | CLI | Verified by |
 | --- | --- | --- | --- |
-| Windows | Supported | Supported | Local development and tests |
-| Linux | Supported | Supported | CI (`ubuntu-latest`) |
-| macOS | Supported by the code | Supported by the code | **Not exercised in CI** |
+| Windows | Supported | Supported | Installer and CLI archive built and installed on Windows 10/11 x64; `dbpinball --version`, `doctor` and `--help` verified from a fresh environment |
+| Linux | Supported | Supported | CI (`ubuntu-latest`) builds the CLI archive and the `.deb`/AppImage packages |
+| macOS | Supported by the code | Supported by the code | **Not exercised in CI, not packaged** |
 
 The lock uses `ps -p` on Unix and `tasklist` on Windows. The keyring uses the
 platform backend through the `keyring` crate.

@@ -129,7 +129,30 @@ A **Laravel adapter** ships in this repository at [`packages/laravel-adapter`](d
 
 No other framework-specific adapter ships here. There is no Rails, Django, or Prisma integration, and none is claimed.
 
-## Desktop quick start
+## Install
+
+DBPinball ships as a desktop application with an optional command-line
+interface. Installing it does not require Rust, Cargo, Node.js or a source
+checkout.
+
+| Platform | Desktop | CLI |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `dbpinball_<version>_x64-setup.exe` | `dbpinball-cli-<version>-x64.zip` |
+| Linux (x64) | `.deb` or `.AppImage` | `dbpinball-cli-<version>-x64-linux.tar.gz` |
+| macOS | Build from source | Build from source |
+
+Artifacts are produced by the `Package` workflow and attached to a release once
+one is authorized. Until then, download them from the workflow run.
+
+**Windows CLI:** extract the archive and run
+`powershell -ExecutionPolicy Bypass -File .\install-cli.ps1`. It installs to
+`%LOCALAPPDATA%\dbpinball\bin` and adds that folder to your user `PATH`, so a
+new terminal resolves `dbpinball` with no manual editing. `-Uninstall` reverses
+it and leaves other `PATH` entries untouched.
+
+Full instructions: <https://dbpinball.programinglive.com/guide/installation>.
+
+## Desktop quick start (from source)
 
 ### Prerequisites
 
@@ -153,7 +176,9 @@ npm run tauri dev
 npm run tauri build
 ```
 
-Installers are written to `src-tauri/target/release/bundle/`.
+Installers are written to `src-tauri/target/release/bundle/`. To produce the
+same artifacts CI publishes, including the CLI archive, checksums and
+provenance, run `scripts/package-windows.ps1` on Windows.
 
 ### First connection
 

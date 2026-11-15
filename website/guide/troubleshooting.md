@@ -1,5 +1,57 @@
 # Troubleshooting
 
+## Installation
+
+### `'dbpinball' is not recognized as an internal or external command`
+
+**Symptom:** the CLI was built or installed, but a terminal cannot find it.
+
+**Cause:** the CLI is not installed, or the terminal was opened before the
+installer changed `PATH`. A running terminal keeps the environment it started
+with.
+
+**Fix:** run the CLI installer, then open a **new** terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-cli.ps1
+```
+
+Confirm the entry exists and that the command resolves:
+
+```powershell
+(Get-ItemProperty HKCU:\Environment -Name Path).Path
+where dbpinball
+```
+
+If `where dbpinball` finds an older copy first, remove that copy or reorder
+`PATH`. Building with `cargo build` does not install anything; the binary stays
+in `target\release`.
+
+### Windows SmartScreen blocks the installer
+
+**Cause:** the installer is not code-signed yet.
+
+**Fix:** verify the SHA-256 against the published `SHA256SUMS.txt`, then choose
+**More info → Run anyway**. Do not bypass the warning for a file whose checksum
+does not match.
+
+### Antivirus quarantines `dbpinball.exe`
+
+**Cause:** heuristic scanners sometimes flag unsigned, freshly built binaries.
+The release binary embeds a Windows version resource and an `asInvoker`
+manifest, which removes the most common false positive.
+
+**Fix:** verify the checksum, restore the file from quarantine, and report the
+detection with the exact version from `dbpinball --version`. Code signing is the
+permanent fix and is not in place yet.
+
+### The desktop window is blank
+
+**Cause:** the frontend bundle did not load, usually after a partial install.
+
+**Fix:** reinstall the same version. If it persists, run `dbpinball --version`
+and include that version in the report.
+
 ## The CLI cannot find a connection
 
 **Symptom:** `connections test <id>` exits 7.

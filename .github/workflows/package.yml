@@ -1,0 +1,170 @@
+name: Package
+
+# Builds installable artifacts and uploads them as workflow artifacts.
+#
+# This workflow never publishes a release and never creates a tag. Publishing is
+# a separate, explicitly authorized action; until then the artifacts are
+# downloadable from the workflow run only.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "src-tauri/**"
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/package.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64 (installer + CLI)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build artifacts
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Verify the packaged CLI runs
+        shell: pwsh
+        run: |
+          $exe = "target/cli-dist/release/dbpinball.exe"
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "dbpinball --version failed" }
+          & $exe doctor --json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "dbpinball doctor failed" }
+
+      - name: Verify the CLI archive installs and resolves
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $zip = "artifacts/release/v$version/dbpinball-cli-$version-x64.zip"
+          $extract = "artifacts/verify/cli"
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          # Install into a throwaway LOCALAPPDATA so the runner's real PATH is untouched.
+          $env:LOCALAPPDATA = Join-Path $PWD "artifacts/verify/localappdata"
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+          & "$extract/install-cli.ps1" -Quiet
+          if ($LASTEXITCODE -ne 0) { throw "install-cli.ps1 failed" }
+          $installed = Join-Path $env:LOCALAPPDATA "dbpinball/bin/dbpinball.exe"
+          if (-not (Test-Path $installed)) { throw "the CLI was not installed" }
+          & $installed --version
+          if ($LASTEXITCODE -ne 0) { throw "the installed CLI did not run" }
+
+      - name: Verify checksums
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $dir = "artifacts/release/v$version"
+          Get-Content "$dir/SHA256SUMS.txt" | ForEach-Object {
+            if ($_ -match '^([0-9a-f]{64})\s+(.+)$') {
+              $expected = $Matches[1]
+              $file = Join-Path $dir $Matches[2]
+              $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $expected) { throw "checksum mismatch for $file" }
+            }
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbpinball-windows-x64
+          path: artifacts/release/**
+          if-no-files-found: error
+
+  linux:
+    name: Linux x64 (CLI + Desktop packages)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies for Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the CLI
+        run: |
+          set -euo pipefail
+          # The Desktop app and the CLI both produce `dbpinball`; a shared
+          # target directory lets one overwrite the other.
+          CARGO_TARGET_DIR=target/cli-dist cargo build -p dbpinball-cli --release --locked
+
+      - name: Verify the CLI runs
+        run: |
+          set -euo pipefail
+          ./target/cli-dist/release/dbpinball --version
+          ./target/cli-dist/release/dbpinball doctor --json > /dev/null
+
+      - name: Build the Desktop packages
+        run: npm run tauri build -- --bundles deb,appimage
+
+      - name: Assemble artifacts
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          out="artifacts/release/v$version"
+          mkdir -p "$out"
+          tar -C target/cli-dist/release -czf "$out/dbpinball-cli-$version-x64-linux.tar.gz" dbpinball
+          cp src-tauri/target/release/bundle/deb/*.deb "$out/" 2>/dev/null || true
+          cp src-tauri/target/release/bundle/appimage/*.AppImage "$out/" 2>/dev/null || true
+          cd "$out"
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbpinball-linux-x64
+          path: artifacts/release/**
+          if-no-files-found: error
