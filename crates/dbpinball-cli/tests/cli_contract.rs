@@ -74,9 +74,12 @@ fn version_exits_zero() {
     let (code, stdout, _) = run(&temp, &["--version"], None);
 
     assert_eq!(code, 0);
+    // Read the crate version instead of a literal, so a release bump cannot
+    // leave a stale expectation behind.
+    let expected = env!("CARGO_PKG_VERSION");
     assert!(
-        stdout.contains("0.1.6"),
-        "unexpected version output: {stdout}"
+        stdout.contains(expected),
+        "unexpected version output: {stdout} (expected {expected})"
     );
 }
 
@@ -100,7 +103,7 @@ fn doctor_emits_a_json_envelope() {
 
     let envelope = parse_envelope(&stdout);
     assert_eq!(envelope["ok"], true);
-    assert_eq!(envelope["data"]["version"], "0.1.6");
+    assert_eq!(envelope["data"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(envelope["data"]["checks"].as_array().unwrap().len() >= 4);
 }
 
