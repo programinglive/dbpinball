@@ -217,7 +217,7 @@ export default function SafeSyncPage() {
   };
 
   return (
-    <div className="space-y-6 p-4">
+    <div className="mx-auto max-w-4xl space-y-5 p-6">
       <div>
         <h2 className="text-2xl font-bold flex items-center gap-2">
           <ShieldCheck className="h-6 w-6" />
