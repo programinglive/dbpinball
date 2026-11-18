@@ -26,7 +26,10 @@ impl Drop for SshTunnelGuard {
 /// Expand a leading `~/` or `~\` in a private key path to the user's home directory.
 fn expand_home_path(raw: &str) -> String {
     let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
         if let Some(home) = dirs::home_dir() {
             let joined: PathBuf = home.join(rest);
             return joined.to_string_lossy().into_owned();
@@ -103,7 +106,9 @@ pub fn build_ssh_args(
     }
 
     args.push("-L".to_string());
-    args.push(format!("127.0.0.1:{local_port}:{target_host}:{target_port}"));
+    args.push(format!(
+        "127.0.0.1:{local_port}:{target_host}:{target_port}"
+    ));
     args.push(format!("{}@{}", tunnel.username.trim(), tunnel.host.trim()));
 
     Ok(args)
@@ -237,7 +242,10 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w == ["-L", "127.0.0.1:45678:127.0.0.1:3306"]));
-        assert_eq!(args.last().map(String::as_str), Some("dbtunnel@34.101.87.166"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("dbtunnel@34.101.87.166")
+        );
     }
 
     #[test]

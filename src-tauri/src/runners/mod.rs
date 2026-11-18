@@ -135,12 +135,14 @@ pub async fn start_copy(
         .await
         .map_err(|message| anyhow::anyhow!(message))?;
 
-    let (tunneled_src, _src_tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&src)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-    let (tunneled_dst, _dst_tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&dst)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let (tunneled_src, _src_tunnel) =
+        dbpinball_core::services::ssh_tunnel::prepare_connection(&src)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+    let (tunneled_dst, _dst_tunnel) =
+        dbpinball_core::services::ssh_tunnel::prepare_connection(&dst)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
     let run_src = tunneled_src.into_owned();
     let run_dst = tunneled_dst.into_owned();
 
