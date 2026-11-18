@@ -1,15 +1,17 @@
 use crate::domain::connection::{DbConnection, DbEngine};
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::ports::credentials::CredentialProvider;
+use crate::services::ssh_tunnel::prepare_connection;
 
 /// Verify that a connection can be opened.
 pub async fn test_connection(
     connection: &DbConnection,
     credentials: &dyn CredentialProvider,
 ) -> Result<(), CoreError> {
-    match connection.engine {
-        DbEngine::Mysql => test_mysql(connection, credentials).await,
-        DbEngine::Postgres => test_postgres(connection, credentials).await,
+    let (effective, _tunnel) = prepare_connection(connection).await?;
+    match effective.engine {
+        DbEngine::Mysql => test_mysql(&effective, credentials).await,
+        DbEngine::Postgres => test_postgres(&effective, credentials).await,
     }
 }
 
@@ -18,9 +20,10 @@ pub async fn list_databases(
     connection: &DbConnection,
     credentials: &dyn CredentialProvider,
 ) -> Result<Vec<String>, CoreError> {
-    match connection.engine {
-        DbEngine::Mysql => list_databases_mysql(connection, credentials).await,
-        DbEngine::Postgres => list_databases_postgres(connection, credentials).await,
+    let (effective, _tunnel) = prepare_connection(connection).await?;
+    match effective.engine {
+        DbEngine::Mysql => list_databases_mysql(&effective, credentials).await,
+        DbEngine::Postgres => list_databases_postgres(&effective, credentials).await,
     }
 }
 
@@ -30,9 +33,10 @@ pub async fn list_tables(
     database: &str,
     credentials: &dyn CredentialProvider,
 ) -> Result<Vec<String>, CoreError> {
-    match connection.engine {
-        DbEngine::Mysql => list_tables_mysql(connection, database, credentials).await,
-        DbEngine::Postgres => list_tables_postgres(connection, database, credentials).await,
+    let (effective, _tunnel) = prepare_connection(connection).await?;
+    match effective.engine {
+        DbEngine::Mysql => list_tables_mysql(&effective, database, credentials).await,
+        DbEngine::Postgres => list_tables_postgres(&effective, database, credentials).await,
     }
 }
 
@@ -216,6 +220,7 @@ mod tests {
             username: "postgres".into(),
             use_ssl: false,
             target: crate::domain::connection::TargetClass::Unknown,
+            ssh_tunnel: None,
         }
     }
 

@@ -109,6 +109,7 @@ async fn connect_env(var: &str, id: &str, target: TargetClass) -> Option<ParsedC
             username,
             use_ssl: false,
             target,
+            ssh_tunnel: None,
         },
         password,
     })

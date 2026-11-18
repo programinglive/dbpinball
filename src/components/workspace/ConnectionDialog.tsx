@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import type { DbConnection } from "@/pages/connections.types";
+import type { DbConnection, SshTunnelConfig } from "@/pages/connections.types";
 
 interface ConnectionDialogProps {
   open: boolean;
@@ -32,6 +32,24 @@ export default function ConnectionDialog(props: ConnectionDialogProps) {
 
   const handleFieldChange = (patch: Partial<DbConnection>) => {
     onChangeField({ ...formData, ...patch });
+  };
+
+  const sshTunnel: SshTunnelConfig = formData.sshTunnel ?? {
+    enabled: false,
+    host: "",
+    port: 22,
+    username: "",
+    privateKeyPath: "",
+    strictHostKeyChecking: false,
+  };
+
+  const handleSshChange = (patch: Partial<SshTunnelConfig>) => {
+    handleFieldChange({
+      sshTunnel: {
+        ...sshTunnel,
+        ...patch,
+      },
+    });
   };
 
   return (
@@ -151,6 +169,78 @@ export default function ConnectionDialog(props: ConnectionDialogProps) {
                 />
               </div>
             </div>
+          </section>
+
+          <section className="connection-form__section">
+            <header className="connection-form__section-header">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="connection-form__section-title">SSH Tunnel</h3>
+                  <p className="connection-form__section-description">
+                    Forward a local port through an SSH bastion before connecting.
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    id="ssh-enabled"
+                    type="checkbox"
+                    checked={Boolean(sshTunnel.enabled)}
+                    onChange={(e) => handleSshChange({ enabled: e.target.checked })}
+                  />
+                  Use SSH tunnel
+                </label>
+              </div>
+            </header>
+
+            {sshTunnel.enabled && (
+              <>
+                <div className="connection-form__row">
+                  <div className="connection-field connection-field--grow">
+                    <Label htmlFor="ssh-host">SSH Host</Label>
+                    <Input
+                      id="ssh-host"
+                      placeholder="bastion.example.com"
+                      value={sshTunnel.host}
+                      className="connection-input"
+                      onChange={(e) => handleSshChange({ host: e.target.value })}
+                    />
+                  </div>
+                  <div className="connection-field connection-field--compact">
+                    <Label htmlFor="ssh-port">SSH Port</Label>
+                    <Input
+                      id="ssh-port"
+                      type="number"
+                      value={sshTunnel.port || ""}
+                      className="connection-input"
+                      onChange={(e) => handleSshChange({ port: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+
+                <div className="connection-form__row">
+                  <div className="connection-field connection-field--grow">
+                    <Label htmlFor="ssh-username">SSH Username</Label>
+                    <Input
+                      id="ssh-username"
+                      placeholder="dbtunnel"
+                      value={sshTunnel.username}
+                      className="connection-input"
+                      onChange={(e) => handleSshChange({ username: e.target.value })}
+                    />
+                  </div>
+                  <div className="connection-field connection-field--grow">
+                    <Label htmlFor="ssh-key-path">Private Key Path</Label>
+                    <Input
+                      id="ssh-key-path"
+                      placeholder="~/.ssh/tunnel_id_rsa"
+                      value={sshTunnel.privateKeyPath || ""}
+                      className="connection-input"
+                      onChange={(e) => handleSshChange({ privateKeyPath: e.target.value })}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
           </section>
         </div>
 

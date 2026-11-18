@@ -226,6 +226,7 @@ masking:
             username: "ro".into(),
             use_ssl: false,
             target: TargetClass::Production,
+            ssh_tunnel: None,
         };
         let _store = InMemoryMaskKeyStore::with_key(MaskKey::generate().unwrap());
         let _masker =

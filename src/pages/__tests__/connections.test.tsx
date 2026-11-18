@@ -379,4 +379,65 @@ describe("ConnectionsPage", () => {
     expect(await screen.findByText(/Migration did not complete/)).toBeInTheDocument();
     expect(localStorage.getItem("dbpinball_connections")).not.toBeNull();
   });
+
+  it("submits sshTunnel configuration when Use SSH tunnel is enabled", async () => {
+    const invokeMock = mockStore([]);
+    const ref = { current: null as { openNewConnection: (engine?: "mysql" | "postgres") => void } | null };
+
+    render(<ConnectionsPage ref={ref} />);
+    await screen.findByText("No connections yet.");
+
+    act(() => {
+      ref.current?.openNewConnection("mysql");
+    });
+
+    fireEvent.change(screen.getByLabelText("Connection Name"), {
+      target: { value: "Prod ERP" },
+    });
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "127.0.0.1" },
+    });
+    fireEvent.change(screen.getByLabelText("Database"), {
+      target: { value: "erp_db" },
+    });
+    fireEvent.change(screen.getByLabelText("Username"), {
+      target: { value: "dbteam" },
+    });
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "secret" },
+    });
+
+    fireEvent.click(screen.getByLabelText("Use SSH tunnel"));
+    fireEvent.change(screen.getByLabelText("SSH Host"), {
+      target: { value: "34.101.87.166" },
+    });
+    fireEvent.change(screen.getByLabelText("SSH Port"), {
+      target: { value: "2222" },
+    });
+    fireEvent.change(screen.getByLabelText("SSH Username"), {
+      target: { value: "dbtunnel" },
+    });
+    fireEvent.change(screen.getByLabelText("Private Key Path"), {
+      target: { value: "~/.ssh/tunnel_id_rsa" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save Connection" }));
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("connections_create", {
+      connection: expect.objectContaining({
+        name: "Prod ERP",
+        sshTunnel: {
+          enabled: true,
+          host: "34.101.87.166",
+          port: 2222,
+          username: "dbtunnel",
+          privateKeyPath: "~/.ssh/tunnel_id_rsa",
+          strictHostKeyChecking: false,
+        },
+      }),
+      password: "secret",
+    });
+  });
 });

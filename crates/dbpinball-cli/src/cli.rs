@@ -180,6 +180,30 @@ pub struct AddArgs {
 
     #[arg(long)]
     pub use_ssl: bool,
+
+    /// Connect through an SSH tunnel.
+    #[arg(long)]
+    pub ssh_tunnel: bool,
+
+    /// SSH bastion host (required when --ssh-tunnel is enabled).
+    #[arg(long)]
+    pub ssh_host: Option<String>,
+
+    /// SSH bastion port.
+    #[arg(long, default_value_t = 22)]
+    pub ssh_port: u16,
+
+    /// SSH bastion username (required when --ssh-tunnel is enabled).
+    #[arg(long)]
+    pub ssh_user: Option<String>,
+
+    /// Path to the SSH private key file.
+    #[arg(long)]
+    pub ssh_key: Option<String>,
+
+    /// Require strict SSH host key verification (reject unknown hosts).
+    #[arg(long)]
+    pub ssh_strict_host_key: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -466,6 +490,50 @@ mod tests {
             } => {
                 assert_eq!(id, "abc");
                 assert!(yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_connections_add_with_ssh_tunnel() {
+        let cli = Cli::try_parse_from([
+            "dbpinball",
+            "connections",
+            "add",
+            "--name",
+            "prod-erp",
+            "--engine",
+            "mysql",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "3306",
+            "--database",
+            "erp",
+            "--username",
+            "dbteam",
+            "--ssh-tunnel",
+            "--ssh-host",
+            "34.101.87.166",
+            "--ssh-port",
+            "2222",
+            "--ssh-user",
+            "dbtunnel",
+            "--ssh-key",
+            "~/.ssh/tunnel_id_rsa",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Connections {
+                command: ConnectionsCommand::Add(args),
+            } => {
+                assert!(args.ssh_tunnel);
+                assert_eq!(args.ssh_host.as_deref(), Some("34.101.87.166"));
+                assert_eq!(args.ssh_port, 2222);
+                assert_eq!(args.ssh_user.as_deref(), Some("dbtunnel"));
+                assert_eq!(args.ssh_key.as_deref(), Some("~/.ssh/tunnel_id_rsa"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

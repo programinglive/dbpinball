@@ -245,6 +245,17 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
       return;
     }
 
+    if (formData.sshTunnel?.enabled) {
+      if (!formData.sshTunnel.host?.trim() || !formData.sshTunnel.username?.trim()) {
+        alert("Please fill in: SSH Host and SSH Username");
+        return;
+      }
+      if (!formData.sshTunnel.port || formData.sshTunnel.port < 1 || formData.sshTunnel.port > 65535) {
+        alert("Please enter a valid SSH Port (1-65535)");
+        return;
+      }
+    }
+
     const baseConnection: DbConnection = {
       id: editingId ?? "",
       name: formData.name,
@@ -254,6 +265,17 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
       database: formData.database || "",
       username: formData.username,
       useSsl: formData.useSsl || false,
+      target: formData.target,
+      sshTunnel: formData.sshTunnel?.enabled
+        ? {
+            enabled: true,
+            host: formData.sshTunnel.host.trim(),
+            port: formData.sshTunnel.port || 22,
+            username: formData.sshTunnel.username.trim(),
+            privateKeyPath: formData.sshTunnel.privateKeyPath?.trim() || undefined,
+            strictHostKeyChecking: Boolean(formData.sshTunnel.strictHostKeyChecking),
+          }
+        : undefined,
     };
 
     if (!editingId && password.trim() === "") {

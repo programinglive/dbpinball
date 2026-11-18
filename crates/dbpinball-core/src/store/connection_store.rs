@@ -565,6 +565,17 @@ fn validate(connection: &DbConnection) -> Result<(), String> {
     if connection.port == 0 {
         return Err("port must be between 1 and 65535".to_string());
     }
+    if let Some(tunnel) = connection.ssh_tunnel.as_ref().filter(|t| t.enabled) {
+        if tunnel.host.trim().is_empty() {
+            return Err("sshTunnel.host is empty".to_string());
+        }
+        if tunnel.username.trim().is_empty() {
+            return Err("sshTunnel.username is empty".to_string());
+        }
+        if tunnel.port == 0 {
+            return Err("sshTunnel.port must be between 1 and 65535".to_string());
+        }
+    }
 
     Ok(())
 }
@@ -575,6 +586,14 @@ fn same_identity(left: &DbConnection, right: &DbConnection) -> bool {
         && left.port == right.port
         && left.database == right.database
         && left.username == right.username
+        && ssh_tunnel_key(left) == ssh_tunnel_key(right)
+}
+
+fn ssh_tunnel_key(conn: &DbConnection) -> Option<(&str, u16, &str)> {
+    conn.ssh_tunnel
+        .as_ref()
+        .filter(|t| t.enabled)
+        .map(|t| (t.host.as_str(), t.port, t.username.as_str()))
 }
 
 #[cfg(test)]
@@ -593,6 +612,7 @@ mod tests {
             username: "postgres".to_string(),
             use_ssl: false,
             target: TargetClass::Local,
+            ssh_tunnel: None,
         }
     }
 
@@ -874,6 +894,7 @@ mod migration_integrity_tests {
             username: "postgres".to_string(),
             use_ssl: false,
             target: TargetClass::Local,
+            ssh_tunnel: None,
         }
     }
 
@@ -974,6 +995,7 @@ mod credential_lifecycle_tests {
             username: "postgres".to_string(),
             use_ssl: false,
             target: TargetClass::Local,
+            ssh_tunnel: None,
         }
     }
 

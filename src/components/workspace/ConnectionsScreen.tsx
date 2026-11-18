@@ -77,6 +77,7 @@ export default function ConnectionsScreen(props: ConnectionsScreenProps) {
                       <CardDescription className="connection-row__description">
                         {conn.username}@{conn.host}:{conn.port}
                         {conn.database ? ` · ${conn.database}` : ""}
+                        {conn.sshTunnel?.enabled && <span className="connection-row__ssl"> · SSH</span>}
                         {conn.useSsl && <span className="connection-row__ssl"> · SSL</span>}
                       </CardDescription>
                     </div>

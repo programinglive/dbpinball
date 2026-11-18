@@ -95,6 +95,7 @@ fn target(variable: &str, id: &str) -> Option<Target> {
         username: parsed.username().to_string(),
         use_ssl: false,
         target: TargetClass::Unknown,
+        ssh_tunnel: None,
     };
 
     Some(Target {
@@ -338,6 +339,7 @@ async fn a_non_postgres_engine_is_refused() {
         username: "u".into(),
         use_ssl: false,
         target: TargetClass::Unknown,
+        ssh_tunnel: None,
     };
     let provider = MapProvider::new(&[("mysql", "x")]);
 

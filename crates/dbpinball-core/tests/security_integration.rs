@@ -58,6 +58,7 @@ fn target(variable: &str, engine: DbEngine) -> Option<Target> {
         username: parsed.username().to_string(),
         use_ssl: false,
         target: TargetClass::Unknown,
+        ssh_tunnel: None,
     };
 
     let credentials = FixedCredentialProvider(parsed.password().unwrap_or_default().to_string());

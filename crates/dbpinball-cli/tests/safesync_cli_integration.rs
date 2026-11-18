@@ -71,6 +71,7 @@ fn target(variable: &str, id: &str) -> Option<Target> {
             username: parsed.username().to_string(),
             use_ssl: false,
             target: TargetClass::Unknown,
+            ssh_tunnel: None,
         },
         password: parsed.password().unwrap_or_default().to_string(),
     })
