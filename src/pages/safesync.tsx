@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ShieldCheck, Play, SearchCheck, FileCheck2, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import type { SshTunnelConfig, TargetClass } from "@/pages/connections.types";
 
 export interface SafeSyncConnection {
   id: string;
@@ -18,6 +19,20 @@ export interface SafeSyncConnection {
   database: string;
   username: string;
   useSsl: boolean;
+  target?: TargetClass;
+  sshTunnel?: SshTunnelConfig;
+}
+
+const LOCAL_DESTINATION_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/**
+ * Only local, non-production, non-SSH-tunneled connections may be selected as
+ * a Safe Sync destination.
+ */
+export function isLocalDestinationConnection(conn: SafeSyncConnection): boolean {
+  if (conn.target === "production") return false;
+  if (conn.sshTunnel?.enabled) return false;
+  return LOCAL_DESTINATION_HOSTS.has(conn.host.trim().toLowerCase());
 }
 
 interface SecurityStatus {
@@ -101,8 +116,12 @@ export default function SafeSyncPage() {
       .catch((err) => setError(String(err)));
   }, []);
 
+  const destinationConnections = useMemo(
+    () => connections.filter(isLocalDestinationConnection),
+    [connections],
+  );
   const sourceConn = connections.find((c) => c.id === sourceId) ?? null;
-  const destConn = connections.find((c) => c.id === destinationId) ?? null;
+  const destConn = destinationConnections.find((c) => c.id === destinationId) ?? null;
 
   const handleInspect = async () => {
     if (!sourceConn || !destConn) {
@@ -258,18 +277,29 @@ export default function SafeSyncPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="safesync-dest">Destination (Local/Dev Only)</Label>
-              <Select value={destinationId} onValueChange={setDestinationId}>
+              <Select value={destinationId} onValueChange={setDestinationId} disabled={destinationConnections.length === 0}>
                 <SelectTrigger id="safesync-dest" aria-label="Destination connection">
-                  <SelectValue placeholder="Select destination connection" />
+                  <SelectValue
+                    placeholder={
+                      destinationConnections.length === 0
+                        ? "No localhost destination available"
+                        : "Select destination connection"
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent>
-                  {connections.map((conn) => (
+                  {destinationConnections.map((conn) => (
                     <SelectItem key={conn.id} value={conn.id}>
                       {conn.name} ({conn.engine} · {conn.database})
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {destinationConnections.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Destination must be a local database (127.0.0.1 / localhost, non-production, without SSH tunnel). Add one in Connections first.
+                </p>
+              )}
             </div>
           </div>
 

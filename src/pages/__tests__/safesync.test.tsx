@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import SafeSyncPage from "@/pages/safesync";
+import SafeSyncPage, { isLocalDestinationConnection } from "@/pages/safesync";
 import { invoke } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -121,5 +121,62 @@ describe("SafeSyncPage", () => {
     await waitFor(() => {
       expect(screen.getByTestId("run-status")).toHaveTextContent("completed");
     });
+  });
+
+  it("excludes production, SSH-tunneled, and non-localhost connections from destinations", () => {
+    expect(
+      isLocalDestinationConnection({
+        id: "p1",
+        name: "Prod",
+        engine: "mysql",
+        host: "127.0.0.1",
+        port: 3306,
+        database: "prod",
+        username: "dbteam",
+        useSsl: false,
+        target: "production",
+      }),
+    ).toBe(false);
+
+    expect(
+      isLocalDestinationConnection({
+        id: "t1",
+        name: "Tunneled",
+        engine: "mysql",
+        host: "127.0.0.1",
+        port: 3306,
+        database: "staging",
+        username: "dbteam",
+        useSsl: false,
+        sshTunnel: { enabled: true, host: "34.101.87.166", port: 2222, username: "dbtunnel" },
+      }),
+    ).toBe(false);
+
+    expect(
+      isLocalDestinationConnection({
+        id: "r1",
+        name: "Remote",
+        engine: "postgres",
+        host: "10.0.0.5",
+        port: 5432,
+        database: "dev",
+        username: "dev",
+        useSsl: false,
+      }),
+    ).toBe(false);
+
+    expect(
+      isLocalDestinationConnection({
+        id: "l1",
+        name: "Local",
+        engine: "postgres",
+        host: "localhost",
+        port: 5432,
+        database: "local_dev",
+        username: "postgres",
+        useSsl: false,
+        target: "local",
+      }),
+    ).toBe(true);
   });
 });
