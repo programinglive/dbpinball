@@ -1,5 +1,14 @@
 export type TargetClass = "production" | "staging" | "local" | "unknown";
 
+export interface SshTunnelConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  privateKeyPath?: string;
+  strictHostKeyChecking?: boolean;
+}
+
 export interface DbConnection {
   id: string;
   name: string;
@@ -11,6 +20,8 @@ export interface DbConnection {
   useSsl: boolean;
   /** User-provided hint only. Never treated as verified evidence. */
   target?: TargetClass;
+  /** Optional SSH tunnel configuration. */
+  sshTunnel?: SshTunnelConfig;
 }
 
 export type MigrationReport = {

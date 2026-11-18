@@ -52,10 +52,14 @@ pub async fn run_query(
     // read-only transaction. The classifier is a risk signal; the engine is the
     // enforcement boundary.
     let read_only = class == dbpinball_core::security::SqlClass::ReadOnly;
+    let (tunneled, _tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&conn)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let run_conn = tunneled.into_owned();
 
-    match conn.engine {
-        DbEngine::Mysql => mysql::run_query(conn, database, sql, limit, read_only).await,
-        DbEngine::Postgres => postgres::run_query(conn, database, sql, limit, read_only).await,
+    match run_conn.engine {
+        DbEngine::Mysql => mysql::run_query(run_conn, database, sql, limit, read_only).await,
+        DbEngine::Postgres => postgres::run_query(run_conn, database, sql, limit, read_only).await,
     }
 }
 
@@ -83,9 +87,13 @@ pub async fn start_backup(
     conn: DbConnection,
     opts: BackupOptions,
 ) -> Result<String> {
-    match conn.engine {
-        DbEngine::Mysql => mysql::backup(window, conn, opts).await,
-        DbEngine::Postgres => postgres::backup(window, conn, opts).await,
+    let (tunneled, _tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&conn)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let run_conn = tunneled.into_owned();
+    match run_conn.engine {
+        DbEngine::Mysql => mysql::backup(window, run_conn, opts).await,
+        DbEngine::Postgres => postgres::backup(window, run_conn, opts).await,
     }
 }
 
@@ -104,9 +112,14 @@ pub async fn start_restore(
     .await
     .map_err(|message| anyhow::anyhow!(message))?;
 
-    match conn.engine {
-        DbEngine::Mysql => mysql::restore(window, conn, file, opts).await,
-        DbEngine::Postgres => postgres::restore(window, conn, file, opts).await,
+    let (tunneled, _tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&conn)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let run_conn = tunneled.into_owned();
+
+    match run_conn.engine {
+        DbEngine::Mysql => mysql::restore(window, run_conn, file, opts).await,
+        DbEngine::Postgres => postgres::restore(window, run_conn, file, opts).await,
     }
 }
 
@@ -122,10 +135,19 @@ pub async fn start_copy(
         .await
         .map_err(|message| anyhow::anyhow!(message))?;
 
-    if std::mem::discriminant(&src.engine) == std::mem::discriminant(&dst.engine) {
-        match src.engine {
-            DbEngine::Mysql => mysql::copy_same_engine(window, src, dst, opts).await,
-            DbEngine::Postgres => postgres::copy_same_engine(window, src, dst, opts).await,
+    let (tunneled_src, _src_tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&src)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let (tunneled_dst, _dst_tunnel) = dbpinball_core::services::ssh_tunnel::prepare_connection(&dst)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let run_src = tunneled_src.into_owned();
+    let run_dst = tunneled_dst.into_owned();
+
+    if std::mem::discriminant(&run_src.engine) == std::mem::discriminant(&run_dst.engine) {
+        match run_src.engine {
+            DbEngine::Mysql => mysql::copy_same_engine(window, run_src, run_dst, opts).await,
+            DbEngine::Postgres => postgres::copy_same_engine(window, run_src, run_dst, opts).await,
         }
     } else {
         anyhow::bail!("Cross-engine copy is not implemented yet")
@@ -147,6 +169,7 @@ mod tests {
             username: "dev".to_string(),
             use_ssl: false,
             target: dbpinball_core::domain::connection::TargetClass::Unknown,
+            ssh_tunnel: None,
         }
     }
 

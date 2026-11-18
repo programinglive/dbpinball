@@ -88,6 +88,7 @@ fn target(variable: &str, id: &str) -> Option<Target> {
             username: parsed.username().to_string(),
             use_ssl: false,
             target: TargetClass::Unknown,
+            ssh_tunnel: None,
         },
         password: parsed.password().unwrap_or_default().to_string(),
     })
@@ -1993,6 +1994,7 @@ async fn a_non_owner_sequence_reports_reconciliation_required() {
             username: "m4limited".to_string(),
             use_ssl: false,
             target: TargetClass::Unknown,
+            ssh_tunnel: None,
         },
         password: "m4limited".to_string(),
     };

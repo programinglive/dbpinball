@@ -9,16 +9,17 @@ use crate::domain::connection::{DbConnection, DbEngine};
 use crate::domain::error::{CoreError, ErrorCode};
 use crate::ports::credentials::CredentialProvider;
 use crate::security::destination::{DestinationIdentity, ServerIdentity};
-use crate::services::inspect;
+use crate::services::{inspect, ssh_tunnel};
 
 /// Read the identity of the database a connection points at.
 pub async fn verify_destination(
     connection: &DbConnection,
     credentials: &dyn CredentialProvider,
 ) -> Result<DestinationIdentity, CoreError> {
-    match connection.engine {
-        DbEngine::Mysql => verify_mysql(connection, credentials).await,
-        DbEngine::Postgres => verify_postgres(connection, credentials).await,
+    let (effective, _tunnel) = ssh_tunnel::prepare_connection(connection).await?;
+    match effective.engine {
+        DbEngine::Mysql => verify_mysql(connection, &effective, credentials).await,
+        DbEngine::Postgres => verify_postgres(connection, &effective, credentials).await,
     }
 }
 
@@ -31,6 +32,7 @@ fn now_ms() -> u64 {
 
 async fn verify_postgres(
     connection: &DbConnection,
+    effective: &DbConnection,
     credentials: &dyn CredentialProvider,
 ) -> Result<DestinationIdentity, CoreError> {
     let database = if connection.database.trim().is_empty() {
@@ -39,7 +41,7 @@ async fn verify_postgres(
         connection.database.as_str()
     };
 
-    let pool = inspect::connect_postgres(connection, database, credentials).await?;
+    let pool = inspect::connect_postgres(effective, database, credentials).await?;
 
     // `pg_control_system()` needs elevated privileges, so it is attempted and
     // allowed to fail. The database OID plus the reported address is the
@@ -124,6 +126,7 @@ async fn postgres_cluster_identifier(pool: &sqlx::PgPool) -> Option<String> {
 
 async fn verify_mysql(
     connection: &DbConnection,
+    effective: &DbConnection,
     credentials: &dyn CredentialProvider,
 ) -> Result<DestinationIdentity, CoreError> {
     let database = if connection.database.trim().is_empty() {
@@ -132,7 +135,7 @@ async fn verify_mysql(
         connection.database.as_str()
     };
 
-    let pool = inspect::connect_mysql(connection, database, credentials).await?;
+    let pool = inspect::connect_mysql(effective, database, credentials).await?;
 
     let row = sqlx::query(
         "SELECT COALESCE(DATABASE(), ''), \

@@ -78,6 +78,7 @@ pub struct BoundSession {
     role: SessionRole,
     connection: SessionConnection,
     identity: SessionIdentity,
+    _tunnel: Option<crate::services::ssh_tunnel::SshTunnelGuard>,
 }
 
 impl std::fmt::Debug for BoundSession {
@@ -103,14 +104,15 @@ impl BoundSession {
         limits: &Limits,
     ) -> Result<Self, CoreError> {
         let secret = credentials.get(&profile.id)?;
-        match profile.engine {
+        let (effective, tunnel) = crate::services::ssh_tunnel::prepare_connection(profile).await?;
+        match effective.engine {
             DbEngine::Postgres => {
                 let options = PgConnectOptions::new()
-                    .host(&profile.host)
-                    .port(profile.port)
-                    .username(&profile.username)
+                    .host(&effective.host)
+                    .port(effective.port)
+                    .username(&effective.username)
                     .password(secret.expose())
-                    .database(&profile.database);
+                    .database(&effective.database);
 
                 let mut connection =
                     PgConnection::connect_with(&options)
@@ -134,10 +136,11 @@ impl BoundSession {
                     role,
                     connection: SessionConnection::Postgres(connection),
                     identity,
+                    _tunnel: tunnel,
                 })
             }
             DbEngine::Mysql => {
-                if profile.database.trim().is_empty() {
+                if effective.database.trim().is_empty() {
                     return Err(CoreError::with_detail(
                         ErrorCode::Usage,
                         "a database name is required for MariaDB Safe Sync",
@@ -146,11 +149,11 @@ impl BoundSession {
                 }
 
                 let options = MySqlConnectOptions::new()
-                    .host(&profile.host)
-                    .port(profile.port)
-                    .username(&profile.username)
+                    .host(&effective.host)
+                    .port(effective.port)
+                    .username(&effective.username)
                     .password(secret.expose())
-                    .database(&profile.database);
+                    .database(&effective.database);
 
                 let mut connection =
                     MySqlConnection::connect_with(&options)
@@ -179,6 +182,7 @@ impl BoundSession {
                     role,
                     connection: SessionConnection::MariaDb(connection),
                     identity,
+                    _tunnel: tunnel,
                 })
             }
         }

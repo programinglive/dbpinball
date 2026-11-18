@@ -48,6 +48,7 @@ the integration suite runs against; older MariaDB releases are not tested.
 | Capability | Desktop | CLI |
 | --- | --- | --- |
 | Connection vault with OS keyring credentials | Yes | `connections` |
+| Built-in SSH tunnel forwarding (OpenSSH) | Yes | `connections add --ssh-tunnel` |
 | Database and table inspection | Yes | `schema inspect` |
 | SQL workspace with write authorization | Yes | — |
 | Destination verification and security policy | Yes | `security` |

@@ -2,7 +2,7 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 use dbpinball_core::adapters::keyring::KeyringCredentialProvider;
-use dbpinball_core::domain::connection::{DbConnection, DbEngine, TargetClass};
+use dbpinball_core::domain::connection::{DbConnection, DbEngine, SshTunnelConfig, TargetClass};
 use dbpinball_core::domain::error::{CoreError, ErrorCode};
 use dbpinball_core::ports::credentials::{CredentialProvider, Secret};
 use dbpinball_core::services::inspect;
@@ -70,6 +70,48 @@ fn add(cli: &Cli, args: &AddArgs) -> Result<i32, CoreError> {
     let password = read_password()?;
     let id = dbpinball_core::store::ConnectionStore::new_id();
 
+    let ssh_tunnel = if args.ssh_tunnel {
+        let ssh_host = args
+            .ssh_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::Usage,
+                    "--ssh-host is required when --ssh-tunnel is set",
+                )
+            })?
+            .to_string();
+        let ssh_user = args
+            .ssh_user
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::Usage,
+                    "--ssh-user is required when --ssh-tunnel is set",
+                )
+            })?
+            .to_string();
+        Some(SshTunnelConfig {
+            enabled: true,
+            host: ssh_host,
+            port: args.ssh_port,
+            username: ssh_user,
+            private_key_path: args
+                .ssh_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            strict_host_key_checking: args.ssh_strict_host_key,
+        })
+    } else {
+        None
+    };
+
     let connection = DbConnection {
         id: id.clone(),
         name: args.name.clone(),
@@ -88,6 +130,7 @@ fn add(cli: &Cli, args: &AddArgs) -> Result<i32, CoreError> {
             TargetArg::Local => TargetClass::Local,
             TargetArg::Unknown => TargetClass::Unknown,
         },
+        ssh_tunnel,
     };
 
     let keyring = KeyringCredentialProvider;

@@ -113,6 +113,7 @@ fn target(variable: &str, id: &str) -> Option<Target> {
         username: parsed.username().to_string(),
         use_ssl: false,
         target: TargetClass::Unknown,
+        ssh_tunnel: None,
     };
 
     Some(Target {
