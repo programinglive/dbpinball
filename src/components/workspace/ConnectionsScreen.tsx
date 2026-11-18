@@ -66,10 +66,20 @@ export default function ConnectionsScreen(props: ConnectionsScreenProps) {
               >
                 <CardHeader className="connection-row__header">
                   <div className="connection-row__content">
-                    <div className="connection-row__avatar">{engineBadge}</div>
+                    <div className={`connection-row__avatar connection-row__avatar--${conn.engine}`}>
+                      {engineBadge}
+                    </div>
                     <div className="connection-row__text">
                       <div className="connection-row__title-line">
                         <CardTitle className="connection-row__title">{conn.name}</CardTitle>
+                        {conn.target && conn.target !== "unknown" && (
+                          <span className={`connection-row__badge connection-row__badge--${conn.target}`}>
+                            {conn.target === "production" ? "PROD" : conn.target.toUpperCase()}
+                          </span>
+                        )}
+                        {conn.sshTunnel?.enabled && (
+                          <span className="connection-row__badge connection-row__badge--ssh">SSH</span>
+                        )}
                         <span className={`connection-row__status-text connection-row__status-text--${statusState}`}>
                           {statusLabel}
                         </span>
@@ -77,10 +87,31 @@ export default function ConnectionsScreen(props: ConnectionsScreenProps) {
                       <CardDescription className="connection-row__description">
                         {conn.username}@{conn.host}:{conn.port}
                         {conn.database ? ` · ${conn.database}` : ""}
-                        {conn.sshTunnel?.enabled && <span className="connection-row__ssl"> · SSH</span>}
                         {conn.useSsl && <span className="connection-row__ssl"> · SSL</span>}
                       </CardDescription>
                     </div>
+                  </div>
+                  <div className="connection-row__actions">
+                    <button
+                      type="button"
+                      className="connection-row__action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onEdit(conn);
+                      }}
+                    >
+                      Configure
+                    </button>
+                    <button
+                      type="button"
+                      className="connection-row__action-btn connection-row__action-btn--primary"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onConnect(conn);
+                      }}
+                    >
+                      Open
+                    </button>
                   </div>
                 </CardHeader>
               </Card>
