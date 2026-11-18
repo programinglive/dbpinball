@@ -18,10 +18,12 @@ export type ConnectionsPageHandle = {
   openNewConnection: (engine?: "mysql" | "postgres") => void;
 };
 
-type ConnectionsPageProps = {};
+type ConnectionsPageProps = {
+  searchQuery?: string;
+};
 
 const ConnectionsPage = forwardRef(function ConnectionsPage(
-  _props: ConnectionsPageProps,
+  props: ConnectionsPageProps,
   ref: ForwardedRef<ConnectionsPageHandle>,
 ) {
   const { handleMinimizeWindow, handleToggleMaximize, handleCloseWindow } = useTauriWindowControls();
@@ -641,6 +643,16 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
     };
   }, [contextMenu.open]);
 
+  const searchTerm = (props.searchQuery || "").trim().toLowerCase();
+  const visibleConnections = useMemo(() => {
+    if (!searchTerm) return sortedConnections;
+    return sortedConnections.filter((conn) =>
+      [conn.name, conn.host, conn.database, conn.username, conn.engine, conn.target]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(searchTerm))
+    );
+  }, [searchTerm, sortedConnections]);
+
   const handleDeleteConnection = async (id: string) => {
     if (!confirm("Are you sure you want to delete this connection?")) {
       return;
@@ -734,7 +746,7 @@ const ConnectionsPage = forwardRef(function ConnectionsPage(
       />
 
       <ConnectionsScreen
-        connections={sortedConnections}
+        connections={visibleConnections}
         selectedId={selectedId}
         testResult={testResult}
         activeContextMenu={activeContextMenu}
