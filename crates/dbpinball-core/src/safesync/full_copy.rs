@@ -72,7 +72,16 @@ pub async fn full_copy(
     now_ms: u64,
     replace: bool,
 ) -> Result<FullCopyReport, CoreError> {
-    full_copy_with_progress(source, destination, credentials, enrollments, now_ms, replace, |_| {}).await
+    full_copy_with_progress(
+        source,
+        destination,
+        credentials,
+        enrollments,
+        now_ms,
+        replace,
+        |_| {},
+    )
+    .await
 }
 
 /// Copy all base tables (schema and rows) from `source` to `destination`,
@@ -127,7 +136,13 @@ where
                     .execute(&mut *src)
                     .await;
             }
-            copy_mysql(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
+            copy_mysql(
+                &mut source_session,
+                &mut destination_session,
+                replace,
+                &mut on_progress,
+            )
+            .await?
         }
         DbEngine::Postgres => {
             if let Ok(src) = source_session.pg_connection() {
@@ -135,7 +150,13 @@ where
                     .execute(&mut *src)
                     .await;
             }
-            copy_postgres(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
+            copy_postgres(
+                &mut source_session,
+                &mut destination_session,
+                replace,
+                &mut on_progress,
+            )
+            .await?
         }
     };
 
@@ -278,7 +299,14 @@ where
         )
         .fetch_all(conn)
         .await
-        .map_err(|e| database_error(ErrorCode::Operation, "list MySQL tables", "full_copy_list_failed", e))?
+        .map_err(|e| {
+            database_error(
+                ErrorCode::Operation,
+                "list MySQL tables",
+                "full_copy_list_failed",
+                e,
+            )
+        })?
     };
 
     let total_tables = table_names.len();
@@ -297,26 +325,45 @@ where
         sqlx::query("SET FOREIGN_KEY_CHECKS = 0")
             .execute(&mut *dst)
             .await
-            .map_err(|e| database_error(ErrorCode::Operation, "disable FK checks", "full_copy_fk_failed", e))?;
+            .map_err(|e| {
+                database_error(
+                    ErrorCode::Operation,
+                    "disable FK checks",
+                    "full_copy_fk_failed",
+                    e,
+                )
+            })?;
         sqlx::query("SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO'")
             .execute(&mut *dst)
             .await
-            .map_err(|e| database_error(ErrorCode::Operation, "set SQL_MODE", "full_copy_mode_failed", e))?;
+            .map_err(|e| {
+                database_error(
+                    ErrorCode::Operation,
+                    "set SQL_MODE",
+                    "full_copy_mode_failed",
+                    e,
+                )
+            })?;
         sqlx::query("SET autocommit = 0")
             .execute(&mut *dst)
             .await
-            .map_err(|e| database_error(ErrorCode::Operation, "disable autocommit", "full_copy_autocommit_failed", e))?;
+            .map_err(|e| {
+                database_error(
+                    ErrorCode::Operation,
+                    "disable autocommit",
+                    "full_copy_autocommit_failed",
+                    e,
+                )
+            })?;
     }
 
     let mut results = Vec::with_capacity(table_names.len());
 
     for (table_idx, table) in table_names.into_iter().enumerate() {
         let q_table = q_mysql(&table);
-        let percent = if total_tables == 0 {
-            0
-        } else {
-            ((table_idx * 100) / total_tables).min(99) as u8
-        };
+        let percent = (table_idx * 100)
+            .checked_div(total_tables)
+            .map_or(0, |p| p.min(99) as u8);
         on_progress(FullCopyProgress {
             phase: "copying".to_string(),
             current_table: table.clone(),
@@ -374,11 +421,12 @@ where
                         )
                     })?;
             } else {
-                let create_if_not_exists = if let Some(rest) = create_sql.strip_prefix("CREATE TABLE ") {
-                    format!("CREATE TABLE IF NOT EXISTS {rest}")
-                } else {
-                    create_sql.clone()
-                };
+                let create_if_not_exists =
+                    if let Some(rest) = create_sql.strip_prefix("CREATE TABLE ") {
+                        format!("CREATE TABLE IF NOT EXISTS {rest}")
+                    } else {
+                        create_sql.clone()
+                    };
                 sqlx::query(&create_if_not_exists)
                     .execute(&mut *dst)
                     .await
@@ -444,7 +492,9 @@ where
                 match c.encoding {
                     MysqlColumnEncoding::Bit => format!("BIN({qc})"),
                     MysqlColumnEncoding::Binary => format!("HEX({qc})"),
-                    MysqlColumnEncoding::Text => format!("CAST({qc} AS CHAR CHARACTER SET utf8mb4)"),
+                    MysqlColumnEncoding::Text => {
+                        format!("CAST({qc} AS CHAR CHARACTER SET utf8mb4)")
+                    }
                 }
             })
             .collect();
@@ -452,7 +502,10 @@ where
         let insert_prefix = if replace {
             format!("INSERT INTO {q_table} ({}) VALUES ", insert_cols.join(", "))
         } else {
-            format!("INSERT IGNORE INTO {q_table} ({}) VALUES ", insert_cols.join(", "))
+            format!(
+                "INSERT IGNORE INTO {q_table} ({}) VALUES ",
+                insert_cols.join(", ")
+            )
         };
 
         let mut table_rows: u64 = 0;
@@ -604,7 +657,14 @@ where
         )
         .fetch_all(src)
         .await
-        .map_err(|e| database_error(ErrorCode::Operation, "list PostgreSQL tables", "full_copy_list_failed", e))?;
+        .map_err(|e| {
+            database_error(
+                ErrorCode::Operation,
+                "list PostgreSQL tables",
+                "full_copy_list_failed",
+                e,
+            )
+        })?;
 
         rows.into_iter()
             .filter_map(|r| Some((r.try_get(0).ok()?, r.try_get(1).ok()?)))
@@ -627,11 +687,9 @@ where
     for (table_idx, (schema, table)) in tables.into_iter().enumerate() {
         let full_name = format!("{}.{}", q_pg(&schema), q_pg(&table));
         let display_name = format!("{schema}.{table}");
-        let percent = if total_tables == 0 {
-            0
-        } else {
-            ((table_idx * 100) / total_tables).min(99) as u8
-        };
+        let percent = (table_idx * 100)
+            .checked_div(total_tables)
+            .map_or(0, |p| p.min(99) as u8);
         on_progress(FullCopyProgress {
             phase: "copying".to_string(),
             current_table: display_name.clone(),
@@ -756,7 +814,10 @@ where
             })
             .collect();
         let insert_cols: Vec<String> = columns.iter().map(|c| q_pg(&c.name)).collect();
-        let insert_prefix = format!("INSERT INTO {full_name} ({}) VALUES ", insert_cols.join(", "));
+        let insert_prefix = format!(
+            "INSERT INTO {full_name} ({}) VALUES ",
+            insert_cols.join(", ")
+        );
 
         let mut table_rows: u64 = 0;
         let select_sql = format!("SELECT {} FROM {full_name}", select_exprs.join(", "));
@@ -871,11 +932,26 @@ mod tests {
         assert_eq!(mysql_column_encoding("blob"), MysqlColumnEncoding::Binary);
         assert_eq!(mysql_column_encoding("varchar"), MysqlColumnEncoding::Text);
 
-        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, Some("0")), "b'0'");
-        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, Some("1")), "b'1'");
-        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Binary, Some("f")), "X'0f'");
-        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Binary, Some("abcd")), "X'abcd'");
-        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Text, Some("a'b")), "'a\\'b'");
+        assert_eq!(
+            format_mysql_literal(MysqlColumnEncoding::Bit, Some("0")),
+            "b'0'"
+        );
+        assert_eq!(
+            format_mysql_literal(MysqlColumnEncoding::Bit, Some("1")),
+            "b'1'"
+        );
+        assert_eq!(
+            format_mysql_literal(MysqlColumnEncoding::Binary, Some("f")),
+            "X'0f'"
+        );
+        assert_eq!(
+            format_mysql_literal(MysqlColumnEncoding::Binary, Some("abcd")),
+            "X'abcd'"
+        );
+        assert_eq!(
+            format_mysql_literal(MysqlColumnEncoding::Text, Some("a'b")),
+            "'a\\'b'"
+        );
         assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, None), "NULL");
     }
 }
