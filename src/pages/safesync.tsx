@@ -45,7 +45,12 @@ interface SecurityStatus {
 
 interface SessionIdentity {
   database?: string;
+  databaseName?: string;
   user?: string;
+  currentUser?: string;
+  host?: string;
+  port?: number;
+  transactionReadOnly?: boolean;
   server?: {
     engine?: string;
     version?: string;
@@ -326,7 +331,7 @@ export default function SafeSyncPage() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-6">
+    <div className="w-full space-y-5 p-5 lg:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold flex items-center gap-2">
@@ -364,13 +369,14 @@ export default function SafeSyncPage() {
         </div>
       )}
 
-      <Card>
+      <div className="grid gap-5 xl:grid-cols-12 items-start">
+      <Card className="xl:col-span-5">
         <CardHeader>
           <CardTitle>1. Source &amp; Destination Connections</CardTitle>
           <CardDescription>Inspect server identities and enrolled security posture before planning.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
             <div className="space-y-2">
               <Label htmlFor="safesync-source">Source (Read-Only)</Label>
               <Select value={sourceId} onValueChange={setSourceId}>
@@ -420,18 +426,60 @@ export default function SafeSyncPage() {
           </Button>
 
           {(sourceIdentity || destIdentity) && (
-            <div className="grid gap-4 md:grid-cols-2 text-xs">
-              <pre className="rounded bg-muted p-3 overflow-auto" data-testid="source-identity">
-                {JSON.stringify({ identity: sourceIdentity, security: sourceSecurity }, null, 2)}
-              </pre>
-              <pre className="rounded bg-muted p-3 overflow-auto" data-testid="destination-identity">
-                {JSON.stringify({ identity: destIdentity, security: destSecurity }, null, 2)}
-              </pre>
+            <div className="grid gap-3 text-xs">
+              {sourceIdentity && (
+                <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1.5" data-testid="source-identity">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-foreground">Source Identity</span>
+                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-200">
+                      {sourceIdentity.server?.engine ?? sourceConn?.engine} {sourceIdentity.server?.version ?? ""}
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {sourceIdentity.host ?? sourceConn?.host}:{sourceIdentity.port ?? sourceConn?.port} ·{" "}
+                    <span className="text-foreground">{sourceIdentity.databaseName ?? sourceIdentity.database}</span> ·{" "}
+                    {sourceIdentity.currentUser ?? sourceConn?.username}
+                    {sourceIdentity.transactionReadOnly ? " · read-only" : ""}
+                  </div>
+                  <details className="pt-1">
+                    <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
+                      View raw identity JSON
+                    </summary>
+                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted p-2 text-[11px]">
+                      {JSON.stringify({ identity: sourceIdentity, security: sourceSecurity }, null, 2)}
+                    </pre>
+                  </details>
+                </div>
+              )}
+              {destIdentity && (
+                <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1.5" data-testid="destination-identity">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-foreground">Destination Identity</span>
+                    <span className="rounded bg-emerald-950/80 border border-emerald-700/50 px-2 py-0.5 text-[11px] text-emerald-300">
+                      {destSecurity?.enrolled ? String(destSecurity.category ?? "enrolled") : "unenrolled"}
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {destIdentity.host ?? destConn?.host}:{destIdentity.port ?? destConn?.port} ·{" "}
+                    <span className="text-foreground">{destIdentity.databaseName ?? destIdentity.database}</span> ·{" "}
+                    {destIdentity.currentUser ?? destConn?.username}
+                  </div>
+                  <details className="pt-1">
+                    <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
+                      View raw identity JSON
+                    </summary>
+                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted p-2 text-[11px]">
+                      {JSON.stringify({ identity: destIdentity, security: destSecurity }, null, 2)}
+                    </pre>
+                  </details>
+                </div>
+              )}
             </div>
           )}
         </CardContent>
       </Card>
 
+      <div className="xl:col-span-7 space-y-5">
       {syncMode === "full" ? (
         <Card>
           <CardHeader>
@@ -603,6 +651,8 @@ export default function SafeSyncPage() {
       </Card>
         </>
       )}
+      </div>
+      </div>
     </div>
   );
 }
