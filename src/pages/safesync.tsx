@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ShieldCheck, Play, SearchCheck, FileCheck2, AlertTriangle, DatabaseBackup } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -88,6 +89,15 @@ interface FullCopyReport {
   tables: Array<{ table: string; rowsCopied: number }>;
 }
 
+interface FullCopyProgress {
+  phase: "discovering" | "copying" | "completed" | string;
+  currentTable: string;
+  tablesDone: number;
+  totalTables: number;
+  rowsCopied: number;
+  percent: number;
+}
+
 const DEFAULT_SPEC = `version: 1
 source: source
 destination: destination
@@ -122,6 +132,7 @@ export default function SafeSyncPage() {
   const [fullReplace, setFullReplace] = useState<boolean>(true);
   const [fullConfirmDb, setFullConfirmDb] = useState<string>("");
   const [fullCopyReport, setFullCopyReport] = useState<FullCopyReport | null>(null);
+  const [fullCopyProgress, setFullCopyProgress] = useState<FullCopyProgress | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -129,6 +140,36 @@ export default function SafeSyncPage() {
     invoke<SafeSyncConnection[]>("connections_list")
       .then((list) => setConnections(list))
       .catch((err) => setError(String(err)));
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    try {
+      Promise.resolve(
+        listen<FullCopyProgress>("safesync-full-copy-progress", (event) => {
+          if (active) setFullCopyProgress(event.payload);
+        }),
+      )
+        .then((fn) => {
+          if (active) {
+            unlisten = fn;
+          } else if (typeof fn === "function") {
+            fn();
+          }
+        })
+        .catch(() => {
+          // Non-Tauri browser/test runtime without event plugin.
+        });
+    } catch {
+      // Ignore outside Tauri runtime.
+    }
+    return () => {
+      active = false;
+      if (typeof unlisten === "function") {
+        unlisten();
+      }
+    };
   }, []);
 
   const destinationConnections = useMemo(
@@ -262,6 +303,14 @@ export default function SafeSyncPage() {
     setBusy(true);
     setError(null);
     setFullCopyReport(null);
+    setFullCopyProgress({
+      phase: "discovering",
+      currentTable: "",
+      tablesDone: 0,
+      totalTables: 0,
+      rowsCopied: 0,
+      percent: 0,
+    });
     try {
       const report = await invoke<FullCopyReport>("safe_sync_full_copy", {
         source: sourceConn,
@@ -422,6 +471,30 @@ export default function SafeSyncPage() {
               <DatabaseBackup className="mr-2 h-4 w-4" />
               {busy ? "Copying Database..." : "Run Full Copy"}
             </Button>
+
+            {fullCopyProgress && (
+              <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3" data-testid="full-copy-progress">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-foreground">
+                    {fullCopyProgress.phase === "completed"
+                      ? "Full Copy completed"
+                      : fullCopyProgress.currentTable
+                        ? `Copying ${fullCopyProgress.currentTable}...`
+                        : "Discovering tables..."}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {fullCopyProgress.tablesDone} / {fullCopyProgress.totalTables} tables ·{" "}
+                    {fullCopyProgress.rowsCopied.toLocaleString()} rows ({fullCopyProgress.percent}%)
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-primary transition-all duration-200"
+                    style={{ width: `${Math.max(0, Math.min(100, fullCopyProgress.percent))}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             {fullCopyReport && (
               <pre className="rounded bg-muted p-3 text-xs overflow-auto" data-testid="full-copy-report">
