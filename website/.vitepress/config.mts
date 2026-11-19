@@ -45,6 +45,7 @@ export default defineConfig({
       { text: "Architecture", link: "/architecture/", activeMatch: "/architecture/" },
       { text: "Security", link: "/security/", activeMatch: "/security/" },
       { text: "Reference", link: "/reference/cli", activeMatch: "/reference/" },
+      { text: "Changelog", link: "/changelog" },
       { text: "Roadmap", link: "/roadmap" },
     ],
     sidebar: {
