@@ -5,6 +5,7 @@
 //! subset execution, so production targets and SSH-tunneled destinations are
 //! always refused.
 
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::time::Instant;
@@ -19,7 +20,8 @@ use crate::safesync::session::{BoundSession, SessionRole};
 use crate::safesync::spec::Limits;
 use crate::security::EnrollmentStore;
 
-const BATCH_SIZE: usize = 200;
+const BATCH_SIZE: usize = 1000;
+const MAX_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 /// Per-table result reported after a full copy run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,9 +122,19 @@ where
 
     let tables = match source.engine {
         DbEngine::Mysql => {
+            if let Ok(src) = source_session.mysql_connection() {
+                let _ = sqlx::query("SET SESSION max_statement_time = 0")
+                    .execute(&mut *src)
+                    .await;
+            }
             copy_mysql(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
         }
         DbEngine::Postgres => {
+            if let Ok(src) = source_session.pg_connection() {
+                let _ = sqlx::query("SET statement_timeout = 0")
+                    .execute(&mut *src)
+                    .await;
+            }
             copy_postgres(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
         }
     };
@@ -194,16 +206,26 @@ fn escape_pg_str(value: &str) -> String {
     out
 }
 
-fn is_mysql_binary_type(data_type: &str) -> bool {
-    matches!(
-        data_type.to_ascii_lowercase().as_str(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlColumnEncoding {
+    Text,
+    Binary,
+    Bit,
+}
+
+fn mysql_column_encoding(data_type: &str) -> MysqlColumnEncoding {
+    let lower = data_type.to_ascii_lowercase();
+    if lower == "bit" {
+        return MysqlColumnEncoding::Bit;
+    }
+    if matches!(
+        lower.as_str(),
         "binary"
             | "varbinary"
             | "tinyblob"
             | "blob"
             | "mediumblob"
             | "longblob"
-            | "bit"
             | "geometry"
             | "point"
             | "linestring"
@@ -212,12 +234,30 @@ fn is_mysql_binary_type(data_type: &str) -> bool {
             | "multilinestring"
             | "multipolygon"
             | "geometrycollection"
-    )
+    ) {
+        return MysqlColumnEncoding::Binary;
+    }
+    MysqlColumnEncoding::Text
+}
+
+fn format_mysql_literal(encoding: MysqlColumnEncoding, val: Option<&str>) -> String {
+    match (encoding, val) {
+        (_, None) => "NULL".to_string(),
+        (MysqlColumnEncoding::Bit, Some(s)) => format!("b'{s}'"),
+        (MysqlColumnEncoding::Binary, Some(s)) => {
+            if s.len() % 2 == 1 {
+                format!("X'0{s}'")
+            } else {
+                format!("X'{s}'")
+            }
+        }
+        (MysqlColumnEncoding::Text, Some(s)) => escape_mysql_str(s),
+    }
 }
 
 struct MysqlColumn {
     name: String,
-    is_binary: bool,
+    encoding: MysqlColumnEncoding,
 }
 
 async fn copy_mysql<F>(
@@ -262,6 +302,10 @@ where
             .execute(&mut *dst)
             .await
             .map_err(|e| database_error(ErrorCode::Operation, "set SQL_MODE", "full_copy_mode_failed", e))?;
+        sqlx::query("SET autocommit = 0")
+            .execute(&mut *dst)
+            .await
+            .map_err(|e| database_error(ErrorCode::Operation, "disable autocommit", "full_copy_autocommit_failed", e))?;
     }
 
     let mut results = Vec::with_capacity(table_names.len());
@@ -379,7 +423,7 @@ where
                     }
                     Some(MysqlColumn {
                         name,
-                        is_binary: is_mysql_binary_type(&data_type),
+                        encoding: mysql_column_encoding(&data_type),
                     })
                 })
                 .collect()
@@ -397,10 +441,10 @@ where
             .iter()
             .map(|c| {
                 let qc = q_mysql(&c.name);
-                if c.is_binary {
-                    format!("HEX({qc})")
-                } else {
-                    format!("CAST({qc} AS CHAR CHARACTER SET utf8mb4)")
+                match c.encoding {
+                    MysqlColumnEncoding::Bit => format!("BIN({qc})"),
+                    MysqlColumnEncoding::Binary => format!("HEX({qc})"),
+                    MysqlColumnEncoding::Text => format!("CAST({qc} AS CHAR CHARACTER SET utf8mb4)"),
                 }
             })
             .collect();
@@ -411,57 +455,41 @@ where
             format!("INSERT IGNORE INTO {q_table} ({}) VALUES ", insert_cols.join(", "))
         };
 
-        let mut offset: usize = 0;
         let mut table_rows: u64 = 0;
+        let select_sql = format!("SELECT {} FROM {q_table}", select_exprs.join(", "));
+        let mut value_tuples: Vec<String> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_bytes: usize = 0;
 
-        loop {
-            let select_sql = format!(
-                "SELECT {} FROM {q_table} LIMIT {BATCH_SIZE} OFFSET {offset}",
-                select_exprs.join(", ")
-            );
-            let rows = {
-                let src = source_session.mysql_connection()?;
-                sqlx::query(&select_sql)
-                    .fetch_all(src)
-                    .await
-                    .map_err(|e| {
-                        database_error(
-                            ErrorCode::Operation,
-                            &format!("select rows from {table}"),
-                            "full_copy_select_failed",
-                            e,
-                        )
-                    })?
-            };
+        let src = source_session.mysql_connection()?;
+        let mut stream = sqlx::query(&select_sql).fetch(src);
 
-            if rows.is_empty() {
-                break;
+        while let Some(row) = stream.try_next().await.map_err(|e| {
+            database_error(
+                ErrorCode::Operation,
+                &format!("select rows from {table}"),
+                "full_copy_select_failed",
+                e,
+            )
+        })? {
+            let mut vals = Vec::with_capacity(columns.len());
+            for (idx, col) in columns.iter().enumerate() {
+                let val: Option<String> = row.try_get(idx).map_err(|e| {
+                    database_error(
+                        ErrorCode::Operation,
+                        &format!("decode column {} in {table}", col.name),
+                        "full_copy_decode_failed",
+                        e,
+                    )
+                })?;
+                vals.push(format_mysql_literal(col.encoding, val.as_deref()));
             }
+            let tuple = format!("({})", vals.join(", "));
+            batch_bytes += tuple.len() + 2;
+            value_tuples.push(tuple);
 
-            let batch_len = rows.len();
-            let mut value_tuples = Vec::with_capacity(batch_len);
-            for row in &rows {
-                let mut vals = Vec::with_capacity(columns.len());
-                for (idx, col) in columns.iter().enumerate() {
-                    let val: Option<String> = row.try_get(idx).map_err(|e| {
-                        database_error(
-                            ErrorCode::Operation,
-                            &format!("decode column {} in {table}", col.name),
-                            "full_copy_decode_failed",
-                            e,
-                        )
-                    })?;
-                    match val {
-                        None => vals.push("NULL".to_string()),
-                        Some(s) if col.is_binary => vals.push(format!("X'{s}'")),
-                        Some(s) => vals.push(escape_mysql_str(&s)),
-                    }
-                }
-                value_tuples.push(format!("({})", vals.join(", ")));
-            }
-
-            let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
-            {
+            if value_tuples.len() >= BATCH_SIZE || batch_bytes >= MAX_BATCH_BYTES {
+                let batch_len = value_tuples.len() as u64;
+                let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
                 let dst = destination_session.mysql_connection()?;
                 sqlx::query(&insert_sql)
                     .execute(&mut *dst)
@@ -474,11 +502,39 @@ where
                             e,
                         )
                     })?;
+                value_tuples.clear();
+                batch_bytes = 0;
+                table_rows += batch_len;
+                total_rows += batch_len;
+                on_progress(FullCopyProgress {
+                    phase: "copying".to_string(),
+                    current_table: table.clone(),
+                    tables_done: table_idx,
+                    total_tables,
+                    rows_copied: total_rows,
+                    percent,
+                });
             }
+        }
+        drop(stream);
 
-            table_rows += batch_len as u64;
-            total_rows += batch_len as u64;
-            offset += batch_len;
+        if !value_tuples.is_empty() {
+            let batch_len = value_tuples.len() as u64;
+            let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
+            let dst = destination_session.mysql_connection()?;
+            sqlx::query(&insert_sql)
+                .execute(&mut *dst)
+                .await
+                .map_err(|e| {
+                    database_error(
+                        ErrorCode::Operation,
+                        &format!("insert rows into {table}"),
+                        "full_copy_insert_failed",
+                        e,
+                    )
+                })?;
+            table_rows += batch_len;
+            total_rows += batch_len;
             on_progress(FullCopyProgress {
                 phase: "copying".to_string(),
                 current_table: table.clone(),
@@ -487,9 +543,21 @@ where
                 rows_copied: total_rows,
                 percent,
             });
-            if batch_len < BATCH_SIZE {
-                break;
-            }
+        }
+
+        {
+            let dst = destination_session.mysql_connection()?;
+            sqlx::query("COMMIT")
+                .execute(&mut *dst)
+                .await
+                .map_err(|e| {
+                    database_error(
+                        ErrorCode::Operation,
+                        &format!("commit {table}"),
+                        "full_copy_commit_failed",
+                        e,
+                    )
+                })?;
         }
 
         results.push(FullCopyTableResult {
@@ -500,6 +568,7 @@ where
 
     {
         let dst = destination_session.mysql_connection()?;
+        let _ = sqlx::query("SET autocommit = 1").execute(&mut *dst).await;
         let _ = sqlx::query("SET FOREIGN_KEY_CHECKS = 1")
             .execute(&mut *dst)
             .await;
@@ -689,57 +758,45 @@ where
         let insert_cols: Vec<String> = columns.iter().map(|c| q_pg(&c.name)).collect();
         let insert_prefix = format!("INSERT INTO {full_name} ({}) VALUES ", insert_cols.join(", "));
 
-        let mut offset: usize = 0;
         let mut table_rows: u64 = 0;
+        let select_sql = format!("SELECT {} FROM {full_name}", select_exprs.join(", "));
+        let mut value_tuples: Vec<String> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_bytes: usize = 0;
 
-        loop {
-            let select_sql = format!(
-                "SELECT {} FROM {full_name} LIMIT {BATCH_SIZE} OFFSET {offset}",
-                select_exprs.join(", ")
-            );
-            let rows = {
-                let src = source_session.pg_connection()?;
-                sqlx::query(&select_sql)
-                    .fetch_all(src)
-                    .await
-                    .map_err(|e| {
-                        database_error(
-                            ErrorCode::Operation,
-                            &format!("select rows from {display_name}"),
-                            "full_copy_select_failed",
-                            e,
-                        )
-                    })?
-            };
+        let src = source_session.pg_connection()?;
+        let mut stream = sqlx::query(&select_sql).fetch(src);
 
-            if rows.is_empty() {
-                break;
-            }
-
-            let batch_len = rows.len();
-            let mut value_tuples = Vec::with_capacity(batch_len);
-            for row in &rows {
-                let mut vals = Vec::with_capacity(columns.len());
-                for (idx, col) in columns.iter().enumerate() {
-                    let val: Option<String> = row.try_get(idx).map_err(|e| {
-                        database_error(
-                            ErrorCode::Operation,
-                            &format!("decode column {} in {display_name}", col.name),
-                            "full_copy_decode_failed",
-                            e,
-                        )
-                    })?;
-                    match val {
-                        None => vals.push("NULL".to_string()),
-                        Some(s) if col.is_bytea => vals.push(format!("decode('{}', 'hex')", s)),
-                        Some(s) => vals.push(format!("{}::{}", escape_pg_str(&s), col.type_name)),
-                    }
+        while let Some(row) = stream.try_next().await.map_err(|e| {
+            database_error(
+                ErrorCode::Operation,
+                &format!("select rows from {display_name}"),
+                "full_copy_select_failed",
+                e,
+            )
+        })? {
+            let mut vals = Vec::with_capacity(columns.len());
+            for (idx, col) in columns.iter().enumerate() {
+                let val: Option<String> = row.try_get(idx).map_err(|e| {
+                    database_error(
+                        ErrorCode::Operation,
+                        &format!("decode column {} in {display_name}", col.name),
+                        "full_copy_decode_failed",
+                        e,
+                    )
+                })?;
+                match val {
+                    None => vals.push("NULL".to_string()),
+                    Some(s) if col.is_bytea => vals.push(format!("decode('{}', 'hex')", s)),
+                    Some(s) => vals.push(format!("{}::{}", escape_pg_str(&s), col.type_name)),
                 }
-                value_tuples.push(format!("({})", vals.join(", ")));
             }
+            let tuple = format!("({})", vals.join(", "));
+            batch_bytes += tuple.len() + 2;
+            value_tuples.push(tuple);
 
-            let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
-            {
+            if value_tuples.len() >= BATCH_SIZE || batch_bytes >= MAX_BATCH_BYTES {
+                let batch_len = value_tuples.len() as u64;
+                let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
                 let dst = destination_session.pg_connection()?;
                 sqlx::query(&insert_sql)
                     .execute(&mut *dst)
@@ -752,11 +809,39 @@ where
                             e,
                         )
                     })?;
+                value_tuples.clear();
+                batch_bytes = 0;
+                table_rows += batch_len;
+                total_rows += batch_len;
+                on_progress(FullCopyProgress {
+                    phase: "copying".to_string(),
+                    current_table: display_name.clone(),
+                    tables_done: table_idx,
+                    total_tables,
+                    rows_copied: total_rows,
+                    percent,
+                });
             }
+        }
+        drop(stream);
 
-            table_rows += batch_len as u64;
-            total_rows += batch_len as u64;
-            offset += batch_len;
+        if !value_tuples.is_empty() {
+            let batch_len = value_tuples.len() as u64;
+            let insert_sql = format!("{insert_prefix}{}", value_tuples.join(", "));
+            let dst = destination_session.pg_connection()?;
+            sqlx::query(&insert_sql)
+                .execute(&mut *dst)
+                .await
+                .map_err(|e| {
+                    database_error(
+                        ErrorCode::Operation,
+                        &format!("insert rows into {display_name}"),
+                        "full_copy_insert_failed",
+                        e,
+                    )
+                })?;
+            table_rows += batch_len;
+            total_rows += batch_len;
             on_progress(FullCopyProgress {
                 phase: "copying".to_string(),
                 current_table: display_name.clone(),
@@ -765,9 +850,6 @@ where
                 rows_copied: total_rows,
                 percent,
             });
-            if batch_len < BATCH_SIZE {
-                break;
-            }
         }
 
         results.push(FullCopyTableResult {
@@ -777,4 +859,23 @@ where
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mysql_bit_and_binary_literals_are_valid_sql() {
+        assert_eq!(mysql_column_encoding("bit"), MysqlColumnEncoding::Bit);
+        assert_eq!(mysql_column_encoding("blob"), MysqlColumnEncoding::Binary);
+        assert_eq!(mysql_column_encoding("varchar"), MysqlColumnEncoding::Text);
+
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, Some("0")), "b'0'");
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, Some("1")), "b'1'");
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Binary, Some("f")), "X'0f'");
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Binary, Some("abcd")), "X'abcd'");
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Text, Some("a'b")), "'a\\'b'");
+        assert_eq!(format_mysql_literal(MysqlColumnEncoding::Bit, None), "NULL");
+    }
 }
