@@ -73,10 +73,10 @@ fn curl_bin() -> &'static str {
     }
 }
 
-fn apply_no_window(cmd: &mut Command) {
+fn apply_no_window(_cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        _cmd.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
