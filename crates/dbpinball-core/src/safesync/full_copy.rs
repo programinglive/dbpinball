@@ -361,11 +361,9 @@ where
 
     for (table_idx, table) in table_names.into_iter().enumerate() {
         let q_table = q_mysql(&table);
-        let percent = if total_tables == 0 {
-            0
-        } else {
-            ((table_idx * 100) / total_tables).min(99) as u8
-        };
+        let percent = (table_idx * 100)
+            .checked_div(total_tables)
+            .map_or(0, |p| p.min(99) as u8);
         on_progress(FullCopyProgress {
             phase: "copying".to_string(),
             current_table: table.clone(),
@@ -689,11 +687,9 @@ where
     for (table_idx, (schema, table)) in tables.into_iter().enumerate() {
         let full_name = format!("{}.{}", q_pg(&schema), q_pg(&table));
         let display_name = format!("{schema}.{table}");
-        let percent = if total_tables == 0 {
-            0
-        } else {
-            ((table_idx * 100) / total_tables).min(99) as u8
-        };
+        let percent = (table_idx * 100)
+            .checked_div(total_tables)
+            .map_or(0, |p| p.min(99) as u8);
         on_progress(FullCopyProgress {
             phase: "copying".to_string(),
             current_table: display_name.clone(),
