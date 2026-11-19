@@ -15,6 +15,7 @@
 //! - [`service`] combines them with the M3 security policy.
 
 pub mod audit;
+pub mod full_copy;
 pub mod graph;
 pub mod import;
 pub mod import_mariadb;
@@ -29,6 +30,7 @@ pub mod spec;
 pub mod typed;
 
 pub use audit::{AuditRecord, TableAudit};
+pub use full_copy::{full_copy, FullCopyReport, FullCopyTableResult};
 pub use graph::{
     discover_parents, inspect_table, ColumnInfo, ForeignKeyEdge, SchemaGraph, TableInfo,
 };

@@ -42,6 +42,11 @@ pub async fn run(cli: &Cli, command: &SafeSyncCommand) -> Result<i32, CoreError>
             status(cli, run, destination.as_deref()).await
         }
         SafeSyncCommand::KeyRotate => key_rotate(cli),
+        SafeSyncCommand::FullCopy {
+            source,
+            destination,
+            replace,
+        } => full_copy(cli, source, destination, *replace).await,
     }
 }
 
@@ -457,6 +462,41 @@ fn write_private(path: &Path, body: &str) -> Result<(), CoreError> {
 
 fn identity_label(identity: &Option<String>) -> &str {
     identity.as_deref().unwrap_or("(unidentified)")
+}
+
+async fn full_copy(
+    cli: &Cli,
+    source_id: &str,
+    destination_id: &str,
+    replace: bool,
+) -> Result<i32, CoreError> {
+    let source = lookup(cli, source_id)?;
+    let destination = lookup(cli, destination_id)?;
+    let provider = credentials::provider(cli.credential_source);
+    let enrollment_store = enrollments(cli)?;
+
+    let report = safesync::full_copy(
+        &source,
+        &destination,
+        provider.as_ref(),
+        &enrollment_store,
+        now_ms(),
+        replace,
+    )
+    .await?;
+
+    output::print_success(cli.json, &report, |report| {
+        println!(
+            "Full Copy completed: {} -> {}",
+            report.source_database, report.destination_database
+        );
+        println!(
+            "Tables copied: {} | Rows copied: {} | Duration: {}ms",
+            report.tables_copied, report.rows_copied, report.duration_ms
+        );
+    });
+
+    Ok(0)
 }
 
 #[cfg(test)]

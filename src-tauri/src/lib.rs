@@ -210,6 +210,15 @@ async fn safe_sync_status(
     safesync::status(run_id, destination).await
 }
 
+#[tauri::command]
+async fn safe_sync_full_copy(
+    source: DbConnection,
+    destination: DbConnection,
+    replace: bool,
+) -> Result<dbpinball_core::safesync::FullCopyReport, String> {
+    safesync::full_copy(source, destination, replace).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -239,7 +248,8 @@ pub fn run() {
             safe_sync_plan,
             safe_sync_validate,
             safe_sync_execute,
-            safe_sync_status
+            safe_sync_status,
+            safe_sync_full_copy
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

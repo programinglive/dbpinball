@@ -51,6 +51,17 @@ describe("SafeSyncPage", () => {
           return { run_id: "run_456", status: "completed", rowsWritten: 10 };
         case "safe_sync_status":
           return { runId: "run_456", status: "completed" };
+        case "safe_sync_full_copy":
+          return {
+            engine: "mysql",
+            sourceDatabase: "ministry_staging",
+            destinationDatabase: "ministry_local",
+            tablesCopied: 3,
+            rowsCopied: 42,
+            replaced: true,
+            durationMs: 120,
+            tables: [{ table: "orders", rowsCopied: 42 }],
+          };
         default:
           throw new Error(`Unexpected command: ${cmd}`);
       }
@@ -120,6 +131,36 @@ describe("SafeSyncPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Refresh Run Status/i }));
     await waitFor(() => {
       expect(screen.getByTestId("run-status")).toHaveTextContent("completed");
+    });
+  });
+
+  it("supports Full Copy mode with destination database confirmation", async () => {
+    render(<SafeSyncPage />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("connections_list");
+    });
+
+    fireEvent.click(screen.getByLabelText("Source connection"));
+    fireEvent.click(await screen.findByText(/Staging MariaDB/i));
+
+    fireEvent.click(screen.getByLabelText("Destination connection"));
+    fireEvent.click(await screen.findByText(/Local MariaDB/i));
+
+    fireEvent.click(screen.getByRole("button", { name: /Full Copy/i }));
+
+    const runBtn = screen.getByRole("button", { name: /Run Full Copy/i });
+    expect(runBtn).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Confirm Destination Database Name"), {
+      target: { value: "ministry_local" },
+    });
+    expect(runBtn).toBeEnabled();
+
+    fireEvent.click(runBtn);
+    await waitFor(() => {
+      expect(screen.getByTestId("full-copy-report")).toHaveTextContent("ministry_local");
+      expect(screen.getByTestId("full-copy-report")).toHaveTextContent('"tablesCopied": 3');
     });
   });
 

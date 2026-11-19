@@ -406,7 +406,7 @@ pub fn check_filter_digests(
     Ok(())
 }
 
-fn authorize(
+pub(crate) fn authorize(
     source: &BoundSession,
     destination: &BoundSession,
     destination_profile: &DbConnection,
@@ -447,7 +447,7 @@ fn refusal(decision: PolicyDecision) -> CoreError {
 /// A plan is bound to one engine. A PostgreSQL source with a MariaDB
 /// destination (or the reverse) is refused explicitly instead of failing later
 /// as an accidental schema-hash mismatch.
-fn assert_same_engine(source: &DbConnection, destination: &DbConnection) -> Result<(), CoreError> {
+pub(crate) fn assert_same_engine(source: &DbConnection, destination: &DbConnection) -> Result<(), CoreError> {
     if source.engine != destination.engine {
         return Err(CoreError::with_detail(
             ErrorCode::PolicyRefusal,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ShieldCheck, Play, SearchCheck, FileCheck2, AlertTriangle } from "lucide-react";
+import { ShieldCheck, Play, SearchCheck, FileCheck2, AlertTriangle, DatabaseBackup } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -77,6 +77,17 @@ interface RunReport {
   [key: string]: unknown;
 }
 
+interface FullCopyReport {
+  engine: "mysql" | "postgres";
+  sourceDatabase: string;
+  destinationDatabase: string;
+  tablesCopied: number;
+  rowsCopied: number;
+  replaced: boolean;
+  durationMs: number;
+  tables: Array<{ table: string; rowsCopied: number }>;
+}
+
 const DEFAULT_SPEC = `version: 1
 source: source
 destination: destination
@@ -107,6 +118,10 @@ export default function SafeSyncPage() {
   const [acknowledgement, setAcknowledgement] = useState<string>("");
   const [runReport, setRunReport] = useState<RunReport | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, unknown> | null>(null);
+  const [syncMode, setSyncMode] = useState<"subset" | "full">("subset");
+  const [fullReplace, setFullReplace] = useState<boolean>(true);
+  const [fullConfirmDb, setFullConfirmDb] = useState<string>("");
+  const [fullCopyReport, setFullCopyReport] = useState<FullCopyReport | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -235,16 +250,63 @@ export default function SafeSyncPage() {
     }
   };
 
+  const handleFullCopy = async () => {
+    if (!sourceConn || !destConn) {
+      setError("Select both source and destination connections first.");
+      return;
+    }
+    if (fullConfirmDb.trim() !== destConn.database) {
+      setError(`Type the destination database name (${destConn.database}) to confirm Full Copy.`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setFullCopyReport(null);
+    try {
+      const report = await invoke<FullCopyReport>("safe_sync_full_copy", {
+        source: sourceConn,
+        destination: destConn,
+        replace: fullReplace,
+      });
+      setFullCopyReport(report);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-6">
-      <div>
-        <h2 className="text-2xl font-bold flex items-center gap-2">
-          <ShieldCheck className="h-6 w-6" />
-          Safe Sync
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Bounded, masked, and verified subset synchronization for PostgreSQL and MariaDB.
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold flex items-center gap-2">
+            <ShieldCheck className="h-6 w-6" />
+            Safe Sync
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Bounded, masked subset sync or full local schema + data copy for PostgreSQL and MariaDB.
+          </p>
+        </div>
+        <div className="inline-flex rounded-lg border border-border bg-muted/40 p-1 gap-1" role="tablist" aria-label="Sync mode">
+          <Button
+            type="button"
+            size="sm"
+            variant={syncMode === "subset" ? "default" : "ghost"}
+            onClick={() => setSyncMode("subset")}
+          >
+            Subset Sync (Masked)
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={syncMode === "full" ? "default" : "ghost"}
+            onClick={() => setSyncMode("full")}
+          >
+            <DatabaseBackup className="mr-1.5 h-3.5 w-3.5" />
+            Full Copy
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -321,9 +383,58 @@ export default function SafeSyncPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>2. Safe Sync Specification &amp; Dry-Run Plan</CardTitle>
+      {syncMode === "full" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>2. Full Database Copy (Schema + Data)</CardTitle>
+            <CardDescription>
+              Copies all base tables (schema and rows) from Source to your enrolled local destination without needing a YAML spec.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+              <span>
+                Full Copy writes unmasked production data to your local/dev destination. Only enrolled localhost non-production databases are allowed.
+              </span>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={fullReplace} onCheckedChange={(v) => setFullReplace(Boolean(v))} />
+              <span>Replace existing tables in destination (DROP &amp; recreate)</span>
+            </label>
+
+            <div className="space-y-2">
+              <Label htmlFor="fullcopy-confirm">Confirm Destination Database Name</Label>
+              <Input
+                id="fullcopy-confirm"
+                placeholder={destConn ? `Type ${destConn.database}` : "Select a destination connection first"}
+                value={fullConfirmDb}
+                onChange={(e) => setFullConfirmDb(e.target.value)}
+              />
+            </div>
+
+            <Button
+              type="button"
+              disabled={busy || !sourceConn || !destConn || fullConfirmDb.trim() !== destConn?.database}
+              onClick={handleFullCopy}
+            >
+              <DatabaseBackup className="mr-2 h-4 w-4" />
+              {busy ? "Copying Database..." : "Run Full Copy"}
+            </Button>
+
+            {fullCopyReport && (
+              <pre className="rounded bg-muted p-3 text-xs overflow-auto" data-testid="full-copy-report">
+                {JSON.stringify(fullCopyReport, null, 2)}
+              </pre>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>2. Safe Sync Specification &amp; Dry-Run Plan</CardTitle>
           <CardDescription>Define subset root, row bounds, and masking policy in YAML or JSON.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -417,6 +528,8 @@ export default function SafeSyncPage() {
           )}
         </CardContent>
       </Card>
+        </>
+      )}
     </div>
   );
 }

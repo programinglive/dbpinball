@@ -132,6 +132,15 @@ pub enum SafeSyncCommand {
     },
     /// Rotate the masking key. Invalidates every existing plan and destination.
     KeyRotate,
+    /// Copy full schema and rows from source to a verified local destination.
+    FullCopy {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        destination: String,
+        #[arg(long)]
+        replace: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
