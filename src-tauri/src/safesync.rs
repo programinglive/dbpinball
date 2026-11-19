@@ -136,6 +136,24 @@ pub async fn status(run_id: String, destination: DbConnection) -> Result<RunStat
     .map_err(safe_error)
 }
 
+pub async fn full_copy(
+    source: DbConnection,
+    destination: DbConnection,
+    replace: bool,
+) -> Result<dbpinball_core::safesync::FullCopyReport, String> {
+    let enrollments = enrollment_store()?;
+    dbpinball_core::safesync::full_copy(
+        &source,
+        &destination,
+        &KeyringCredentialProvider,
+        &enrollments,
+        now_ms(),
+        replace,
+    )
+    .await
+    .map_err(safe_error)
+}
+
 fn parse_spec(raw: &str) -> Result<SafeSyncSpec, CoreError> {
     let trimmed = raw.trim();
     if trimmed.starts_with('{') {
