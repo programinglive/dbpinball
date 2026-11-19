@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import type { DbConnection, SshTunnelConfig } from "@/pages/connections.types";
+import type { DbConnection, SshTunnelConfig, TargetClass } from "@/pages/connections.types";
 
 interface ConnectionDialogProps {
   open: boolean;
@@ -124,8 +124,8 @@ export default function ConnectionDialog(props: ConnectionDialogProps) {
               </div>
             </div>
 
-            <div className="connection-form__row connection-form__row--single">
-              <div className="connection-field">
+            <div className="connection-form__row">
+              <div className="connection-field connection-field--grow">
                 <Label htmlFor="database">Database</Label>
                 <Input
                   id="database"
@@ -134,6 +134,23 @@ export default function ConnectionDialog(props: ConnectionDialogProps) {
                   className="connection-input"
                   onChange={(e) => handleFieldChange({ database: e.target.value })}
                 />
+              </div>
+              <div className="connection-field connection-field--slim">
+                <Label htmlFor="target">Target</Label>
+                <Select
+                  value={formData.target || "local"}
+                  onValueChange={(v) => handleFieldChange({ target: v as TargetClass })}
+                >
+                  <SelectTrigger id="target" className="connection-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">Local</SelectItem>
+                    <SelectItem value="staging">Staging</SelectItem>
+                    <SelectItem value="production">Production</SelectItem>
+                    <SelectItem value="unknown">Unknown</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </section>
@@ -173,14 +190,17 @@ export default function ConnectionDialog(props: ConnectionDialogProps) {
 
           <section className="connection-form__section">
             <header className="connection-form__section-header">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex w-full items-center justify-between gap-3">
                 <div>
                   <h3 className="connection-form__section-title">SSH Tunnel</h3>
                   <p className="connection-form__section-description">
                     Forward a local port through an SSH bastion before connecting.
                   </p>
                 </div>
-                <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                <label
+                  htmlFor="ssh-enabled"
+                  className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer whitespace-nowrap shrink-0"
+                >
                   <input
                     id="ssh-enabled"
                     type="checkbox"
