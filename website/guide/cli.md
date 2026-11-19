@@ -44,6 +44,9 @@ dbpinball connections test <id>
 dbpinball connections remove <id> [--yes]
 dbpinball connections import <file>
 dbpinball schema inspect --connection <id> [--database <db>]
+dbpinball security enroll <id> --category development
+dbpinball safe-sync key-rotate
+dbpinball safe-sync full-copy --source <src> --destination <dst> [--replace]
 ```
 
 ## JSON output
@@ -89,8 +92,7 @@ dbpinball connections remove "$(dbpinball connections list --json | jq -r '.conn
 
 ## What the CLI does not do
 
-- It does not run backups, restores or copies.
-- It does not implement Safe Sync.
-- It does not print passwords.
+- It does not print passwords or store plaintext secrets on disk.
+- It refuses to write to production or SSH-tunneled destinations during Safe Sync or Full Copy.
 
 See the [CLI reference](/reference/cli) for the exact flags of every command.
