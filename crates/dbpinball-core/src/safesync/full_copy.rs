@@ -29,6 +29,18 @@ pub struct FullCopyTableResult {
     pub rows_copied: u64,
 }
 
+/// Live progress snapshot emitted during [`full_copy_with_progress`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FullCopyProgress {
+    pub phase: String,
+    pub current_table: String,
+    pub tables_done: usize,
+    pub total_tables: usize,
+    pub rows_copied: u64,
+    pub percent: u8,
+}
+
 /// Summary report returned by [`full_copy`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +70,23 @@ pub async fn full_copy(
     now_ms: u64,
     replace: bool,
 ) -> Result<FullCopyReport, CoreError> {
+    full_copy_with_progress(source, destination, credentials, enrollments, now_ms, replace, |_| {}).await
+}
+
+/// Copy all base tables (schema and rows) from `source` to `destination`,
+/// invoking `on_progress` as tables and batches are copied.
+pub async fn full_copy_with_progress<F>(
+    source: &DbConnection,
+    destination: &DbConnection,
+    credentials: &dyn CredentialProvider,
+    enrollments: &EnrollmentStore,
+    now_ms: u64,
+    replace: bool,
+    mut on_progress: F,
+) -> Result<FullCopyReport, CoreError>
+where
+    F: FnMut(FullCopyProgress) + Send,
+{
     assert_same_engine(source, destination)?;
 
     if destination.ssh_tunnel.as_ref().is_some_and(|t| t.enabled) {
@@ -91,15 +120,24 @@ pub async fn full_copy(
 
     let tables = match source.engine {
         DbEngine::Mysql => {
-            copy_mysql(&mut source_session, &mut destination_session, replace).await?
+            copy_mysql(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
         }
         DbEngine::Postgres => {
-            copy_postgres(&mut source_session, &mut destination_session, replace).await?
+            copy_postgres(&mut source_session, &mut destination_session, replace, &mut on_progress).await?
         }
     };
 
     let rows_copied = tables.iter().map(|t| t.rows_copied).sum();
     let tables_copied = tables.len();
+
+    on_progress(FullCopyProgress {
+        phase: "completed".to_string(),
+        current_table: String::new(),
+        tables_done: tables_copied,
+        total_tables: tables_copied,
+        rows_copied,
+        percent: 100,
+    });
 
     let _ = source_session.rollback().await;
 
@@ -182,11 +220,15 @@ struct MysqlColumn {
     is_binary: bool,
 }
 
-async fn copy_mysql(
+async fn copy_mysql<F>(
     source_session: &mut BoundSession,
     destination_session: &mut BoundSession,
     replace: bool,
-) -> Result<Vec<FullCopyTableResult>, CoreError> {
+    on_progress: &mut F,
+) -> Result<Vec<FullCopyTableResult>, CoreError>
+where
+    F: FnMut(FullCopyProgress) + Send,
+{
     let table_names: Vec<String> = {
         let conn = source_session.mysql_connection()?;
         sqlx::query_scalar(
@@ -198,6 +240,17 @@ async fn copy_mysql(
         .await
         .map_err(|e| database_error(ErrorCode::Operation, "list MySQL tables", "full_copy_list_failed", e))?
     };
+
+    let total_tables = table_names.len();
+    let mut total_rows: u64 = 0;
+    on_progress(FullCopyProgress {
+        phase: "discovering".to_string(),
+        current_table: String::new(),
+        tables_done: 0,
+        total_tables,
+        rows_copied: 0,
+        percent: 0,
+    });
 
     {
         let dst = destination_session.mysql_connection()?;
@@ -213,8 +266,21 @@ async fn copy_mysql(
 
     let mut results = Vec::with_capacity(table_names.len());
 
-    for table in table_names {
+    for (table_idx, table) in table_names.into_iter().enumerate() {
         let q_table = q_mysql(&table);
+        let percent = if total_tables == 0 {
+            0
+        } else {
+            ((table_idx * 100) / total_tables).min(99) as u8
+        };
+        on_progress(FullCopyProgress {
+            phase: "copying".to_string(),
+            current_table: table.clone(),
+            tables_done: table_idx,
+            total_tables,
+            rows_copied: total_rows,
+            percent,
+        });
         let create_sql: String = {
             let src = source_session.mysql_connection()?;
             let row = sqlx::query(&format!("SHOW CREATE TABLE {q_table}"))
@@ -411,7 +477,16 @@ async fn copy_mysql(
             }
 
             table_rows += batch_len as u64;
+            total_rows += batch_len as u64;
             offset += batch_len;
+            on_progress(FullCopyProgress {
+                phase: "copying".to_string(),
+                current_table: table.clone(),
+                tables_done: table_idx,
+                total_tables,
+                rows_copied: total_rows,
+                percent,
+            });
             if batch_len < BATCH_SIZE {
                 break;
             }
@@ -440,11 +515,15 @@ struct PgColumn {
     is_bytea: bool,
 }
 
-async fn copy_postgres(
+async fn copy_postgres<F>(
     source_session: &mut BoundSession,
     destination_session: &mut BoundSession,
     replace: bool,
-) -> Result<Vec<FullCopyTableResult>, CoreError> {
+    on_progress: &mut F,
+) -> Result<Vec<FullCopyTableResult>, CoreError>
+where
+    F: FnMut(FullCopyProgress) + Send,
+{
     let tables: Vec<(String, String)> = {
         let src = source_session.pg_connection()?;
         let rows = sqlx::query(
@@ -463,11 +542,35 @@ async fn copy_postgres(
             .collect()
     };
 
-    let mut results = Vec::with_capacity(tables.len());
+    let total_tables = tables.len();
+    let mut total_rows: u64 = 0;
+    on_progress(FullCopyProgress {
+        phase: "discovering".to_string(),
+        current_table: String::new(),
+        tables_done: 0,
+        total_tables,
+        rows_copied: 0,
+        percent: 0,
+    });
 
-    for (schema, table) in tables {
+    let mut results = Vec::with_capacity(total_tables);
+
+    for (table_idx, (schema, table)) in tables.into_iter().enumerate() {
         let full_name = format!("{}.{}", q_pg(&schema), q_pg(&table));
         let display_name = format!("{schema}.{table}");
+        let percent = if total_tables == 0 {
+            0
+        } else {
+            ((table_idx * 100) / total_tables).min(99) as u8
+        };
+        on_progress(FullCopyProgress {
+            phase: "copying".to_string(),
+            current_table: display_name.clone(),
+            tables_done: table_idx,
+            total_tables,
+            rows_copied: total_rows,
+            percent,
+        });
 
         let columns: Vec<PgColumn> = {
             let src = source_session.pg_connection()?;
@@ -652,7 +755,16 @@ async fn copy_postgres(
             }
 
             table_rows += batch_len as u64;
+            total_rows += batch_len as u64;
             offset += batch_len;
+            on_progress(FullCopyProgress {
+                phase: "copying".to_string(),
+                current_table: display_name.clone(),
+                tables_done: table_idx,
+                total_tables,
+                rows_copied: total_rows,
+                percent,
+            });
             if batch_len < BATCH_SIZE {
                 break;
             }

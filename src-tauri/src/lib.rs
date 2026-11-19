@@ -4,6 +4,7 @@ mod runners;
 mod safesync;
 mod secrets;
 mod security;
+mod updater;
 
 use dbpinball_core::store::{ImportReport, MigrationStatus};
 use models::*;
@@ -212,11 +213,26 @@ async fn safe_sync_status(
 
 #[tauri::command]
 async fn safe_sync_full_copy(
+    app: tauri::AppHandle,
     source: DbConnection,
     destination: DbConnection,
     replace: bool,
 ) -> Result<dbpinball_core::safesync::FullCopyReport, String> {
-    safesync::full_copy(source, destination, replace).await
+    safesync::full_copy(app, source, destination, replace).await
+}
+
+#[tauri::command]
+async fn check_for_update() -> Result<updater::UpdateCheckResult, String> {
+    updater::check_for_update().await
+}
+
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    download_url: String,
+    asset_name: String,
+) -> Result<(), String> {
+    updater::install_update(app, download_url, asset_name).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -249,7 +265,9 @@ pub fn run() {
             safe_sync_validate,
             safe_sync_execute,
             safe_sync_status,
-            safe_sync_full_copy
+            safe_sync_full_copy,
+            check_for_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

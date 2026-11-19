@@ -8,6 +8,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
+
 const CONNECTIONS = [
   {
     id: "src_1",
@@ -159,6 +163,7 @@ describe("SafeSyncPage", () => {
 
     fireEvent.click(runBtn);
     await waitFor(() => {
+      expect(screen.getByTestId("full-copy-progress")).toBeInTheDocument();
       expect(screen.getByTestId("full-copy-report")).toHaveTextContent("ministry_local");
       expect(screen.getByTestId("full-copy-report")).toHaveTextContent('"tablesCopied": 3');
     });

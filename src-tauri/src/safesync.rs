@@ -137,18 +137,23 @@ pub async fn status(run_id: String, destination: DbConnection) -> Result<RunStat
 }
 
 pub async fn full_copy(
+    app: tauri::AppHandle,
     source: DbConnection,
     destination: DbConnection,
     replace: bool,
 ) -> Result<dbpinball_core::safesync::FullCopyReport, String> {
+    use tauri::Emitter;
     let enrollments = enrollment_store()?;
-    dbpinball_core::safesync::full_copy(
+    dbpinball_core::safesync::full_copy_with_progress(
         &source,
         &destination,
         &KeyringCredentialProvider,
         &enrollments,
         now_ms(),
         replace,
+        |progress| {
+            let _ = app.emit("safesync-full-copy-progress", &progress);
+        },
     )
     .await
     .map_err(safe_error)

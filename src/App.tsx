@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { BrowserRouter as Router } from "react-router-dom";
+import { invoke } from "@tauri-apps/api/core";
 import ConnectionsPage, { type ConnectionsPageHandle } from "@/pages/connections";
 import SafeSyncPage from "@/pages/safesync";
 import {
@@ -8,8 +9,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Database, Plus, Search, ShieldCheck } from "lucide-react";
+import { Database, Download, Plus, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import "./App.css";
+
+interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  downloadUrl?: string | null;
+  assetName?: string | null;
+}
 
 const Panel = ({ children }: { children: ReactNode }) => <section className="panel">{children}</section>;
 
@@ -18,6 +28,46 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [activeView, setActiveView] = useState<"connections" | "safesync">("connections");
   const [searchQuery, setSearchQuery] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "upToDate" | "available" | "installing" | "error">("idle");
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string>("");
+
+  const handleUpdateClick = async () => {
+    if (updateStatus === "available" && updateInfo?.downloadUrl && updateInfo?.assetName) {
+      setUpdateStatus("installing");
+      setUpdateMessage(`Downloading v${updateInfo.latestVersion}...`);
+      try {
+        await invoke("install_update", {
+          downloadUrl: updateInfo.downloadUrl,
+          assetName: updateInfo.assetName,
+        });
+      } catch (err) {
+        setUpdateStatus("error");
+        setUpdateMessage(String(err));
+      }
+      return;
+    }
+
+    setUpdateStatus("checking");
+    setUpdateMessage("");
+    try {
+      const result = await invoke<UpdateCheckResult>("check_for_update");
+      setUpdateInfo(result);
+      if (result.updateAvailable && result.downloadUrl && result.assetName) {
+        setUpdateStatus("available");
+        setUpdateMessage(`Update v${result.latestVersion} ready`);
+      } else if (result.updateAvailable) {
+        setUpdateStatus("upToDate");
+        setUpdateMessage(`v${result.latestVersion} on GitHub`);
+      } else {
+        setUpdateStatus("upToDate");
+        setUpdateMessage(`Up to date (v${result.currentVersion})`);
+      }
+    } catch (err) {
+      setUpdateStatus("error");
+      setUpdateMessage(String(err));
+    }
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -71,6 +121,35 @@ function App() {
             </div>
 
             <div className="nav-rail__footer">
+              <button
+                type="button"
+                className="nav-rail__action"
+                aria-label="Check for updates"
+                disabled={updateStatus === "checking" || updateStatus === "installing"}
+                onClick={handleUpdateClick}
+                data-tauri-drag-region="false"
+                title={updateMessage || "Check GitHub Releases for a newer version"}
+              >
+                {updateStatus === "available" || updateStatus === "installing" ? (
+                  <Download size={15} />
+                ) : (
+                  <RefreshCw size={15} className={updateStatus === "checking" ? "animate-spin" : ""} />
+                )}
+                <span>
+                  {updateStatus === "checking"
+                    ? "Checking..."
+                    : updateStatus === "installing"
+                      ? "Updating..."
+                      : updateStatus === "available" && updateInfo
+                        ? `Update v${updateInfo.latestVersion}`
+                        : "Check Updates"}
+                </span>
+              </button>
+              {updateMessage && (
+                <p className="px-1 text-[11px] leading-tight text-slate-400 truncate" title={updateMessage}>
+                  {updateMessage}
+                </p>
+              )}
               <button
                 type="button"
                 className="nav-rail__action nav-rail__action--primary"
