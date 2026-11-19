@@ -35,6 +35,12 @@ Add a profile. The password is read from stdin.
 | `--username` | yes | Database user |
 | `--target` | no | `production`, `staging`, `local`, `unknown` (default `unknown`) |
 | `--use-ssl` | no | Store the SSL preference |
+| `--ssh-tunnel` | no | Connect through an SSH bastion tunnel |
+| `--ssh-host` | no | SSH bastion hostname (required with `--ssh-tunnel`) |
+| `--ssh-port` | no | SSH bastion port (default `22`) |
+| `--ssh-user` | no | SSH bastion username (required with `--ssh-tunnel`) |
+| `--ssh-key` | no | Path to the SSH private key file |
+| `--ssh-strict-host-key` | no | Require strict SSH host key verification |
 
 ```bash
 dbpinball connections add --name local --engine postgres \
@@ -73,8 +79,27 @@ dbpinball schema inspect --connection <id> --database app
 
 ## `dbpinball safe-sync`
 
-Run the PostgreSQL Safe Sync workflow (`inspect`, `plan`, `validate`, `execute`,
-`status`, `key rotate`). Root selection filters accept `eq`, `in` (up to 100
+Run the Safe Sync workflow (`inspect`, `plan`, `validate`, `execute`, `status`,
+`key-rotate`, `full-copy`) for PostgreSQL and MySQL/MariaDB.
+
+### `dbpinball safe-sync full-copy`
+
+Copy all base tables (schema and rows) from a read-only source connection into an
+enrolled `development` local destination without requiring a YAML selection spec:
+
+```bash
+dbpinball safe-sync full-copy --source <source-id> --destination <dest-id> --replace --json
+```
+
+### `dbpinball safe-sync key-rotate`
+
+Initialize or rotate the Safe Sync masking key in the OS keyring:
+
+```bash
+dbpinball safe-sync key-rotate --json
+```
+
+Root selection filters in `plan` accept `eq`, `in` (up to 100
 values) and inclusive typed range bounds `gte` and `lte` (up to 8 predicates per
 root, combined with `AND`) on `smallint`, `integer`, `bigint`,
 `numeric`/`decimal`, `date`, `timestamp without time zone`, and

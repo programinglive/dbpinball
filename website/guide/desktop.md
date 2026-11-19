@@ -19,6 +19,27 @@ Double-click a connection (or use the context menu) to open the workspace. It
 lists databases on the server, lists tables in the selected database, and runs
 SQL with results rendered in a grid.
 
+## Safe Sync &amp; Full Copy
+
+Open **Safe Sync** from the left sidebar to copy data from a read-only source
+into an enrolled local development database (`127.0.0.1` / `localhost`,
+non-production, without SSH tunnel):
+
+- **Subset Sync (Masked):** Define a YAML or JSON root selection, generate and
+  validate a dry-run plan, then execute with explicit `plan_fingerprint`
+  acknowledgement.
+- **Full Copy:** Copy all base tables (schema and rows) from a MySQL/MariaDB or
+  PostgreSQL source into an enrolled local destination with a live progress bar,
+  table counter, and row counter.
+
+## Built-in SSH Tunnel &amp; In-App Updates
+
+- **SSH Tunnel:** Each connection can optionally forward a local port through an
+  SSH bastion using `ssh` and your local private key (for example
+  `~/.ssh/id_ed25519`).
+- **Check Updates:** Use the **Check Updates** button in the bottom-left sidebar
+  to check GitHub Releases for a newer version and launch the installer directly.
+
 ## What the desktop stores
 
 The desktop no longer uses browser `localStorage` as its source of truth. It
