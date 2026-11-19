@@ -80,12 +80,12 @@ not implemented.
 
 ### Windows 10/11 (x64)
 
-1. Download `dbpinball_0.1.7_x64-setup.exe` from the
+1. Download `dbpinball_0.1.8_x64-setup.exe` from the
    [latest release](https://github.com/programinglive/dbpinball/releases/latest).
 2. Run it. It installs for the current user, so it does not ask for
    administrator rights, and it creates a Start Menu entry and an uninstaller.
 
-The CLI is a separate download. Extract `dbpinball-cli-0.1.7-x64.zip` and run:
+The CLI is a separate download. Extract `dbpinball-cli-0.1.8-x64.zip` and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-cli.ps1
@@ -97,15 +97,15 @@ That installs to `%LOCALAPPDATA%\dbpinball\bin` and adds the folder to your user
 ### Linux (x64)
 
 ```bash
-sudo apt install ./dbpinball_0.1.7_amd64.deb
+sudo apt install ./dbpinball_0.1.8_amd64.deb
 # or run the AppImage without installing
-chmod +x dbpinball_0.1.7_amd64.AppImage && ./dbpinball_0.1.7_amd64.AppImage
+chmod +x dbpinball_0.1.8_amd64.AppImage && ./dbpinball_0.1.8_amd64.AppImage
 ```
 
 The CLI tarball contains a single binary:
 
 ```bash
-tar -xzf dbpinball-cli-0.1.7-x64-linux.tar.gz
+tar -xzf dbpinball-cli-0.1.8-x64-linux.tar.gz
 sudo install -m 0755 dbpinball /usr/local/bin/dbpinball
 ```
 
@@ -200,7 +200,7 @@ masking, destination verification) need a test that proves the control.
 
 ## Project status
 
-Pre-1.0. The latest release is **v0.1.7**. The core, CLI and desktop surfaces are
+Pre-1.0. The latest release is **v0.1.8**. The core, CLI and desktop surfaces are
 implemented and tested; the limitations above are known and documented rather
 than hidden. Interfaces may change before 1.0.
 

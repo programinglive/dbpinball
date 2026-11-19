@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "dbpinball"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "dbpinball-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "clap",
  "dbpinball-core",
@@ -1049,6 +1049,7 @@ name = "dbpinball-core"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "futures-util",
  "getrandom 0.2.17",
  "hmac",
  "keyring",

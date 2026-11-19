@@ -30,7 +30,9 @@ pub mod spec;
 pub mod typed;
 
 pub use audit::{AuditRecord, TableAudit};
-pub use full_copy::{full_copy, full_copy_with_progress, FullCopyProgress, FullCopyReport, FullCopyTableResult};
+pub use full_copy::{
+    full_copy, full_copy_with_progress, FullCopyProgress, FullCopyReport, FullCopyTableResult,
+};
 pub use graph::{
     discover_parents, inspect_table, ColumnInfo, ForeignKeyEdge, SchemaGraph, TableInfo,
 };
