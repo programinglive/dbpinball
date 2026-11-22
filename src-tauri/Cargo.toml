@@ -30,7 +30,7 @@ anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 async-compression = { version = "0.4", features = ["tokio", "deflate"] }
-keyring = "2"
+keyring = "4"
 which = "8"
 dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
